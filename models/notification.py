@@ -33,6 +33,7 @@ from odoo import tools
 
 from . import versions
 from .versions import *
+from .meli_webhook_security import safe_meli_resource_path
 
 import hashlib
 import random
@@ -213,7 +214,13 @@ class MercadolibreNotification(models.Model):
             noti.processing_started = ml_datetime(str(datetime.now()))
 
             try:
-                questions = meli.get(""+str(noti.resource), {'access_token':meli.access_token} )
+                safe_resource = safe_meli_resource_path(noti.resource, allowed_prefixes=("/questions/",))
+                if not safe_resource:
+                    noti.state = 'FAILED'
+                    noti.processing_errors = "Unsafe or invalid webhook resource rejected: %s" % str(noti.resource)
+                    _logger.warning("Rejected unsafe question notification resource: %s", str(noti.resource))
+                    continue
+                questions = meli.get(safe_resource, {'access_token':meli.access_token} )
                 qjson =  questions.json()
                 if ('error' in qjson):
                     noti.state = 'FAILED'
@@ -253,7 +260,13 @@ class MercadolibreNotification(models.Model):
             noti.processing_started = ml_datetime(str(datetime.now()))
 
             try:
-                res = meli.get(""+str(noti.resource), {'access_token':meli.access_token} )
+                safe_resource = safe_meli_resource_path(noti.resource, allowed_prefixes=("/orders/",))
+                if not safe_resource:
+                    noti.state = 'FAILED'
+                    noti.processing_errors = "Unsafe or invalid webhook resource rejected: %s" % str(noti.resource)
+                    _logger.warning("Rejected unsafe order notification resource: %s", str(noti.resource))
+                    continue
+                res = meli.get(safe_resource, {'access_token':meli.access_token} )
                 ojson =  res.json()
                 _logger.info(ojson)
 
@@ -306,10 +319,11 @@ class MercadolibreNotification(models.Model):
 
             try:
                 # Resource format: /items/MLA123456789
-                resource = str(noti.resource)
-                if not resource.startswith('/items/'):
+                resource = safe_meli_resource_path(noti.resource, allowed_prefixes=("/items/",))
+                if not resource:
                     noti.state = 'FAILED'
-                    noti.processing_errors = f"Invalid item resource format: {resource}"
+                    noti.processing_errors = f"Unsafe or invalid item resource rejected: {str(noti.resource)}"
+                    _logger.warning("Rejected unsafe item notification resource: %s", str(noti.resource))
                     continue
 
                 meli_id = resource.replace('/items/', '')
