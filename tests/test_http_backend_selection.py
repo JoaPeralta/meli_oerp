@@ -9,6 +9,9 @@ No network, no credentials.
 """
 
 import os
+from unittest.mock import patch
+
+import odoo.tools
 
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
@@ -17,6 +20,32 @@ from odoo.addons.meli_oerp.models import versions, meli_util
 
 # The exact SDK commit pinned in requirements.txt for reproducibility.
 _SDK_PIN = "70fc5c0252c4414580e6dd42610acb606b193b09"
+
+_ENV_KEY = "MELI_OERP_HTTP_BACKEND"
+_CONF_KEY = "meli_oerp_http_backend"
+
+
+def _patch_conf(conf_value):
+    """Patch the odoo.conf lookup so it returns ``conf_value`` for our key and
+    delegates every other key to the real config."""
+    real_get = odoo.tools.config.get
+
+    def fake_get(key, default=None):
+        if key == _CONF_KEY:
+            return conf_value
+        return real_get(key, default)
+
+    return patch.object(odoo.tools.config, "get", side_effect=fake_get)
+
+
+def _patch_env(env_value):
+    """Patch os.environ so MELI_OERP_HTTP_BACKEND is set to ``env_value`` or,
+    when None, guaranteed absent."""
+    new_env = dict(os.environ)
+    new_env.pop(_ENV_KEY, None)
+    if env_value is not None:
+        new_env[_ENV_KEY] = env_value
+    return patch.dict(os.environ, new_env, clear=True)
 
 
 @tagged("post_install", "-at_install")
@@ -81,6 +110,38 @@ class TestHttpBackendSelection(TransactionCase):
         backend = versions.normalize_http_backend("something-weird")
         self.assertEqual(backend, "nosdk")
         self.assertFalse(versions.resolve_use_sdk(backend, True))
+
+    # ---- real reading of env / odoo.conf + precedence -------------------
+    #
+    # These exercise _read_http_backend_setting() itself (not just the pure
+    # helpers): the actual reads of the MELI_OERP_HTTP_BACKEND env var and the
+    # meli_oerp_http_backend odoo.conf key, plus their precedence.
+
+    def test_read_no_config_no_env_is_nosdk(self):
+        with _patch_conf(None), _patch_env(None):
+            self.assertEqual(versions._read_http_backend_setting(), "nosdk")
+
+    def test_read_env_nosdk(self):
+        with _patch_conf(None), _patch_env("nosdk"):
+            self.assertEqual(versions._read_http_backend_setting(), "nosdk")
+
+    def test_read_env_sdk_resolves_to_sdk_when_available(self):
+        with _patch_conf(None), _patch_env("sdk"):
+            backend = versions._read_http_backend_setting()
+        self.assertEqual(backend, "sdk")
+        # The env value alone selects 'sdk'; the effective USE_MELI_SDK still
+        # depends on the package being available.
+        self.assertTrue(versions.resolve_use_sdk(backend, True))
+        self.assertFalse(versions.resolve_use_sdk(backend, False))
+
+    def test_read_conf_takes_precedence_over_env(self):
+        # odoo.conf=sdk must win over env=nosdk (config is read first).
+        with _patch_conf("sdk"), _patch_env("nosdk"):
+            self.assertEqual(versions._read_http_backend_setting(), "sdk")
+
+    def test_read_invalid_env_falls_back_to_nosdk(self):
+        with _patch_conf(None), _patch_env("garbage"):
+            self.assertEqual(versions._read_http_backend_setting(), "nosdk")
 
     # ---- 8: requirements.txt commit pin ---------------------------------
 
