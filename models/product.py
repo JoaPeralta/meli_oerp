@@ -1395,9 +1395,9 @@ class product_product(models.Model):
                             pass;
 
         else:
-            if (product_template.lst_price<=1.0):
-                _logger.info("_meli_set_product_price lst_price<1.0: "+str(ml_price_converted))
-                product_template.write({'lst_price': ml_price_converted})
+            if (product_template.list_price<=1.0):
+                _logger.info("_meli_set_product_price list_price<1.0: "+str(ml_price_converted))
+                product_template.write({'list_price': ml_price_converted})
 
     def set_meli_price( self, meli=None, config=None, plist=None ):
         company = self.env.user.company_id
