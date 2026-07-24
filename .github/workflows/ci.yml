@@ -1,0 +1,87 @@
+name: CI
+
+# Disposable, isolated CI for the fork: installs meli_oerp into a real Odoo 19
+# instance backed by a throwaway PostgreSQL, then runs the module test suite.
+# No MercadoLibre credentials and no real MercadoLibre network calls are used;
+# the security tests rely on a pure validator and a fake API client.
+
+on:
+  push:
+    branches: [ "19.0" ]
+  pull_request:
+    branches: [ "19.0" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # The odoo:19.0 image ships with a non-root default user (odoo). apt-get and
+    # system-wide pip need root, so the job container is run as root. This is a
+    # workflow-level concern only: the module itself is never modified for CI.
+    container:
+      image: odoo:19.0
+      options: --user root
+
+    services:
+      db:
+        image: postgres:16
+        env:
+          POSTGRES_USER: odoo
+          POSTGRES_PASSWORD: odoo
+          POSTGRES_DB: postgres
+        options: >-
+          --health-cmd "pg_isready -U odoo"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      # git and poppler-utils must exist inside the container BEFORE checkout
+      # (checkout clones with the container's git) and before installing deps
+      # (the SDK is a git+https requirement; pdf2image needs poppler).
+      - name: Install system prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git poppler-utils python3-pip
+
+      # This repo IS the module, so check it out into a directory named
+      # "meli_oerp" and expose that directory as an extra addons path.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          path: meli_oerp
+
+      # Install the module dependencies EXACTLY as declared upstream.
+      # Option (a): no silent tolerance. If the git SDK dependency fails to
+      # install, this step fails and the whole CI goes red on purpose, so the
+      # dependency/reproducibility problem is surfaced rather than hidden.
+      - name: Install meli_oerp dependencies (requirements.txt as-is)
+        run: |
+          echo "---- requirements.txt ----"
+          cat meli_oerp/requirements.txt
+          echo "--------------------------"
+          pip3 install --break-system-packages -r meli_oerp/requirements.txt
+
+      # Symlink the module into the image's default extra-addons directory,
+      # which is already part of the shipped odoo.conf addons_path (together
+      # with the base addons), so we do not have to hardcode the base path.
+      - name: Expose module to Odoo
+        run: |
+          ln -sfn "$GITHUB_WORKSPACE/meli_oerp" /mnt/extra-addons/meli_oerp
+          ls -l /mnt/extra-addons/
+
+      # Fresh disposable database, install the module and run its tests.
+      # Odoo returns a non-zero exit code on test failure with --stop-after-init,
+      # so a failing test turns the CI red.
+      - name: Install module and run tests
+        run: |
+          odoo \
+            -c /etc/odoo/odoo.conf \
+            -d meli_oerp_test_pr2 \
+            --db_host=db --db_user=odoo --db_password=odoo \
+            -i meli_oerp \
+            --test-enable \
+            --test-tags=/meli_oerp \
+            --without-demo=all \
+            --log-level=test \
+            --stop-after-init
