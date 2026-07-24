@@ -2,6 +2,7 @@
 from dateutil.parser import *
 from datetime import *
 
+import os
 import unicodedata
 import logging
 _logger = logging.getLogger(__name__)
@@ -162,29 +163,69 @@ search_partner_vat_match = False
 mercadolibre_shipment_print_guide_mode = "pdf"
 
 # ---------------------------------------------------------------------------
-# Detectar si el SDK de MercadoLibre (paquete "meli") está disponible
-# USE_MELI_SDK controla qué backend usa MeliApi:
-#   True  → usa meli.RestClientApi + meli.OAuth20Api  (SDK oficial)
-#   False → usa requests directo (sin dependencias externas)
+# HTTP backend selection (deterministic).
 #
-# Se puede forzar manualmente:
-#   from odoo.addons.meli_oerp.models import versions
-#   versions.USE_MELI_SDK = True   # forzar SDK
-#   versions.USE_MELI_SDK = False  # forzar requests
+# MELI_SDK_AVAILABLE is only a CAPABILITY PROBE: whether the optional `meli`
+# package can be imported. It does NOT decide which backend is used.
 # ---------------------------------------------------------------------------
 MELI_SDK_AVAILABLE = False
 try:
     import meli as _meli_sdk_probe
     MELI_SDK_AVAILABLE = True
-    _logger.info("meli SDK disponible")
+    _logger.info("meli SDK package available (capability probe only)")
 except ImportError:
-    _logger.info("meli SDK no disponible - Usando requests directo")
+    _logger.info("meli SDK package not installed")
 
-# Por defecto: usar SDK solo si está instalado
-USE_MELI_SDK = MELI_SDK_AVAILABLE
 
-#forzar NO SDK: comentar siguiente linea
-#USE_MELI_SDK = False
+# ---------------------------------------------------------------------------
+# USE_MELI_SDK controls which backend MeliApi uses:
+#   True  → legacy SDK backend (meli.RestClientApi + meli.OAuth20Api)
+#   False → requests-based MeliApiNoSDK  (the default)
+#
+# The choice is EXPLICIT and deterministic — it is never derived from whether
+# the `meli` package happens to be importable. Configure via (first match wins):
+#   1. odoo.conf  [options]  meli_oerp_http_backend = sdk | nosdk
+#   2. env var    MELI_OERP_HTTP_BACKEND = sdk | nosdk
+#   3. default: nosdk
+#
+# If "sdk" is requested but the package is not installed, we fall back to the
+# NoSDK backend and log a WARNING (never a silent change).
+# ---------------------------------------------------------------------------
+def normalize_http_backend(raw):
+    """Normalize a backend setting to 'sdk' or 'nosdk' (invalid -> 'nosdk')."""
+    val = str(raw or "").strip().lower()
+    return val if val in ("sdk", "nosdk") else "nosdk"
+
+
+def resolve_use_sdk(backend, sdk_available):
+    """Return True only when the SDK backend is explicitly requested AND the
+    `meli` package is available; otherwise False (use NoSDK)."""
+    return bool(backend == "sdk" and sdk_available)
+
+
+def _read_http_backend_setting():
+    raw = None
+    try:
+        from odoo.tools import config as _odoo_config
+        raw = _odoo_config.get("meli_oerp_http_backend")
+    except Exception:
+        raw = None
+    if not raw:
+        raw = os.environ.get("MELI_OERP_HTTP_BACKEND")
+    normalized = normalize_http_backend(raw)
+    if raw and str(raw).strip().lower() not in ("sdk", "nosdk"):
+        _logger.warning(
+            "meli_oerp: invalid HTTP backend setting %r; using 'nosdk'", raw)
+    return normalized
+
+
+HTTP_BACKEND = _read_http_backend_setting()
+USE_MELI_SDK = resolve_use_sdk(HTTP_BACKEND, MELI_SDK_AVAILABLE)
+if HTTP_BACKEND == "sdk" and not MELI_SDK_AVAILABLE:
+    _logger.warning(
+        "meli_oerp: the legacy SDK HTTP backend was requested "
+        "(meli_oerp_http_backend=sdk) but the 'meli' package is not installed; "
+        "falling back to the NoSDK requests backend.")
 
 # Detectar si unidecode está disponible
 UNIDECODE_AVAILABLE = False
