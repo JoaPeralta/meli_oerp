@@ -317,6 +317,16 @@ class sale_order(models.Model):
             else:
                 rec.meli_handling_limit_status = 'ok'
 
+    # Post-sale buyer messages reflejados desde la orden ML. Se relacionan vía
+    # meli_order (Many2one a mercadolibre.orders), NO vía meli_order_id (que en
+    # este modelo es un Char con el id de la orden, no una relación).
+    meli_unread_messages = fields.Integer(
+        string="Mensajes ML sin leer",
+        related="meli_order.meli_unread_messages", store=True, readonly=True)
+    meli_messages_link = fields.Char(
+        string="Mensajes en ML",
+        related="meli_order.meli_messages_link", readonly=True)
+
     def _ml_shipping_status(self):
 
         for ord in self:
