@@ -14,6 +14,11 @@ try:  # under the Odoo test runner
     from odoo.addons.meli_oerp.models.meli_webhook_security import (
         safe_meli_resource_path,
     )
+    # Inherit from Odoo's TransactionCase so the Odoo test runner tags this as a
+    # meli_oerp test and actually executes it under --test-tags=/meli_oerp.
+    # (A plain unittest.TestCase is untagged and would be skipped by that filter.)
+    from odoo.tests.common import TransactionCase as _TestBase
+    from odoo.tests import tagged
 except Exception:  # standalone (no Odoo available): load by file path
     import importlib.util
 
@@ -28,8 +33,16 @@ except Exception:  # standalone (no Odoo available): load by file path
     _spec.loader.exec_module(_mod)
     safe_meli_resource_path = _mod.safe_meli_resource_path
 
+    # No Odoo: fall back to a plain TestCase and a no-op tag decorator so the
+    # file still runs with `python tests/test_webhook_resource_security.py`.
+    _TestBase = unittest.TestCase
 
-class TestSafeMeliResourcePath(unittest.TestCase):
+    def tagged(*args, **kwargs):
+        return lambda cls: cls
+
+
+@tagged("post_install", "-at_install")
+class TestSafeMeliResourcePath(_TestBase):
 
     # --- legitimate relative resources are accepted, value preserved ---------
 
