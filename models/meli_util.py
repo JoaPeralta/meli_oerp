@@ -1038,11 +1038,11 @@ else:
 if _versions.USE_MELI_SDK and MeliApiSDK is not None:
     MeliApi = MeliApiSDK
     configuration = configuration_sdk
-    _logger.info("MeliApi: usando SDK (meli.RestClientApi)")
+    _logger.info("MeliApi: using legacy SDK HTTP backend")
 else:
     MeliApi = MeliApiNoSDK
     configuration = configuration_nosdk
-    _logger.info("MeliApi: usando requests directo (sin SDK)")
+    _logger.info("MeliApi: using NoSDK HTTP backend")
 
 
 # Flag de proceso: loguear UNA sola vez que se omite el refresh por neutralización
