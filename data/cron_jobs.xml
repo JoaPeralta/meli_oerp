@@ -4,7 +4,7 @@
 
 	<record id="ir_cron_module_get_meli_state" model="ir.cron">
 		<field name="name">Get Meli State</field>
-		<field name="active">True</field>
+		<field name="active" eval="False"/>
 		<field name="user_id" ref="base.user_root" />
 		<field name="interval_number">10</field>
 		<field name="interval_type">minutes</field>
@@ -16,7 +16,7 @@
 
 	<record id="ir_cron_module_cron_meli_process" model="ir.cron">
 		<field name="name">Cron Meli Process</field>
-		<field name="active">False</field>
+		<field name="active" eval="False"/>
 		<field name="user_id" ref="base.user_root" />
 		<field name="interval_number">30</field>
 		<field name="interval_type">minutes</field>
@@ -28,7 +28,7 @@
 
 	<record id="ir_cron_module_cron_meli_process_post_products" model="ir.cron">
 		<field name="name">Cron Meli Process Post Products</field>
-		<field name="active">True</field>
+		<field name="active" eval="False"/>
 		<field name="user_id" ref="base.user_root" />
 		<field name="interval_number">30</field>
 		<field name="interval_type">minutes</field>
@@ -40,7 +40,7 @@
 
 	<record id="ir_cron_module_cron_meli_process_get_products" model="ir.cron">
 		<field name="name">Cron Meli Process Get Products</field>
-		<field name="active">True</field>
+		<field name="active" eval="False"/>
 		<field name="user_id" ref="base.user_root" />
 		<field name="interval_number">30</field>
 		<field name="interval_type">minutes</field>
@@ -53,7 +53,7 @@
 
 	<record id="ir_cron_module_cron_meli_process_post_stock" model="ir.cron">
 		<field name="name">Cron Meli Process Post Stock</field>
-		<field name="active">True</field>
+		<field name="active" eval="False"/>
 		<field name="user_id" ref="base.user_root" />
 		<field name="interval_number">10</field>
 		<field name="interval_type">minutes</field>
@@ -65,7 +65,7 @@
 
 	<record id="ir_cron_module_cron_meli_process_post_stock_rt" model="ir.cron">
 		<field name="name">Cron Meli Process Post Stock RT</field>
-		<field name="active">True</field>
+		<field name="active" eval="False"/>
 		<field name="user_id" ref="base.user_root" />
 		<field name="interval_number">5</field>
 		<field name="interval_type">minutes</field>
@@ -77,7 +77,7 @@
 
 	<record id="ir_cron_module_cron_meli_process_post_price" model="ir.cron">
 		<field name="name">Cron Meli Process Post Price</field>
-		<field name="active">True</field>
+		<field name="active" eval="False"/>
 		<field name="user_id" ref="base.user_root" />
 		<field name="interval_number">120</field>
 		<field name="interval_type">minutes</field>
@@ -89,7 +89,7 @@
 
 	<record id="ir_cron_module_cron_meli_orders" model="ir.cron">
 		<field name="name">Cron Meli Orders</field>
-		<field name="active">True</field>
+		<field name="active" eval="False"/>
 		<field name="user_id" ref="base.user_root" />
 		<field name="interval_number">60</field>
 		<field name="interval_type">minutes</field>
@@ -101,7 +101,7 @@
 
 	<record id="ir_cron_module_cron_meli_questions" model="ir.cron">
 		<field name="name">Cron Meli Questions</field>
-		<field name="active">False</field>
+		<field name="active" eval="False"/>
 		<field name="user_id" ref="base.user_root" />
 		<field name="interval_number">60</field>
 		<field name="interval_type">minutes</field>
@@ -113,7 +113,7 @@
 
 	<record id="ir_cron_module_cron_meli_orders_status" model="ir.cron">
 		<field name="name">Cron Meli Orders Status Resync</field>
-		<field name="active">True</field>
+		<field name="active" eval="False"/>
 		<field name="user_id" ref="base.user_root" />
 		<field name="interval_number">30</field>
 		<field name="interval_type">minutes</field>
