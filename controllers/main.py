@@ -128,13 +128,18 @@ class MercadoLibreLogin(http.Controller):
             return "<h5>"+message+"</h5><br/>Retry (check your redirect_uri field in MercadoLibre company configuration, also the actual user and public user default company must be the same company ): <a href='"+meli.auth_url(redirect_URI=company.mercadolibre_redirect_uri)+"'>Login</a>"
 
         if codes['code']!='none':
-            _logger.info( "Meli: Authorize: REDIRECT_URI: %s, code: %s" % ( company.mercadolibre_redirect_uri, codes['code'] ) )
+            # Do NOT log the authorization code: it is a short-lived OAuth secret
+            # that can be exchanged for access/refresh tokens.
+            _logger.info( "Meli: Authorize: REDIRECT_URI: %s, authorization code received", company.mercadolibre_redirect_uri )
             resp = meli.authorize( codes['code'], company.mercadolibre_redirect_uri)
             company.write( { 'mercadolibre_access_token': meli.access_token,
                              'mercadolibre_refresh_token': meli.refresh_token,
                              'mercadolibre_code': codes['code'],
                              'mercadolibre_cron_refresh': True } )
-            return 'LOGGED WITH CODE: %s <br>ACCESS_TOKEN: %s <br>REFRESH_TOKEN: %s <br>MercadoLibre Publisher for Odoo - Copyright Moldeo Interactive <br><a href="javascript:window.history.go(-2);">Volver a Odoo</a> <script>window.history.go(-2)</script>' % ( codes['code'], meli.access_token, meli.refresh_token )
+            # Never render the authorization code, access token or refresh token
+            # in the response: they are stored server-side on res.company above.
+            # Only a neutral success confirmation is returned.
+            return 'MercadoLibre authorization completed successfully. You can close this window.<br>MercadoLibre Publisher for Odoo - Copyright Moldeo Interactive <br><a href="javascript:window.history.go(-2);">Volver a Odoo</a> <script>window.history.go(-2)</script>'
         else:
             return "<a href='"+meli.auth_url()+"'>Try to Login Again Please</a>"
 
