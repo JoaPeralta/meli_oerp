@@ -6,4 +6,5 @@ from . import test_meli_login_no_token_exposure
 from . import test_http_backend_contract
 from . import test_no_global_price_precision
 from . import test_crons_inactive_by_default
+from . import test_product_template_list_price
 from . import test_http_backend_selection
