@@ -317,15 +317,25 @@ class sale_order(models.Model):
             else:
                 rec.meli_handling_limit_status = 'ok'
 
-    # Post-sale buyer messages reflejados desde la orden ML. Se relacionan vía
-    # meli_order (Many2one a mercadolibre.orders), NO vía meli_order_id (que en
-    # este modelo es un Char con el id de la orden, no una relación).
+    # UPSTREAM VARIANT (throwaway branch): implementación de ctmil 2b9e9ca9+8f175a74,
+    # transcripta tal cual para poder correr la misma batería de tests contra ella.
     meli_unread_messages = fields.Integer(
-        string="Mensajes ML sin leer",
-        related="meli_order.meli_unread_messages", store=True, readonly=True)
+        string="Mensajes ML sin leer", compute='_compute_meli_unread_messages',
+        store=True, readonly=True)
     meli_messages_link = fields.Char(
-        string="Mensajes en ML",
-        related="meli_order.meli_messages_link", readonly=True)
+        string="Mensajes en ML", compute='_compute_meli_messages_link', readonly=True)
+
+    @api.depends('meli_orders.meli_unread_messages')
+    def _compute_meli_unread_messages(self):
+        for order in self:
+            morder = order.meli_orders and order.meli_orders[0]
+            order.meli_unread_messages = morder.meli_unread_messages if morder else 0
+
+    @api.depends('meli_orders.meli_messages_link')
+    def _compute_meli_messages_link(self):
+        for order in self:
+            morder = order.meli_orders and order.meli_orders[0]
+            order.meli_messages_link = morder.meli_messages_link if morder else False
 
     def _ml_shipping_status(self):
 
