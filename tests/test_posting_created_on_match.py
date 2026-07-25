@@ -154,6 +154,71 @@ class TestPostingCreatedOnMatch(TransactionCase):
             "A duplicate posting was created instead of reusing the existing one",
         )
 
+    def test_direct_meli_id_match_registers_missing_posting(self):
+        """Reproduces the state a pre-fix import left in the real database.
+
+            product.product ES700
+            |-- meli_id = MLA_SECOND     <- the second item overwrote the first
+            `-- posting  MLA_FIRST       <- MLA_SECOND has no posting at all
+
+        Product and posting point at *different* publications. Re-importing
+        MLA_SECOND is matched by ``product.product.meli_id`` at the top of the
+        loop, so the SKU search never runs (it is guarded by ``not posting_id``)
+        and the flow reaches the registration point through the meli_id branch.
+        """
+        self.product.meli_id = "MLA_SECOND"
+        first_posting = self.posting_obj.create({
+            "meli_id": "MLA_FIRST",
+            "product_id": self.product.id,
+            "name": "Post (MLA_FIRST)",
+        })
+        self.assertFalse(
+            self._postings("MLA_SECOND"),
+            "The fixture must start without a posting for the incoming item",
+        )
+        products_before = self.env["product.product"].search_count(
+            [("default_code", "=", _SKU)]
+        )
+
+        res = self._run_import("MLA_SECOND")
+
+        # No second product, and the existing binding is left alone.
+        self.assertEqual(
+            self.env["product.product"].search_count([("default_code", "=", _SKU)]),
+            products_before,
+            "Matching must not create a second product",
+        )
+        self.assertEqual(self.product.meli_id, "MLA_SECOND")
+        # The other publication keeps its posting, still on the same product.
+        self.assertTrue(first_posting.exists())
+        self.assertEqual(first_posting.product_id, self.product)
+        self.assertEqual(len(self._postings("MLA_FIRST")), 1)
+        # The incoming publication is registered exactly once.
+        second = self._postings("MLA_SECOND")
+        self.assertEqual(
+            len(second), 1,
+            "The publication matched by meli_id was not registered as a posting",
+        )
+        self.assertEqual(second.product_id, self.product)
+        # Both publications coexist, without duplicates.
+        self.assertEqual(
+            sorted(self.posting_obj.search(
+                [("product_id", "=", self.product.id)]
+            ).mapped("meli_id")),
+            ["MLA_FIRST", "MLA_SECOND"],
+        )
+        # The match came from meli_id, not from the SKU search: `seller_sku` is
+        # only ever set inside the SKU branch and is reported as `meli_sku`.
+        rows = [
+            row for row in (res or {}).get("json_report", {}).get("synced", [])
+            if row["meli_id"] == "MLA_SECOND"
+        ]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            rows[0]["meli_sku"], "",
+            "The SKU search ran: the item was not matched directly by meli_id",
+        )
+
 
 @tagged("post_install", "-at_install")
 class TestPostingCreatedOnVariationMatch(TransactionCase):
