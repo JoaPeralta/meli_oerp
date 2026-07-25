@@ -763,6 +763,14 @@ class res_company(models.Model):
         self.product_meli_get_products()
         return {}
 
+    # Campo "MercadoLibre Id's a importar": lista de item ids separados por coma,
+    # tal como anuncia el label ("MLMXXXXXXX, MLMYYYYYYY, MLM...."). Se usa el
+    # mismo idiom de parseo que el resto del modulo (ver warning.py, orders.py).
+    def _parse_explicit_meli_ids( self, raw_meli_ids ):
+        if not raw_meli_ids:
+            return []
+        return [ mid.strip() for mid in str(raw_meli_ids).split(',') if mid.strip() ]
+
     def product_meli_get_products( self, context=None, import_images=True ):
         context = context or self.env.context
         #_logger.info('company.product_meli_get_products() context: '+str(context))
@@ -772,7 +780,7 @@ class res_company(models.Model):
         warningobj = self.env['meli.warning']
 
         post_state = context and context.get("post_state")
-        meli_id = context and context.get("meli_id")
+        explicit_meli_ids = self._parse_explicit_meli_ids( context and context.get("meli_id") )
         force_create_variants = context and context.get("force_create_variants")
         force_dont_create = context and context.get("force_dont_create")
         force_meli_pub =  context and context.get("force_meli_pub")
@@ -808,12 +816,18 @@ class res_company(models.Model):
                 post_state_filter = { 'status': 'paused' }
             elif post_state=='closed':
                 post_state_filter = { 'status': 'closed' }
-        if meli_id:
-            post_state_filter.update( { 'meli_id': meli_id } )
 
         official_store_id = (self.mercadolibre_official_store_id) or None
 
-        meli_ids = self.fetch_list_meli_ids( params=post_state_filter )
+        # Los item ids explicitos son la seleccion primaria. /users/{id}/items/search
+        # no admite filtrar por item id: enviarlo como parametro hacia que MercadoLibre
+        # lo ignorara y devolviera el catalogo completo, con lo cual se terminaban
+        # procesando publicaciones que el usuario nunca pidio. Cada item explicito se
+        # valida y procesa normalmente mas abajo (incluido su estado real en ML).
+        if explicit_meli_ids:
+            meli_ids = explicit_meli_ids
+        else:
+            meli_ids = self.fetch_list_meli_ids( params=post_state_filter )
 
         url_get = "/users/"+str(company.mercadolibre_seller_id)+"/items/search"
 
@@ -828,11 +842,11 @@ class res_company(models.Model):
             cof = 0
             results = []
 
-            for meli_id in meli_ids:
+            for item_id in meli_ids:
                 ioff = cof
-                if meli_id:
-                    if ( cof>=offset and meli_id not in odoo_meli_ids ):
-                        results.append( meli_id )
+                if item_id:
+                    if ( cof>=offset and item_id not in odoo_meli_ids ):
+                        results.append( item_id )
                     cof+= 1
 
                 if (batch_processing_unit and batch_processing_unit>0 and results and len(results)>=batch_processing_unit):
