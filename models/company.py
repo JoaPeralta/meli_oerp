@@ -946,6 +946,25 @@ class res_company(models.Model):
                         if posting_id:
                             if (len(posting_id)==1):
                                 #_logger.info( "Item already in database: " + str(posting_id[0]) )
+                                # Un mismo producto fisico puede tener varias publicaciones en ML.
+                                # La rama de creacion ya registra un mercadolibre.posting por item
+                                # (product_meli_get_product); al matchear un producto existente hay
+                                # que registrarlo igual, si no la segunda publicacion no queda
+                                # representada. Identidad segun el flujo de import de productos:
+                                # meli_id (meli_variation_id no participa, igual que en la creacion).
+                                if posting_id._name == 'product.product':
+                                    meli_posting_obj = self.env['mercadolibre.posting']
+                                    existing_posting = meli_posting_obj.search([('meli_id','=',item_id)], limit=1)
+                                    if not existing_posting:
+                                        meli_posting_obj.create({
+                                            'posting_date': fields.Date.context_today(self),
+                                            'meli_id': item_id,
+                                            'product_id': posting_id.id,
+                                            'name': 'Post ('+str(item_id)+'): '+str(posting_id.meli_title or posting_id.name or ''),
+                                        })
+                                    elif (existing_posting.product_id and existing_posting.product_id.id!=posting_id.id):
+                                        _logger.warning("product_meli_get_products > posting %s already linked to product %s, not reassigning it to %s",
+                                                        str(item_id), str(existing_posting.product_id.id), str(posting_id.id))
                                 if force_meli_pub:
                                     #_logger.info( "Item meli_pub set" )
                                     posting_id.meli_pub = True
