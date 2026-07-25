@@ -898,7 +898,15 @@ class res_company(models.Model):
                                         pass;
                             else:
                                 if (len(posting_id)==1):
-                                    posting_id.meli_id = item_id
+                                    # Un mismo producto fisico puede tener varias publicaciones en ML
+                                    # (p.ej. dos items con el mismo user_product_id y SKU). Si el producto
+                                    # ya esta asociado a OTRO item, no lo pisamos: perderiamos la referencia
+                                    # existente. Modelar las publicaciones adicionales queda fuera de alcance.
+                                    if (not posting_id.meli_id or posting_id.meli_id==item_id):
+                                        posting_id.meli_id = item_id
+                                    else:
+                                        _logger.info("product_meli_get_products > product sku %s already bound to meli_id %s, keeping it (incoming item %s not stored)",
+                                                     str(posting_id.default_code), str(posting_id.meli_id), str(item_id))
                                 if (len(posting_id)>1):
                                     _logger.error("Founded templates more than 2 default code: seller_sku: "+str(seller_sku)+" template: "+str(posting_id.mapped('name')))
 
@@ -909,16 +917,18 @@ class res_company(models.Model):
                                     posting_id = self.env['product.product'].search([('default_code','=',var['seller_custom_field'])]
                                                                                     + company_domain)
                                     if (posting_id and len(posting_id)==1):
-                                        posting_id.meli_id = item_id
-                                        if (len(posting_id.product_tmpl_id.product_variant_ids)>1):
-                                            posting_id.meli_id_variation = var['id']
+                                        if (not posting_id.meli_id or posting_id.meli_id==item_id):
+                                            posting_id.meli_id = item_id
+                                            if (len(posting_id.product_tmpl_id.product_variant_ids)>1):
+                                                posting_id.meli_id_variation = var['id']
                                 if (not posting_id  and 'seller_sku' in var and var['seller_sku'] and len(var['seller_sku'])):
                                     posting_id = self.env['product.product'].search([('default_code','=',var['seller_sku'])]
                                                                                     + company_domain)
                                     if (posting_id and len(posting_id)==1):
-                                        posting_id.meli_id = item_id
-                                        if (len(posting_id.product_tmpl_id.product_variant_ids)>1):
-                                            posting_id.meli_id_variation = var['id']
+                                        if (not posting_id.meli_id or posting_id.meli_id==item_id):
+                                            posting_id.meli_id = item_id
+                                            if (len(posting_id.product_tmpl_id.product_variant_ids)>1):
+                                                posting_id.meli_id_variation = var['id']
                                 if not posting_id  and not seller_sku and "attributes" in var:
                                     for att in var['attributes']:
                                         if att["id"] == "SELLER_SKU":
@@ -927,9 +937,10 @@ class res_company(models.Model):
                                     posting_id = seller_sku and self.env['product.product'].search([('default_code','=',seller_sku) ]
                                                                                                     + company_domain)
                                     if (posting_id and seller_sku and len(posting_id)==1):
-                                        posting_id.meli_id = item_id
-                                        if (len(posting_id.product_tmpl_id.product_variant_ids)>1):
-                                            posting_id.meli_id_variation = var['id']
+                                        if (not posting_id.meli_id or posting_id.meli_id==item_id):
+                                            posting_id.meli_id = item_id
+                                            if (len(posting_id.product_tmpl_id.product_variant_ids)>1):
+                                                posting_id.meli_id_variation = var['id']
 
                     if (posting_id or force_dont_create):
                         if posting_id:

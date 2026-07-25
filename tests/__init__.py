@@ -7,4 +7,5 @@ from . import test_http_backend_contract
 from . import test_no_global_price_precision
 from . import test_crons_inactive_by_default
 from . import test_product_template_list_price
+from . import test_preserve_existing_meli_id
 from . import test_http_backend_selection
