@@ -10,4 +10,5 @@ from . import test_product_template_list_price
 from . import test_preserve_existing_meli_id
 from . import test_posting_created_on_match
 from . import test_explicit_meli_ids
+from . import test_single_item_import
 from . import test_http_backend_selection

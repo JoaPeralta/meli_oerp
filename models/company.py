@@ -835,7 +835,12 @@ class res_company(models.Model):
         totalmax = len(meli_ids)
         offset = search_offset
 
-        if (totalmax>1):
+        # Una sola publicacion tambien se procesa. Con `>1` una lista de un unico
+        # elemento salteaba el bloque entero, `results` quedaba vacio y el import
+        # terminaba sin hacer nada y sin reporte (no hay rama `else`). Se nota
+        # sobre todo con item ids explicitos, donde pedir UNA publicacion es el
+        # caso normal.
+        if (totalmax>0):
             #USE SCAN METHOD.... ALWAYS
             condition_last_off = True
             ioff = 0
