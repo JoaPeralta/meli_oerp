@@ -116,6 +116,26 @@ class sale_order(models.Model):
     meli_order_id =  fields.Char(string='Meli Order Id',index=True)
     meli_orders = fields.Many2many('mercadolibre.orders',string="ML Orders")
 
+    # THROWAWAY: replica exacta de lo que produce el merge textual de upstream
+    # (git merge-tree lo da SIN conflicto). Nuestras definiciones siguen abajo.
+    meli_unread_messages = fields.Integer(
+        string="Mensajes ML sin leer", compute='_compute_meli_unread_messages',
+        store=True, readonly=True)
+    meli_messages_link = fields.Char(
+        string="Mensajes en ML", compute='_compute_meli_messages_link', readonly=True)
+
+    @api.depends('meli_orders.meli_unread_messages')
+    def _compute_meli_unread_messages(self):
+        for order in self:
+            morder = order.meli_orders and order.meli_orders[0]
+            order.meli_unread_messages = morder.meli_unread_messages if morder else 0
+
+    @api.depends('meli_orders.meli_messages_link')
+    def _compute_meli_messages_link(self):
+        for order in self:
+            morder = order.meli_orders and order.meli_orders[0]
+            order.meli_messages_link = morder.meli_messages_link if morder else False
+
     MELI_STATUS_LABELS = {
         "paid ship-ready_to_shipprinted":        "Etiqueta impresa",
         "paid ship-ready_to_shipready_to_print": "Lista para imprimir",
