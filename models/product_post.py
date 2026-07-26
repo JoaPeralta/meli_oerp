@@ -417,9 +417,13 @@ class product_template_import(models.TransientModel):
         warningobj = self.env['meli.warning']
 
         messhtml = ""
-        messhtml+= "<br/>Actives to sync: "+self.actives_to_sync
-        messhtml+= "<br/>Paused to sync: "+self.paused_to_sync
-        messhtml+= "<br/>Closed to sync: "+self.closed_to_sync
+        # Los tres campos son Char sin default: sin valor, Odoo los devuelve como
+        # False y concatenarlos tira "can only concatenate str (not bool) to str".
+        # Es el caso normal en un wizard recien abierto, porque solo se completan
+        # despues de una consulta de estado previa.
+        messhtml+= "<br/>Actives to sync: "+(self.actives_to_sync or '')
+        messhtml+= "<br/>Paused to sync: "+(self.paused_to_sync or '')
+        messhtml+= "<br/>Closed to sync: "+(self.closed_to_sync or '')
 
         res = warningobj.info( title='CHECK IMPORT STATUS', message="Import Status", message_html=messhtml )
         res = self.show_import_wizard()
