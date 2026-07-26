@@ -33,6 +33,12 @@ import base64
 import mimetypes
 from urllib.request import urlopen
 
+# urlopen no tiene timeout por defecto: si el host acepta la conexion y despues
+# se queda callado, la descarga bloquea para siempre, reteniendo un worker de
+# Odoo y la transaccion abierta del import. Se usa el mismo bound que ya fija el
+# cliente HTTP del modulo (MeliApiNoSDK: params.get("timeout", 20)).
+MELI_IMAGE_DOWNLOAD_TIMEOUT = 20
+
 from datetime import datetime
 
 from .meli_oerp_config import *
@@ -1526,7 +1532,7 @@ class product_product(models.Model):
                 ml_pics[ml_imgid] = pictures[ix]
 
                 thumbnail_url = pictures[ix]['url']
-                image = urlopen(thumbnail_url).read()
+                image = urlopen(thumbnail_url, timeout=MELI_IMAGE_DOWNLOAD_TIMEOUT).read()
                 meli_imagen_bytes = len(image)
                 if (str(meli_imagen_bytes) in ml_sizes):
                     _logger.info("Imagen bytes duplicated: "+str(thumbnail_url))
@@ -1606,7 +1612,7 @@ class product_product(models.Model):
             if (not config.mercadolibre_do_not_use_first_image):
                 ix_start = 1
                 thumbnail_url = pictures[0]['url']
-                image = urlopen(thumbnail_url).read()
+                image = urlopen(thumbnail_url, timeout=MELI_IMAGE_DOWNLOAD_TIMEOUT).read()
                 image_base64 = base64.b64encode(image)
                 set_image_full(product, image_base64)
 
@@ -1632,7 +1638,7 @@ class product_product(models.Model):
                         if (len(imgjson['variations'])>0):
                             thumbnail_url = imgjson['variations'][0]['secure_url']
 
-                    image = urlopen(thumbnail_url).read()
+                    image = urlopen(thumbnail_url, timeout=MELI_IMAGE_DOWNLOAD_TIMEOUT).read()
                     image_base64 = base64.b64encode(image)
                     meli_imagen_bytes = len(image)
                     pimage = False
@@ -1815,7 +1821,7 @@ class product_product(models.Model):
             thumbnail_url = first_pic_id and first_pic_id in picture_hash and picture_hash[first_pic_id]['url']
             if thumbnail_url:
                 _logger.info( "Setting principal IMAGE for product: " + str(product.display_name) + " thumbnail_url: " + str(thumbnail_url) )
-                image = urlopen(thumbnail_url).read()
+                image = urlopen(thumbnail_url, timeout=MELI_IMAGE_DOWNLOAD_TIMEOUT).read()
                 image_base64 = base64.b64encode(image)
                 set_image_full(product, image_base64)
 
@@ -1838,7 +1844,7 @@ class product_product(models.Model):
                     if (len(imgjson['variations'])>0):
                         thumbnail_url = imgjson['variations'][0]['secure_url']
 
-                image = urlopen(thumbnail_url).read()
+                image = urlopen(thumbnail_url, timeout=MELI_IMAGE_DOWNLOAD_TIMEOUT).read()
                 image_base64 = base64.b64encode(image)
                 meli_imagen_bytes = len(image)
 

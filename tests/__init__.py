@@ -16,4 +16,5 @@ from . import test_auth_http_status_detection
 from . import test_unprocessable_item_response
 from . import test_posting_update_error_response
 from . import test_check_import_status_unset_fields
+from . import test_image_download_timeout
 from . import test_http_backend_selection
