@@ -97,8 +97,24 @@ class mercadolibre_posting(models.Model):
             product_json = response.json()
             #_logger.info( product_json )
 
-            if "error" in product_json:
+            # ML no siempre responde un item. Un 401 no trae 'error' ni 'status',
+            # y un body no-JSON llega como str (_parse_response devuelve
+            # resp.text), con lo cual `"error" in product_json` pasa a ser un
+            # match de substring y el indexado tira TypeError. Antes eso rompia
+            # la lectura del posting: posting_update es un campo computed, asi
+            # que cualquier vista que muestre postings reventaba.
+            # 'status' es el unico campo que este bloque indexa sin guarda propia
+            # ('error', 'permalink' y 'price' ya traen la suya).
+            if not isinstance(product_json, dict):
+                _logger.error(
+                    "posting_query_questions > respuesta no procesable para item %s: tipo=%s len=%d",
+                    str(posting.meli_id), type(product_json).__name__, len(str(product_json)))
+            elif "error" in product_json:
                 ML_status = product_json["error"]
+            elif "status" not in product_json:
+                _logger.error(
+                    "posting_query_questions > respuesta sin 'status' para item %s: claves=%s",
+                    str(posting.meli_id), sorted(product_json.keys())[:10])
             else:
                 ML_status = product_json["status"]
                 post = { 'meli_status': ML_status }
