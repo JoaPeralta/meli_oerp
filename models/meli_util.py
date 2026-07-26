@@ -199,6 +199,10 @@ class MeliApiNoSDK:
         self.config = config or configuration
         self.base_url = self.config.host
         self._session = self.config.get_session()
+        # Codigo HTTP de la ultima llamada de este cliente. El body de ML no es
+        # una senal fiable de sesion invalida (un 401 real no trae 'error' ni
+        # 'status'), asi que el status se conserva para poder consultarlo.
+        self.last_status_code = None
 
     def _abs_url(self, path):
         """Convierte un path relativo a URL absoluta"""
@@ -278,6 +282,7 @@ class MeliApiNoSDK:
             )
             self.response = self._parse_response(resp)
             self.rjson = self.response
+            self.last_status_code = resp.status_code
 
             # Log según status code
             if resp.status_code == 404:
@@ -295,6 +300,7 @@ class MeliApiNoSDK:
 
         except requests.RequestException as e:
             _logger.warning("GET %s error: %s", path, str(e))
+            self.last_status_code = 0
             self.rjson = {
                 "error": "get error",
                 "status": 0,
@@ -772,6 +778,10 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
         code = ""
         rjson = {}
         user = {}
+        # Espeja el contrato de MeliApiNoSDK. Esta clase no define __init__
+        # propio (hereda el del SDK), asi que se declara a nivel de clase como
+        # el resto de su estado.
+        last_status_code = None
 
         # Benchmarking support - class-level attributes (for compatibility with MeliApiNoSDK)
         _benchmark_enabled = False
@@ -851,7 +861,13 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
                         path += "&scroll_id=" + scroll_id
                 self.response = self.resource_get(resource=path, access_token=atok)
                 self.rjson = self.response
+                # Status HTTP real del SDK cuando lo expone. NO se asume 200:
+                # justamente lo que se busca es dejar de inferir el status.
+                self.last_status_code = getattr(
+                    getattr(getattr(self, "api_client", None), "last_response", None),
+                    "status", None)
             except _ApiException as e:
+                self.last_status_code = getattr(e, "status", None)
                 self.rjson = {
                     "error": "get error",
                     "status": getattr(e, "status", None),
@@ -872,6 +888,7 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
             _nosdk.get(path, params, extra_headers=extra_headers)
             self.response = _nosdk.response
             self.rjson = _nosdk.rjson
+            self.last_status_code = _nosdk.last_status_code
             return self
 
         def post(self, path, body=None, params={}, extra_headers=None, **kwargs):
@@ -1133,6 +1150,19 @@ class MeliUtil(models.AbstractModel):
 
                 #_logger.info("get_new_instance connection response:"+str(response))
                 rjson = response.json()
+
+                # La sesion invalida se reconoce por el codigo HTTP, no por las
+                # claves del body: el backend NoSDK devuelve el JSON crudo de ML
+                # y un 401 real no trae ni 'error' ni 'status', con lo cual la
+                # cascada de abajo lo dejaba pasar como sesion sana.
+                # Se marca SIN cortar el flujo: si el body ademas trae 'error',
+                # la rama de refresh existente sigue corriendo igual que antes y
+                # puede volver a poner needlogin_state en False si se recupera.
+                # 403 cuenta como no utilizable solo aca, en el probe de
+                # identidad: si el token no puede leer su propio usuario, no
+                # sirve. No se generaliza 403 al resto de las requests.
+                if getattr(api_rest_client, "last_status_code", None) in (401, 403):
+                    api_rest_client.needlogin_state = True
 
                 status = "status" in rjson and rjson["status"]
                 cause = "cause" in rjson and rjson["cause"]
