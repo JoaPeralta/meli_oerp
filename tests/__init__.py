@@ -13,4 +13,5 @@ from . import test_explicit_meli_ids
 from . import test_single_item_import
 from . import test_sale_order_message_fields
 from . import test_auth_http_status_detection
+from . import test_unprocessable_item_response
 from . import test_http_backend_selection
