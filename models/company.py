@@ -892,6 +892,30 @@ class res_company(models.Model):
 
                     response = meli.get("/items/"+item_id, {'access_token':meli.access_token})
                     rjson3 = response.json()
+
+                    # Shape minimo que este bloque indexa DIRECTO mas abajo, sin
+                    # guarda propia: 'status' (3 veces), 'title' (rama missing y
+                    # rama de creacion) e 'id'. El resto de los campos que se leen
+                    # (seller_custom_field, attributes, variations) ya traen su
+                    # propio chequeo, por eso no forman parte de esta guarda.
+                    #
+                    # ML no siempre responde un item: un 401 no trae ni 'id' ni
+                    # 'status', y un body no-JSON llega como str (_parse_response
+                    # devuelve resp.text). Indexar eso tiraba KeyError/TypeError y,
+                    # como el try envuelve TODO el loop, terminaba en MeliRollback:
+                    # sin commit intermedio (MeliCommit es flush_all, no cr.commit)
+                    # y sin savepoint, se descartaba el trabajo valido de la corrida
+                    # entera y los items siguientes no se procesaban.
+                    # Se saltea solo este item; el resto del lote sigue.
+                    if (not isinstance(rjson3, dict) or 'id' not in rjson3
+                            or 'status' not in rjson3 or 'title' not in rjson3):
+                        _logger.error(
+                            "product_meli_get_products > respuesta no procesable para item %s: tipo=%s detalle=%s",
+                            str(item_id), type(rjson3).__name__,
+                            (sorted(rjson3.keys())[:10] if isinstance(rjson3, dict)
+                             else "len=%d" % len(str(rjson3))))
+                        continue
+
                     seller_sku = None
                     if ( ( not posting_id or len(posting_id)==0 ) and company.mercadolibre_import_search_sku ):
                         seller_sku = None
