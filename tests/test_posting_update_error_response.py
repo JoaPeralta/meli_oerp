@@ -141,4 +141,6 @@ class TestPostingUpdateErrorResponse(TransactionCase):
         self.assertEqual(value, "ok")
         self.assertEqual(self.posting.meli_status, "paused")
         self.assertEqual(self.posting.meli_permalink, payload["permalink"])
-        self.assertEqual(self.posting.meli_price, payload["price"])
+        # meli_price is a Char on mercadolibre.posting, so the numeric payload
+        # is stored as its string form.
+        self.assertEqual(self.posting.meli_price, str(payload["price"]))
