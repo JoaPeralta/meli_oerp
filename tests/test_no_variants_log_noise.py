@@ -41,9 +41,11 @@ _SENTINEL = "SENTINEL-ZIP-9x7"
 
 
 def _item_without_variants():
+    """Every key this flow indexes directly, and nothing more."""
     return {
         "id": _ITEM,
         "title": "Publicacion simple sin variantes",
+        "family_name": "Publicacion simple",
         "status": "active",
         "price": 1000,
         "base_price": 1000,
@@ -53,7 +55,9 @@ def _item_without_variants():
         "currency_id": "ARS",
         "category_id": "MLA1234",
         "listing_type_id": "gold_special",
+        "buying_mode": "buy_it_now",
         "condition": "new",
+        "warranty": "Sin garantia",
         "permalink": "https://articulo.mercadolibre.com.ar/MLA-1",
         "thumbnail": "http://http2.mlstatic.com/D_1-I.jpg",
         "pictures": [],
@@ -78,8 +82,12 @@ class _FakeResponse:
 
 
 class _FakeMeli:
+    """Answers per path. The flow reaches category lookups on its way, and this
+    test is about the log statement, not about simulating MercadoLibre."""
+
     def __init__(self, payload):
         self.access_token = "TEST-TOKEN"
+        self.seller_id = "2288636236"
         self._payload = payload
 
     def need_login(self):
@@ -89,7 +97,14 @@ class _FakeMeli:
         return {}
 
     def get(self, path, params=None, extra_headers=None, **kwargs):
-        return _FakeResponse(self._payload)
+        p = str(path)
+        if p.startswith("/items/"):
+            return _FakeResponse(self._payload)
+        if p.startswith("/categories"):
+            return _FakeResponse({"id": "MLA1234", "name": "Categoria test",
+                                  "path_from_root": [], "children_categories": [],
+                                  "attributes": []})
+        return _FakeResponse({})
 
 
 @tagged("post_install", "-at_install")
@@ -107,17 +122,38 @@ class TestNoVariantsLogNoise(TransactionCase):
         })
 
     def _run(self):
+        """Drive the real flow and capture its logs.
+
+        The import touches more of MercadoLibre than this fake models, so it may
+        raise on its way. That is irrelevant to what is under test: the log
+        records emitted before any failure are what these assertions read. The
+        exception is kept so the regression test can assert on it separately.
+        """
         fake = _FakeMeli(_item_without_variants())
+        self.raised = None
         with patch.object(
             type(self.env["meli.util"]), "get_new_instance", return_value=fake
         ):
             with self.assertLogs(_LOGGER_NAME, level="DEBUG") as captured:
-                self.product.product_meli_get_product(import_images=False)
+                try:
+                    self.product.product_meli_get_product(import_images=False)
+                except Exception as exc:      # noqa: BLE001 - see docstring
+                    self.raised = exc
         return captured
+
+    def _assert_branch_was_reached(self, captured):
+        """These tests are worthless if the no-variants branch never ran."""
+        self.assertTrue(
+            any("variantes" in r.getMessage() or _ITEM in r.getMessage()
+                for r in captured.records),
+            "the no-variants branch was never reached; the fixture no longer "
+            "drives the flow into it and the assertions below prove nothing",
+        )
 
     def test_no_variants_path_does_not_log_an_error(self):
         """A simple publication is not an error condition."""
         captured = self._run()
+        self._assert_branch_was_reached(captured)
 
         offending = [
             r.getMessage() for r in captured.records
@@ -153,7 +189,8 @@ class TestNoVariantsLogNoise(TransactionCase):
 
     def test_the_publication_is_still_processed(self):
         """Regression guard: quieting the log must not skip the work."""
-        self._run()
+        captured = self._run()
+        self._assert_branch_was_reached(captured)
 
         self.assertEqual(
             self.product.meli_id, _ITEM,
