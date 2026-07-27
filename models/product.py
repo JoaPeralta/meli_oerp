@@ -2837,8 +2837,18 @@ class product_product(models.Model):
                 if (_product_id==variant.id):
                     product = variant
         else:
-            #NO TIENE variantes pero tiene SKU
-            _logger.error("NO TIENE variantes pero tiene SKU "+str(rjson))
+            # Publicacion sin variantes: es el camino NORMAL de un item simple,
+            # no un error. Se loguea a debug y SIN el payload.
+            # Volcar str(rjson) son ~9 kB por item (incluye seller_address con
+            # calle y codigo postal, geolocation, precios e inventory_id); sobre
+            # un catalogo completo son ~1 MB a stderr. Ademas de ruido y falsas
+            # alertas, ese volumen BLOQUEA el proceso cuando la salida es un pipe
+            # que nadie drena: un import completo por `odoo shell` se congelo en
+            # 967 kB y no avanzo mas. Silenciando este logger la misma corrida
+            # termino en 163 s.
+            _logger.debug(
+                "product_meli_get_product > item %s sin variantes",
+                str(rjson.get("id")) if isinstance(rjson, dict) else "")
             seller_sku = None
             barcode = None
 
