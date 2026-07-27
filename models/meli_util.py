@@ -74,6 +74,34 @@ def meli_token_response_summary(response_info, expected_seller_id=None):
     return summary
 
 
+def meli_validate_refresh_response(response_info, expected_seller_id):
+    """Decide si una respuesta de /oauth/token puede reemplazar credenciales.
+
+    Un refresh cuenta como exitoso solo con access_token y refresh_token no
+    vacios y un user_id que corresponda al vendedor configurado. Cualquier otra
+    cosa deja intactas las credenciales guardadas: un refresh malo NO puede
+    destruir una sesion que funciona.
+
+    Es critico por el refresh token de un solo uso: si guardaramos uno vacio o
+    de otra cuenta, el anterior ya quedo gastado del lado de MercadoLibre y la
+    sesion no se puede renovar nunca mas sin un OAuth manual.
+
+    Devuelve (valido, motivo). El motivo es una etiqueta corta, nunca el body.
+    """
+    if not isinstance(response_info, dict):
+        return False, "unparseable response"
+    if not response_info.get("access_token"):
+        return False, "missing or empty access_token"
+    if not response_info.get("refresh_token"):
+        return False, "missing or empty refresh_token"
+    user_id = response_info.get("user_id")
+    if user_id in (None, ""):
+        return False, "missing user_id"
+    if str(user_id) != str(expected_seller_id):
+        return False, "user_id does not match the configured seller"
+    return True, None
+
+
 def meli_redact(text, *secrets):
     """Reemplaza valores de secretos conocidos por *** dentro de un texto.
 
@@ -768,9 +796,14 @@ class MeliApiNoSDK:
             )
             response_info = self._parse_response(resp)
 
-            if isinstance(response_info, dict) and 'access_token' in response_info:
+            if isinstance(response_info, dict) and response_info.get('access_token'):
                 self.access_token = response_info['access_token']
-                self.refresh_token = response_info.get('refresh_token', '')
+                # Solo se reemplaza si vino uno nuevo. Pisarlo con '' dejaba al
+                # cliente sin nada que enviar en la proxima renovacion, y como
+                # el refresh token de ML es de un solo uso el anterior ya estaba
+                # gastado: la sesion quedaba irrecuperable sin OAuth manual.
+                if response_info.get('refresh_token'):
+                    self.refresh_token = response_info['refresh_token']
             else:
                 # Nunca el body: trae credenciales cuando el refresh sale bien.
                 _logger.warning("get_refresh_token failed: %s",
@@ -1090,9 +1123,12 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
             response_info = api_auth_client.get_token(
                 grant_type='refresh_token', client_id=self.client_id,
                 client_secret=self.client_secret, refresh_token=self.refresh_token)
-            if 'access_token' in response_info:
+            if isinstance(response_info, dict) and response_info.get('access_token'):
                 self.access_token = response_info['access_token']
-                self.refresh_token = response_info.get('refresh_token', '')
+                # Mismo criterio que en el backend NoSDK: nunca blanquear un
+                # refresh token que todavia sirve.
+                if response_info.get('refresh_token'):
+                    self.refresh_token = response_info['refresh_token']
             return response_info
 
         def get_sale_terms(self, category_id=None, sale_term_id=None, productjson=None):
@@ -1323,7 +1359,16 @@ class MeliUtil(models.AbstractModel):
                                         #refjson = refresh.json()
                                         refjson = refresh
                                         logs+= str(refresh_summary)+"\n"
-                                        if "access_token" in refjson:
+                                        refresh_valid, refresh_reason = meli_validate_refresh_response(
+                                            refjson, company.mercadolibre_seller_id)
+                                        if not refresh_valid:
+                                            # No se tocan las credenciales: las
+                                            # guardadas siguen siendo la unica
+                                            # sesion que puede funcionar.
+                                            _logger.error(
+                                                "refresh rejected (%s): %s",
+                                                refresh_reason, refresh_summary)
+                                        if refresh_valid:
                                             api_rest_client.access_token = refjson["access_token"]
                                             api_rest_client.refresh_token = refjson["refresh_token"]
                                             api_rest_client.code = ''
