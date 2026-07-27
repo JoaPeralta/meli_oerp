@@ -41,6 +41,53 @@ def meli_token_expiry_vals(response_info, now=None):
             stamp + timedelta(seconds=expires_in)) if expires_in > 0 else False,
     }
 
+
+# ---------------------------------------------------------------------------
+#  Credenciales: nunca en logs ni en la base
+# ---------------------------------------------------------------------------
+# La respuesta de POST /oauth/token trae access_token y refresh_token en claro.
+# Volcarla con str() la manda al log (stderr -> donde la plataforma lo recolecte)
+# y, en el caso de mercadolibre.notification, la PERSISTE en la base. Estas dos
+# funciones son el unico camino permitido para reportar un refresh.
+
+def meli_token_response_summary(response_info, expected_seller_id=None):
+    """Resumen NO sensible de una respuesta de /oauth/token.
+
+    Devuelve presencia, no valores. Incluye el codigo de error de ML porque
+    hace falta para distinguir invalid_grant, pero nunca texto libre ni tokens.
+    """
+    if not isinstance(response_info, dict):
+        return {"parseable": False, "type": type(response_info).__name__}
+    user_id = response_info.get("user_id")
+    summary = {
+        "parseable": True,
+        "access_token_received": bool(response_info.get("access_token")),
+        "refresh_token_received": bool(response_info.get("refresh_token")),
+        "expires_in": response_info.get("expires_in"),
+        "token_type": response_info.get("token_type"),
+        "user_id": user_id,
+        "error": response_info.get("error"),
+    }
+    if expected_seller_id is not None:
+        summary["user_id_matches"] = (
+            user_id is not None and str(user_id) == str(expected_seller_id))
+    return summary
+
+
+def meli_redact(text, *secrets):
+    """Reemplaza valores de secretos conocidos por *** dentro de un texto.
+
+    Se usa en caminos de excepcion, donde el mensaje puede arrastrar el token o
+    el client secret. Es preciso: solo redacta los valores que efectivamente
+    tenemos en mano, sin heuristicas sobre "algo que parece un token".
+    """
+    out = str(text)
+    for secret in secrets:
+        s = str(secret or "")
+        if len(s) >= 8:
+            out = out.replace(s, "***")
+    return out
+
 from .meli_oerp_config import REDIRECT_URI
 
 from urllib3.util.retry import Retry
@@ -725,13 +772,19 @@ class MeliApiNoSDK:
                 self.access_token = response_info['access_token']
                 self.refresh_token = response_info.get('refresh_token', '')
             else:
-                _logger.warning("get_refresh_token falló: %s", str(response_info)[:200])
+                # Nunca el body: trae credenciales cuando el refresh sale bien.
+                _logger.warning("get_refresh_token failed: %s",
+                                meli_token_response_summary(response_info, self.seller_id))
 
             return response_info
 
         except requests.RequestException as e:
-            _logger.error("get_refresh_token error: %s", str(e))
-            return {"error": "refresh_token_error", "message": str(e)}
+            _logger.error("get_refresh_token error: %s",
+                          meli_redact(e, self.access_token, self.refresh_token,
+                                      self.client_secret))
+            return {"error": "refresh_token_error",
+                    "message": meli_redact(e, self.access_token,
+                                           self.refresh_token, self.client_secret)}
 
     def get_sale_terms(self, category_id=None, sale_term_id=None, productjson=None):
         """Obtiene los términos de venta para una categoría"""
@@ -1258,11 +1311,18 @@ class MeliUtil(models.AbstractModel):
                                 try:
                                     #refresh = meli.get_refresh_token()
                                     refresh = api_rest_client.get_refresh_token()
-                                    _logger.info("Refresh result: "+str(refresh))
+                                    # NUNCA str(refresh): es la respuesta de
+                                    # /oauth/token, con access_token y
+                                    # refresh_token en claro. El destino de
+                                    # `logs` es mercadolibre.notification, o sea
+                                    # que volcarla ahi la PERSISTE en la base.
+                                    refresh_summary = meli_token_response_summary(
+                                        refresh, company.mercadolibre_seller_id)
+                                    _logger.info("Refresh result: %s", refresh_summary)
                                     if (refresh):
                                         #refjson = refresh.json()
                                         refjson = refresh
-                                        logs+= str(refjson)+"\n"
+                                        logs+= str(refresh_summary)+"\n"
                                         if "access_token" in refjson:
                                             api_rest_client.access_token = refjson["access_token"]
                                             api_rest_client.refresh_token = refjson["refresh_token"]
@@ -1277,9 +1337,19 @@ class MeliUtil(models.AbstractModel):
                                             company.write(token_vals)
                                             api_rest_client.needlogin_state = False
                                 except Exception as e:
-                                    errors += str(e)
-                                    logs += str(e)
-                                    _logger.error(e)
+                                    # El cliente tiene las credenciales en mano
+                                    # en este punto: el texto de la excepcion
+                                    # puede arrastrarlas.
+                                    safe = meli_redact(
+                                        e, api_rest_client.access_token,
+                                        api_rest_client.refresh_token,
+                                        api_rest_client.client_secret,
+                                        company.mercadolibre_access_token,
+                                        company.mercadolibre_refresh_token,
+                                        company.mercadolibre_secret_key)
+                                    errors += safe
+                                    logs += safe
+                                    _logger.error("refresh raised: %s", safe)
                                     pass;
                                 except:
                                     pass;
