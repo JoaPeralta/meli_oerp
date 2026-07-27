@@ -29,6 +29,7 @@ from datetime import datetime, timedelta
 
 from unittest.mock import patch
 
+from odoo import fields as odoo_fields
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
@@ -124,13 +125,15 @@ class TestTokenExpiryMetadata(TransactionCase):
         self.assertEqual(self.company.mercadolibre_token_expires_in, 21600)
 
     def test_refresh_stores_the_moment_it_happened(self):
-        before = datetime.now()
+        # Odoo persists datetimes in UTC, so the comparison has to use Odoo's
+        # own clock rather than the container's local time.
+        before = odoo_fields.Datetime.now()
         self._refresh_with(self._payload())
 
         stamp = self.company.mercadolibre_token_refreshed_at
         self.assertTrue(stamp, "the refresh instant was not recorded")
         self.assertGreaterEqual(stamp, before - timedelta(seconds=5))
-        self.assertLessEqual(stamp, datetime.now() + timedelta(seconds=5))
+        self.assertLessEqual(stamp, odoo_fields.Datetime.now() + timedelta(seconds=5))
 
     def test_expires_at_is_derived_from_the_reported_lifetime(self):
         """No hardcoded TTL: expires_at = refreshed_at + expires_in."""
