@@ -19,4 +19,5 @@ from . import test_check_import_status_unset_fields
 from . import test_image_download_timeout
 from . import test_no_variants_log_noise
 from . import test_no_token_secrets_in_logs
+from . import test_token_expiry_metadata
 from . import test_http_backend_selection

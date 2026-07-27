@@ -16,6 +16,32 @@ import logging
 _logger = logging.getLogger(__name__)
 
 
+def meli_token_expiry_vals(response_info, now=None):
+    """Campos de vigencia derivados de una respuesta de /oauth/token.
+
+    MercadoLibre informa `expires_in` en cada respuesta. Sin guardarlo, el
+    conector solo puede reaccionar a un 401 ya ocurrido, en medio de la
+    operacion que lo haya provocado.
+
+    NO inventa un TTL. Si la respuesta no trae expires_in, expires_at queda
+    vacio y la vigencia es desconocida: preferimos "no se" antes que un numero
+    fabricado del que despues se dependa.
+    """
+    if not isinstance(response_info, dict):
+        return {}
+    stamp = now or fields.Datetime.now()
+    try:
+        expires_in = int(response_info.get('expires_in') or 0)
+    except (TypeError, ValueError):
+        expires_in = 0
+    return {
+        'mercadolibre_token_refreshed_at': stamp,
+        'mercadolibre_token_expires_in': expires_in,
+        'mercadolibre_token_expires_at': (
+            stamp + timedelta(seconds=expires_in)) if expires_in > 0 else False,
+    }
+
+
 # ---------------------------------------------------------------------------
 #  Credenciales: nunca en logs ni en la base
 # ---------------------------------------------------------------------------
@@ -66,7 +92,7 @@ from .meli_oerp_config import REDIRECT_URI
 
 from urllib3.util.retry import Retry
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from .versions import *
 from . import versions as _versions
 
@@ -1301,9 +1327,14 @@ class MeliUtil(models.AbstractModel):
                                             api_rest_client.access_token = refjson["access_token"]
                                             api_rest_client.refresh_token = refjson["refresh_token"]
                                             api_rest_client.code = ''
-                                            company.write({ 'mercadolibre_access_token': api_rest_client.access_token,
-                                                            'mercadolibre_refresh_token': api_rest_client.refresh_token,
-                                                            'mercadolibre_code': '' } )
+                                            token_vals = { 'mercadolibre_access_token': api_rest_client.access_token,
+                                                           'mercadolibre_refresh_token': api_rest_client.refresh_token,
+                                                           'mercadolibre_code': '' }
+                                            # Vigencia informada por ML en ESTA
+                                            # respuesta. Se guarda junto con los
+                                            # tokens, nunca por separado.
+                                            token_vals.update(meli_token_expiry_vals(refjson))
+                                            company.write(token_vals)
                                             api_rest_client.needlogin_state = False
                                 except Exception as e:
                                     # El cliente tiene las credenciales en mano

@@ -336,6 +336,22 @@ class res_company(models.Model):
     mercadolibre_access_token = fields.Char( string='Access Token', help='Access Token', size=256)
     mercadolibre_refresh_token = fields.Char( string='Refresh Token', help='Refresh Token', size=256)
     mercadolibre_code = fields.Char( string='Code', help='Code', size=256)
+    # Vigencia del access token, tomada de lo que MercadoLibre informa en cada
+    # /oauth/token. Sin esto el conector solo puede reaccionar a un 401 ya
+    # ocurrido: no hay forma de saber si el token alcanza para la operacion que
+    # esta por empezar. NO se infiere ningun TTL; si ML no manda expires_in, la
+    # vigencia queda desconocida.
+    mercadolibre_token_expires_in = fields.Integer(
+        string='Token lifetime (s)', readonly=True,
+        help='expires_in informado por MercadoLibre en el ultimo /oauth/token. '
+             '0 = MercadoLibre no lo informo.')
+    mercadolibre_token_refreshed_at = fields.Datetime(
+        string='Token obtained at', readonly=True,
+        help='Instante en que se recibio el access token vigente.')
+    mercadolibre_token_expires_at = fields.Datetime(
+        string='Token expires at', readonly=True,
+        help='Derivado: obtained_at + expires_in. Vacio si MercadoLibre no '
+             'informo expires_in; en ese caso la vigencia es desconocida.')
     mercadolibre_seller_id = fields.Char( string='Vendedor Id', size=256)
     mercadolibre_user_product_seller = fields.Boolean( string='User Product Seller',index=True)
     mercadolibre_multiwarehouse = fields.Boolean( string='Multi Warehouse Seller', index=True,

@@ -23,6 +23,7 @@ _logger = logging.getLogger(__name__)
 
 
 from ..models.versions import *
+from ..models.meli_util import meli_token_expiry_vals
 
 def _get_headers(filename, filetype, content):
     return [
@@ -132,10 +133,14 @@ class MercadoLibreLogin(http.Controller):
             # that can be exchanged for access/refresh tokens.
             _logger.info( "Meli: Authorize: REDIRECT_URI: %s, authorization code received", company.mercadolibre_redirect_uri )
             resp = meli.authorize( codes['code'], company.mercadolibre_redirect_uri)
-            company.write( { 'mercadolibre_access_token': meli.access_token,
-                             'mercadolibre_refresh_token': meli.refresh_token,
-                             'mercadolibre_code': codes['code'],
-                             'mercadolibre_cron_refresh': True } )
+            token_vals = { 'mercadolibre_access_token': meli.access_token,
+                           'mercadolibre_refresh_token': meli.refresh_token,
+                           'mercadolibre_code': codes['code'],
+                           'mercadolibre_cron_refresh': True }
+            # El intercambio del code tambien informa expires_in: la vigencia se
+            # guarda desde el primer token, no recien desde el primer refresh.
+            token_vals.update(meli_token_expiry_vals(resp))
+            company.write( token_vals )
             # Never render the authorization code, access token or refresh token
             # in the response: they are stored server-side on res.company above.
             # Only a neutral success confirmation is returned.
