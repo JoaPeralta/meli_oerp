@@ -188,11 +188,22 @@ class TestNoVariantsLogNoise(TransactionCase):
         )
 
     def test_the_publication_is_still_processed(self):
-        """Regression guard: quieting the log must not skip the work."""
+        """Regression guard: quieting the log must not skip the work.
+
+        ``meli_id`` alone would prove nothing — it is set in ``setUp``. The
+        assertion is on ``meli_title``, which starts empty and is written from
+        the payload by ``product.write(meli_fields)``, upstream of the branch
+        under test. If the flow stopped short of that write, this fails.
+        """
         captured = self._run()
         self._assert_branch_was_reached(captured)
 
         self.assertEqual(
             self.product.meli_id, _ITEM,
             "the product lost its binding while processing",
+        )
+        self.assertEqual(
+            self.product.meli_title, _item_without_variants()["title"],
+            "the item data was never written: processing did not reach the "
+            "branch under test with its work done",
         )
