@@ -50,6 +50,32 @@ _CREDENTIAL_FIELDS = (
     "mercadolibre_token_expires_at",
 )
 
+# Seed values for the collateral-damage tests below. All six non-empty, so
+# that any field silently rewritten to False or 0 is unmistakable.
+_SEED_CODE = "CODE-value-555555555555"
+_SEED_EXPIRES_IN = 21600
+_SEED_REFRESHED_AT = "2026-07-01 10:00:00"
+_SEED_EXPIRES_AT = "2026-07-01 16:00:00"
+
+_AUTH_COLUMNS = (
+    "access_token",
+    "refresh_token",
+    "code",
+    "token_expires_in",
+    "token_refreshed_at",
+    "token_expires_at",
+)
+
+# facade field -> the mercadolibre_auth column it stands for
+_FACADE_TO_AUTH = {
+    "mercadolibre_access_token": "access_token",
+    "mercadolibre_refresh_token": "refresh_token",
+    "mercadolibre_code": "code",
+    "mercadolibre_token_expires_in": "token_expires_in",
+    "mercadolibre_token_refreshed_at": "token_refreshed_at",
+    "mercadolibre_token_expires_at": "token_expires_at",
+}
+
 
 @tagged("post_install", "-at_install")
 class TestDedicatedAuthRow(TransactionCase):
@@ -220,3 +246,127 @@ class TestDedicatedAuthRow(TransactionCase):
 
         with self.assertRaises(AccessError):
             row.with_user(user).write({"access_token": "STOLEN"})
+
+
+@tagged("post_install", "-at_install")
+class TestFacadeWritesOnlyTheTargetedField(TransactionCase):
+    """Writing one credential must not take the other five with it.
+
+    Odoo protects every field that declares the inverse being run. A protected
+    computed field that is not already in cache does not get computed -- it
+    reads as False. So an inverse shared by six fields, which reads all six and
+    writes them back, is only safe while the cache happens to be warm:
+
+        auth row: A1 / R1 / code / expiry all set
+        cold cache
+          -> company.write({'mercadolibre_access_token': A2})
+          -> shared inverse runs
+          -> access_token is in cache (it was just written) -> A2
+          -> the other five are not in cache and are protected -> False
+          -> row.write() of all six
+          -> R1, the code and the whole expiry metadata are destroyed
+
+    Destroying R1 is unrecoverable: MercadoLibre refresh tokens are single-use,
+    so the previous one is already spent and there is no way back without a
+    manual OAuth round.
+
+    Every test here forces the cache cold on purpose -- invalidate_all plus a
+    fresh browse -- because a warm cache hides the defect completely. That is
+    exactly why the earlier tests in this file passed: their setUp had just
+    written the tokens.
+
+    The fix is structural: one inverse per field, each writing only the column
+    it stands for. Not a cache-warming precondition, which would leave the
+    safety of the credentials depending on what happened to be read first.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.company = self.env.user.company_id
+        self.company.write({"mercadolibre_seller_id": _SELLER})
+        row = self.company._meli_auth_row(create=True)
+        row.sudo().write({
+            "access_token": _ACCESS,
+            "refresh_token": _REFRESH,
+            "code": _SEED_CODE,
+            "token_expires_in": _SEED_EXPIRES_IN,
+            "token_refreshed_at": _SEED_REFRESHED_AT,
+            "token_expires_at": _SEED_EXPIRES_AT,
+        })
+        self.env.flush_all()
+
+    def _auth_snapshot(self):
+        """The six columns straight from SQL, past every ORM cache."""
+        self.env.cr.execute(
+            "SELECT %s FROM mercadolibre_auth WHERE company_id = %%s"
+            % ", ".join(_AUTH_COLUMNS), (self.company.id,))
+        return dict(zip(_AUTH_COLUMNS, self.env.cr.fetchone()))
+
+    def _res_company_xmin(self):
+        self.env.cr.execute(
+            "SELECT xmin::text FROM res_company WHERE id = %s", (self.company.id,))
+        return self.env.cr.fetchone()[0]
+
+    def _write_one_field_cold(self, facade_field, new_value):
+        """Write a single credential with nothing warm in the cache."""
+        target = _FACADE_TO_AUTH[facade_field]
+
+        self.env.invalidate_all()
+        company = self.env["res.company"].browse(self.company.id)
+
+        before = self._auth_snapshot()
+        xmin_before = self._res_company_xmin()
+
+        company.write({facade_field: new_value})
+        self.env.flush_all()
+
+        after = self._auth_snapshot()
+
+        # Positive guard first. Without proving the targeted column actually
+        # moved, "the other five are unchanged" is satisfied by a write that
+        # did nothing at all.
+        self.assertNotEqual(
+            after[target], before[target],
+            "writing %s did not change mercadolibre_auth.%s, so the collateral "
+            "assertion below would be vacuous" % (facade_field, target))
+
+        collateral = {
+            column: (before[column], after[column])
+            for column in _AUTH_COLUMNS
+            if column != target and before[column] != after[column]
+        }
+        self.assertEqual(
+            collateral, {},
+            "writing only %s also changed %s. A shared inverse reads every "
+            "field it covers, and the ones that were not in cache read as "
+            "False, so credentials nobody touched get wiped. Losing the "
+            "refresh token this way is unrecoverable: it is single-use and the "
+            "previous one is already spent."
+            % (facade_field, ", ".join(sorted(collateral))))
+
+        self.assertEqual(
+            self._res_company_xmin(), xmin_before,
+            "writing %s issued an UPDATE on res_company" % facade_field)
+
+    def test_writing_only_the_access_token_leaves_the_rest_alone(self):
+        self._write_one_field_cold(
+            "mercadolibre_access_token", _NEW_ACCESS)
+
+    def test_writing_only_the_refresh_token_leaves_the_rest_alone(self):
+        self._write_one_field_cold(
+            "mercadolibre_refresh_token", "NEW-REFRESH-value-666666666666")
+
+    def test_writing_only_the_code_leaves_the_rest_alone(self):
+        self._write_one_field_cold(
+            "mercadolibre_code", "NEW-CODE-value-777777777777")
+
+    def test_writing_only_the_expires_in_leaves_the_rest_alone(self):
+        self._write_one_field_cold("mercadolibre_token_expires_in", 10800)
+
+    def test_writing_only_the_refreshed_at_leaves_the_rest_alone(self):
+        self._write_one_field_cold(
+            "mercadolibre_token_refreshed_at", "2026-07-02 08:30:00")
+
+    def test_writing_only_the_expires_at_leaves_the_rest_alone(self):
+        self._write_one_field_cold(
+            "mercadolibre_token_expires_at", "2026-07-02 14:30:00")
