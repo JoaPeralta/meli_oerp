@@ -348,6 +348,29 @@ class TestFacadeWritesOnlyTheTargetedField(TransactionCase):
             self._res_company_xmin(), xmin_before,
             "writing %s issued an UPDATE on res_company" % facade_field)
 
+    def test_each_credential_field_has_its_own_inverse(self):
+        """The structural guard behind the behavioural ones below.
+
+        The cold-cache tests catch a shared inverse today. This states the rule
+        directly, so re-introducing one is a failure about the rule rather than
+        a puzzle about caching.
+        """
+        inverses = {}
+        for name in _CREDENTIAL_FIELDS:
+            field = self.env["res.company"]._fields[name]
+            inverses[name] = field.inverse
+
+        shared = sorted(
+            name for name, inv in inverses.items()
+            if list(inverses.values()).count(inv) > 1)
+        self.assertEqual(
+            shared, [],
+            "these credential fields share an inverse: %s. Odoo protects every "
+            "field declaring the running inverse, and a protected computed "
+            "field that is not cached reads as False, so a shared inverse "
+            "wipes the credentials it was not asked to touch."
+            % ", ".join(shared))
+
     def test_writing_only_the_access_token_leaves_the_rest_alone(self):
         self._write_one_field_cold(
             "mercadolibre_access_token", _NEW_ACCESS)

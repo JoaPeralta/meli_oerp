@@ -353,25 +353,25 @@ class res_company(models.Model):
     # --------------------------------------------------------------------
     mercadolibre_access_token = fields.Char(
         string='Access Token', help='Access Token', size=256, store=False,
-        compute='_compute_meli_auth_fields', inverse='_inverse_meli_auth_fields')
+        compute='_compute_meli_auth_fields', inverse='_inverse_meli_access_token')
     mercadolibre_refresh_token = fields.Char(
         string='Refresh Token', help='Refresh Token', size=256, store=False,
-        compute='_compute_meli_auth_fields', inverse='_inverse_meli_auth_fields')
+        compute='_compute_meli_auth_fields', inverse='_inverse_meli_refresh_token')
     mercadolibre_code = fields.Char(
         string='Code', help='Code', size=256, store=False,
-        compute='_compute_meli_auth_fields', inverse='_inverse_meli_auth_fields')
+        compute='_compute_meli_auth_fields', inverse='_inverse_meli_code')
     mercadolibre_token_expires_in = fields.Integer(
         string='Token lifetime (s)', store=False,
-        compute='_compute_meli_auth_fields', inverse='_inverse_meli_auth_fields',
+        compute='_compute_meli_auth_fields', inverse='_inverse_meli_token_expires_in',
         help='expires_in informado por MercadoLibre en el ultimo /oauth/token. '
              '0 = MercadoLibre no lo informo.')
     mercadolibre_token_refreshed_at = fields.Datetime(
         string='Token obtained at', store=False,
-        compute='_compute_meli_auth_fields', inverse='_inverse_meli_auth_fields',
+        compute='_compute_meli_auth_fields', inverse='_inverse_meli_token_refreshed_at',
         help='Instante en que se recibio el access token vigente.')
     mercadolibre_token_expires_at = fields.Datetime(
         string='Token expires at', store=False,
-        compute='_compute_meli_auth_fields', inverse='_inverse_meli_auth_fields',
+        compute='_compute_meli_auth_fields', inverse='_inverse_meli_token_expires_at',
         help='Derivado: obtained_at + expires_in. Vacio si MercadoLibre no '
              'informo expires_in; en ese caso la vigencia es desconocida.')
     def _meli_auth_row(self, create=False):
@@ -409,22 +409,63 @@ class res_company(models.Model):
             company.mercadolibre_token_refreshed_at = row.token_refreshed_at or False
             company.mercadolibre_token_expires_at = row.token_expires_at or False
 
-    def _inverse_meli_auth_fields(self):
+    # ------------------------------------------------------------------
+    # Un inverse POR CAMPO. El compute si es compartido: calcular los seis de
+    # una sola lectura de la fila es correcto y barato.
+    #
+    # Compartir el INVERSE no lo es. Odoo protege todos los campos que declaran
+    # el inverse en curso, y un campo calculado protegido que no este en cache
+    # NO se calcula: se lee como False. Un inverse compartido que relea los seis
+    # para reescribirlos los borra cuando la cache viene fria:
+    #
+    #     fila auth: A1 / R1 / code / vigencia
+    #     cache fria -> write({'mercadolibre_access_token': A2})
+    #       -> access_token esta en cache (se acaba de escribir) -> A2
+    #       -> los otros cinco estan protegidos y sin cachear    -> False
+    #       -> se destruyen credenciales que nadie quiso tocar
+    #
+    # Perder asi el refresh token es irrecuperable: es de un solo uso y el
+    # anterior ya quedo gastado del lado de MercadoLibre.
+    #
+    # La seguridad viene de la ESTRUCTURA: cada inverse escribe unicamente su
+    # columna y no lee ninguna otra. No de precalentar la cache, que dejaria las
+    # credenciales dependiendo de que se haya leido antes.
+    #
+    # Escribir los seis campos a la vez dispara seis inverses en vez de uno.
+    # Van todos contra la misma fila en la misma transaccion, asi que el ORM los
+    # junta al hacer flush. Correccion por sobre micro-optimizacion.
+    # ------------------------------------------------------------------
+    def _meli_write_auth_field(self, auth_field, facade_field, empty=False):
+        """Escribe UNA sola columna de la fila auth.
+
+        Lee unicamente `facade_field`, que es el campo cuyo inverse esta
+        corriendo y por lo tanto el unico que con certeza esta en cache.
+        """
         for company in self:
             row = company._meli_auth_row(create=True)
-            if not row:
-                continue
-            # Se escriben los seis juntos: los que no venian en el write()
-            # se calculan leyendo esta misma fila, asi que se reescriben con
-            # su valor actual y no se pierde nada.
-            row.write({
-                'access_token': company.mercadolibre_access_token or False,
-                'refresh_token': company.mercadolibre_refresh_token or False,
-                'code': company.mercadolibre_code or False,
-                'token_expires_in': company.mercadolibre_token_expires_in or 0,
-                'token_refreshed_at': company.mercadolibre_token_refreshed_at or False,
-                'token_expires_at': company.mercadolibre_token_expires_at or False,
-            })
+            if row:
+                row.write({auth_field: company[facade_field] or empty})
+
+    def _inverse_meli_access_token(self):
+        self._meli_write_auth_field('access_token', 'mercadolibre_access_token')
+
+    def _inverse_meli_refresh_token(self):
+        self._meli_write_auth_field('refresh_token', 'mercadolibre_refresh_token')
+
+    def _inverse_meli_code(self):
+        self._meli_write_auth_field('code', 'mercadolibre_code')
+
+    def _inverse_meli_token_expires_in(self):
+        self._meli_write_auth_field(
+            'token_expires_in', 'mercadolibre_token_expires_in', empty=0)
+
+    def _inverse_meli_token_refreshed_at(self):
+        self._meli_write_auth_field(
+            'token_refreshed_at', 'mercadolibre_token_refreshed_at')
+
+    def _inverse_meli_token_expires_at(self):
+        self._meli_write_auth_field(
+            'token_expires_at', 'mercadolibre_token_expires_at')
 
     mercadolibre_seller_id = fields.Char( string='Vendedor Id', size=256)
     mercadolibre_user_product_seller = fields.Boolean( string='User Product Seller',index=True)
