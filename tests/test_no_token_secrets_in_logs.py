@@ -33,6 +33,7 @@ from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
 from odoo.addons.meli_oerp.models.meli_util import MeliConfiguration
+from odoo.addons.meli_oerp.tests.meli_auth_test_cursor import AmbientAuthCursor
 
 _SELLER = "2288636236"
 # The stored token must embed the seller id or get_new_instance bails out early
@@ -108,9 +109,13 @@ class TestNoTokenSecretsInLogs(TransactionCase):
     def _run(self, post_payload=None, post_exc=None):
         """Drive the real refresh branch and capture everything it logs."""
         session = _Session(post_payload=post_payload, post_exc=post_exc)
-        with patch.object(MeliConfiguration, "get_session", return_value=session):
+        self.env.flush_all()
+        self.auth_cr = AmbientAuthCursor(self.env.cr)
+        with patch.object(MeliConfiguration, "get_session", return_value=session),                 patch.object(type(self.env["meli.util"]), "_meli_auth_cursor",
+                             return_value=self.auth_cr):
             with self.assertLogs(_LOGGERS[0], level="DEBUG") as captured:
                 self.env["meli.util"].get_new_instance(self.company)
+        self.env.invalidate_all()
         self.session = session
         return "\n".join(r.getMessage() for r in captured.records)
 

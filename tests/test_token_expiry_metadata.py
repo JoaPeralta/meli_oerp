@@ -34,6 +34,7 @@ from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
 from odoo.addons.meli_oerp.models.meli_util import MeliConfiguration
+from odoo.addons.meli_oerp.tests.meli_auth_test_cursor import AmbientAuthCursor
 
 _SELLER = "2288636236"
 _OLD_ACCESS = "OLD-ACCESS-token-value-0000000000-%s" % _SELLER
@@ -87,9 +88,13 @@ class TestTokenExpiryMetadata(TransactionCase):
 
     def _refresh_with(self, payload):
         session = _Session(payload)
-        with patch.object(MeliConfiguration, "get_session", return_value=session):
+        self.env.flush_all()
+        self.auth_cr = AmbientAuthCursor(self.env.cr)
+        with patch.object(MeliConfiguration, "get_session", return_value=session),                 patch.object(type(self.env["meli.util"]), "_meli_auth_cursor",
+                             return_value=self.auth_cr):
             self.env["meli.util"].get_new_instance(self.company)
-        self.company.invalidate_recordset()
+        # The AUTH transaction persists with raw SQL, so the ORM cache is stale.
+        self.env.invalidate_all()
 
     def _payload(self, **over):
         p = {

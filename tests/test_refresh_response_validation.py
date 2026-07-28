@@ -59,6 +59,7 @@ from odoo.tests.common import TransactionCase
 
 from odoo.addons.meli_oerp.models import meli_util as meli_util_module
 from odoo.addons.meli_oerp.models.meli_util import MeliConfiguration
+from odoo.addons.meli_oerp.tests.meli_auth_test_cursor import AmbientAuthCursor
 
 _SELLER = "2288636236"
 _OTHER_SELLER = "9999999999"
@@ -114,10 +115,27 @@ class TestRefreshResponseValidation(TransactionCase):
 
     def _refresh_with(self, payload):
         session = _Session(payload)
-        with patch.object(MeliConfiguration, "get_session", return_value=session):
+        # The auth row must be visible to the FOR UPDATE the primitive issues.
+        self.env.flush_all()
+        self.auth_cr = AmbientAuthCursor(self.env.cr)
+        with patch.object(MeliConfiguration, "get_session", return_value=session),                 patch.object(type(self.env["meli.util"]), "_meli_auth_cursor",
+                             return_value=self.auth_cr):
             client = self.env["meli.util"].get_new_instance(self.company)
-        self.company.invalidate_recordset()
+        # The AUTH transaction persists with raw SQL, so the ORM cache is stale.
+        self.env.invalidate_all()
         return client
+
+    def _assert_refresh_actually_ran(self):
+        """Positive signal before any "nothing changed" assertion.
+
+        An AUTH transaction that bails out early -- no auth row, wrong
+        isolation level -- also leaves the credentials untouched. Without this,
+        those assertions would pass for entirely the wrong reason.
+        """
+        self.assertTrue(
+            any("FOR UPDATE" in s.upper() for s in self.auth_cr.statements),
+            "the AUTH transaction never locked the auth row, so it never got "
+            "as far as judging the response")
 
     def _good(self, **over):
         p = {"access_token": _NEW_ACCESS, "refresh_token": _NEW_REFRESH,
@@ -126,6 +144,7 @@ class TestRefreshResponseValidation(TransactionCase):
         return p
 
     def _assert_credentials_untouched(self, why):
+        self._assert_refresh_actually_ran()
         self.assertEqual(self.company.mercadolibre_access_token, _OLD_ACCESS, why)
         self.assertEqual(self.company.mercadolibre_refresh_token, _OLD_REFRESH, why)
 
