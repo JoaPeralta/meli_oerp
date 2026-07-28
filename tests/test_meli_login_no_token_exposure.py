@@ -18,6 +18,7 @@ from odoo.tests import tagged
 from odoo.tests.common import HttpCase
 
 
+_SELLER = "2288636236"
 _FAKE_CODE = "FAKEAUTHCODE0001"
 _FAKE_ACCESS = "APPUSR-FAKE-ACCESS-0001"
 _FAKE_REFRESH = "TG-FAKE-REFRESH-0001"
@@ -32,8 +33,12 @@ class _FakeMeli:
         self.refresh_token = _FAKE_REFRESH
 
     def authorize(self, code, redirect_uri=None):
-        # Simulate a successful code->token exchange (tokens already set).
-        return {"access_token": self.access_token, "refresh_token": self.refresh_token}
+        # A successful code->token exchange. user_id is what identifies the
+        # account, and the callback refuses to store a response without it.
+        return {"access_token": self.access_token,
+                "refresh_token": self.refresh_token,
+                "token_type": "Bearer", "expires_in": 21600,
+                "user_id": int(_SELLER)}
 
     def auth_url(self, redirect_URI=None):
         return "https://auth.example/authorization"
@@ -56,6 +61,9 @@ class TestMeliLoginNoTokenExposure(HttpCase):
             "mercadolibre_secret_key": _FAKE_SECRET,
             "mercadolibre_access_token": "",
             "mercadolibre_refresh_token": "",
+            # The callback now verifies which account answered before storing
+            # anything, so this fixture has to name the seller it expects.
+            "mercadolibre_seller_id": _SELLER,
         })
 
     def test_callback_hides_secrets_and_stores_tokens(self):
