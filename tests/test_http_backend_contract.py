@@ -238,7 +238,13 @@ class TestHttpBackendContract(TransactionCase):
         data = call["kwargs"].get("data") or {}
         self.assertEqual(data.get("grant_type"), "refresh_token")
         self.assertNotIn("access_token", call["url"])
-        self.assertEqual(result.get("access_token"), "REFRESHED-ACCESS")
+        # The backend now reports a MeliTokenOutcome: the payload plus the
+        # HTTP status plus whether the POST left the result unknowable.
+        # Returning a bare payload made a timeout indistinguishable from a
+        # refusal, and a single-use token cannot survive that confusion.
+        self.assertEqual(result.payload.get("access_token"), "REFRESHED-ACCESS")
+        self.assertEqual(result.http_status, 200)
+        self.assertFalse(result.transport_uncertain)
 
     def test_get_refresh_token_leaves_the_client_credentials_alone(self):
         """Deliberate change: this file used to pin the opposite behaviour.
