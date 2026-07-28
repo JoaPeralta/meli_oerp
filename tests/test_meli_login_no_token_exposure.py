@@ -41,8 +41,10 @@ class _FakeMeli:
                 "token_type": "Bearer", "expires_in": 21600,
                 "user_id": int(_SELLER)}
 
-    def auth_url(self, redirect_URI=None):
-        return "https://auth.example/authorization"
+    def auth_url(self, redirect_URI=None, state=None):
+        # El state va en la URL porque es de ahi que el test lo lee de vuelta,
+        # igual que haria un navegador.
+        return "https://auth.example/authorization?state=%s" % (state or "")
 
     def get(self, path, params=None, **kwargs):
         # The callback resolves AUTH_URL, which walks get_ML_AUTH_URL ->

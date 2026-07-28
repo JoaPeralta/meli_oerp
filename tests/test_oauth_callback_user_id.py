@@ -65,8 +65,10 @@ class _FakeMeli:
         self.authorize_calls += 1
         return self._payload
 
-    def auth_url(self, redirect_URI=None):
-        return "https://auth.example/authorization"
+    def auth_url(self, redirect_URI=None, state=None):
+        # El state va en la URL porque es de ahi que el test lo lee de vuelta,
+        # igual que haria un navegador.
+        return "https://auth.example/authorization?state=%s" % (state or "")
 
     def get(self, path, params=None, **kwargs):
         # Resolving AUTH_URL probes /sites; answering nothing keeps this test
