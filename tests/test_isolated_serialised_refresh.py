@@ -45,9 +45,15 @@ recording cursor, so they are deterministic and fast.
 
 They do **not** prove the concurrency property. A test that calls a sequential
 function twice with mocks cannot distinguish a working primitive from the
-failing REPEATABLE READ one — both look identical single-threaded. That property
-is proven by the two-connection probe above, run against real PostgreSQL, and is
-re-run against this implementation before merge.
+failing REPEATABLE READ one — both look identical single-threaded.
+
+What the probe establishes is that the *primitive* — READ COMMITTED plus
+``SELECT ... FOR UPDATE`` — serialises correctly on this PostgreSQL. What it
+does not establish is that this particular implementation of it does, because
+running it would require the code to be present in a live Odoo, and the deployed
+container still runs a commit that predates all of TD8. Confirming this
+implementation under genuine concurrency belongs to the controlled real
+validation, which is blocked on deployment and is not claimed here.
 """
 
 from unittest.mock import patch
