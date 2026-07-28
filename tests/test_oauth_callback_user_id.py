@@ -118,6 +118,11 @@ class TestOAuthCallbackUserId(HttpCase):
         with patch.object(type(self.env["meli.util"]), "_build_client",
                           return_value=fake):
             issued = self.url_open("/meli_login", allow_redirects=False)
+            self.assertEqual(
+                issued.status_code, 200,
+                "the login entry point failed (%s), so no state was issued and "
+                "every assertion below would hold for the wrong reason"
+                % issued.status_code)
             found = re.search(r"state=([A-Za-z0-9_\-]+)", issued.text)
             state = found.group(1) if found else ""
             response = self.url_open(

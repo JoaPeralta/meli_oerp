@@ -20,7 +20,12 @@ pp = pprint.PrettyPrinter(indent=4)
 import pdb
 import logging
 import secrets
-import time
+# Con guion bajo a proposito. Mas abajo este modulo hace `from ..models.versions
+# import *`, y versions hace `from datetime import *`, con lo cual el nombre
+# `time` termina apuntando a la CLASE datetime.time y `time.time()` revienta.
+# Los import wildcard omiten los nombres que empiezan con guion bajo, asi que
+# este alias no lo puede pisar ninguno.
+from time import time as _clock_seconds
 _logger = logging.getLogger(__name__)
 
 # El state de OAuth: aleatorio, atado a la sesion, con vencimiento y de un solo
@@ -35,7 +40,7 @@ def _issue_oauth_state():
     value = secrets.token_urlsafe(32)
     request.session[_OAUTH_STATE_SESSION_KEY] = {
         "value": value,
-        "issued_at": time.time(),
+        "issued_at": _clock_seconds(),
     }
     return value
 
@@ -51,7 +56,7 @@ def _consume_oauth_state(received):
         return False, "no state in the callback"
     if not stored or not stored.get("value"):
         return False, "no state was issued in this session"
-    if time.time() - stored.get("issued_at", 0) > _OAUTH_STATE_TTL_SECONDS:
+    if _clock_seconds() - stored.get("issued_at", 0) > _OAUTH_STATE_TTL_SECONDS:
         return False, "the issued state expired"
     if not secrets.compare_digest(str(stored["value"]), str(received)):
         return False, "the state does not match the one issued"

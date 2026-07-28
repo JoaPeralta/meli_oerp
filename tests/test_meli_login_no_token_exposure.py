@@ -76,6 +76,10 @@ class TestMeliLoginNoTokenExposure(HttpCase):
         ):
             # The callback now requires a state issued by this session.
             issued = self.url_open("/meli_login", allow_redirects=False)
+            self.assertEqual(
+                issued.status_code, 200,
+                "the login entry point failed (%s), so no state was issued"
+                % issued.status_code)
             found = re.search(r"state=([A-Za-z0-9_\-]+)", issued.text)
             state = found.group(1) if found else ""
             response = self.url_open(

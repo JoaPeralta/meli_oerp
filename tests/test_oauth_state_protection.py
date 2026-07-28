@@ -103,6 +103,13 @@ class TestOAuthStateProtection(HttpCase):
         with patch.object(type(self.env["meli.util"]), "_build_client",
                           return_value=fake):
             response = self.url_open("/meli_login", allow_redirects=False)
+        # Senal positiva antes de leer nada: una pagina de error de Odoo trae el
+        # codigo fuente, y el regex de abajo felizmente extrae de ahi un "state"
+        # que no emitio nadie. Sin este assert un 500 se lee como exito.
+        self.assertEqual(
+            response.status_code, 200,
+            "the login entry point failed (%s), so no state was ever issued"
+            % response.status_code)
         found = re.search(r"state=([A-Za-z0-9_\-]+)", response.text)
         return found.group(1) if found else None
 
