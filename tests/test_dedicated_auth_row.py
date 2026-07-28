@@ -136,7 +136,11 @@ class TestDedicatedAuthRow(TransactionCase):
         self.env.cr.execute(
             "UPDATE mercadolibre_auth SET access_token = %s WHERE company_id = %s",
             (_NEW_ACCESS, self.company.id))
-        self.company.invalidate_recordset()
+        # invalidate_all and not the company's recordset: the raw UPDATE went
+        # around the ORM, so it is the mercadolibre.auth cache that is stale.
+        # Clearing only res.company would re-run the compute against the same
+        # cached auth record and read the old value back.
+        self.env.invalidate_all()
 
         self.assertEqual(self.company.mercadolibre_access_token, _NEW_ACCESS)
 
@@ -191,23 +195,26 @@ class TestDedicatedAuthRow(TransactionCase):
     # ------------------------------------------------------------------
     # access control: this table holds secrets
     # ------------------------------------------------------------------
+    def _plain_internal_user(self, login):
+        """An employee with base.group_user and nothing else.
+
+        Odoo 19 renamed res.users.groups_id to group_ids.
+        """
+        return self.env["res.users"].create({
+            "name": "Plain Employee",
+            "login": login,
+            "group_ids": [(6, 0, [self.env.ref("base.group_user").id])],
+        })
+
     def test_a_plain_internal_user_cannot_read_the_auth_rows(self):
         """Credentials must not be enumerable by any logged-in employee."""
-        user = self.env["res.users"].create({
-            "name": "Plain Employee",
-            "login": "plain.employee.meli.auth.test",
-            "groups_id": [(6, 0, [self.env.ref("base.group_user").id])],
-        })
+        user = self._plain_internal_user("plain.employee.meli.auth.test")
 
         with self.assertRaises(AccessError):
             self.env["mercadolibre.auth"].with_user(user).search([])
 
     def test_a_plain_internal_user_cannot_write_the_auth_rows(self):
-        user = self.env["res.users"].create({
-            "name": "Plain Employee 2",
-            "login": "plain.employee2.meli.auth.test",
-            "groups_id": [(6, 0, [self.env.ref("base.group_user").id])],
-        })
+        user = self._plain_internal_user("plain.employee2.meli.auth.test")
         row = self.env["mercadolibre.auth"].sudo().search(
             [("company_id", "=", self.company.id)], limit=1)
 
