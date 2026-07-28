@@ -38,6 +38,12 @@ class _FakeMeli:
     def auth_url(self, redirect_URI=None):
         return "https://auth.example/authorization"
 
+    def get(self, path, params=None, **kwargs):
+        # The callback resolves AUTH_URL, which walks get_ML_AUTH_URL ->
+        # _get_ML_sites -> GET /sites. Returning nothing makes that fall back to
+        # the currency lookup, and keeps this test off the network.
+        return None
+
 
 @tagged("post_install", "-at_install")
 class TestMeliLoginNoTokenExposure(HttpCase):
@@ -57,7 +63,7 @@ class TestMeliLoginNoTokenExposure(HttpCase):
         fake = _FakeMeli()
 
         with patch.object(
-            type(self.env["meli.util"]), "get_new_instance", return_value=fake
+            type(self.env["meli.util"]), "_build_client", return_value=fake
         ):
             response = self.url_open(
                 "/meli_login?code=%s" % _FAKE_CODE, allow_redirects=False
