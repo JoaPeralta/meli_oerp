@@ -681,6 +681,11 @@ class res_company(models.Model):
     def _meli_ids_auth_failed(self, meli, rjson):
         """Decide si la sesion quedo inutilizable. Solo dos senales cuentan.
 
+        Compartido con meli_pause_all: que significa "la sesion no sirve" tiene
+        que estar definido una sola vez, o las dos copias se separan con el
+        tiempo y vuelve el problema que este metodo existe para evitar.
+
+
         El status HTTP 401/403, o el par error/message con el que MercadoLibre
         nombra un token invalido o vencido. Nada mas: un 5xx, un cuerpo
         ilegible o una clave 'error' cualquiera no dicen nada de la credencial.
@@ -2403,6 +2408,22 @@ class res_company(models.Model):
         #create an order with this product and check final amount in line.
         return False
 
+    def _meli_pause_all_auth_stop(self, stage):
+        """Aborta el pausado sin tocar una sola credencial.
+
+        Toda la lectura de la lista de publicaciones pasa ANTES del bucle de
+        put_mini, asi que cortar aca garantiza que no se pauso nada.
+
+        No se redirige al OAuth desde la mitad de la operacion: un redirect
+        automatico se lee como "andá a reconectar" y esconde que no se pauso
+        ninguna publicacion. Un UserError lo dice.
+        """
+        _logger.warning("meli_pause_all aborted at %s: session unusable", stage)
+        raise UserError(_(
+            "La sesión de MercadoLibre no está disponible. "
+            "No se modificaron las credenciales ni se pausaron publicaciones. "
+            "Volvé a intentar o desconectá y autorizá nuevamente la cuenta."))
+
     def meli_pause_all( self ):
         #_logger.info('company.meli_pause_all() ')
         company = self.env.user.company_id
@@ -2421,11 +2442,10 @@ class res_company(models.Model):
         rjson = response.json()
         #_logger.info( rjson )
 
+        if self._meli_ids_auth_failed(meli, rjson):
+            self._meli_pause_all_auth_stop("the initial item search")
+
         if 'error' in rjson:
-            if rjson['message']=='invalid_token' or rjson['message']=='expired_token':
-                ACCESS_TOKEN = ''
-                REFRESH_TOKEN = ''
-                company.write({'mercadolibre_access_token': ACCESS_TOKEN, 'mercadolibre_refresh_token': REFRESH_TOKEN, 'mercadolibre_code': '' } )
             return {
             "type": "ir.actions.act_url",
             "url": url_login_meli,
@@ -2464,17 +2484,13 @@ class res_company(models.Model):
                     'limit': '100'
                     })
                 rjson2 = response.json()
+                if self._meli_ids_auth_failed(meli, rjson2):
+                    self._meli_pause_all_auth_stop("the scan pagination")
+
                 if 'error' in rjson2:
-                    _logger.error( rjson2 )
-                    if rjson2['message']=='invalid_token' or rjson2['message']=='expired_token':
-                        ACCESS_TOKEN = ''
-                        REFRESH_TOKEN = ''
-                        company.write({'mercadolibre_access_token': ACCESS_TOKEN, 'mercadolibre_refresh_token': REFRESH_TOKEN, 'mercadolibre_code': '' } )
-                        condition = True
-                        return {
-                        "type": "ir.actions.act_url",
-                        "url": url_login_meli,
-                        "target": "new",}
+                    # Solo error y message: el cuerpo entero no se vuelca.
+                    _logger.error("meli_pause_all scan: error=%s message=%s",
+                                  rjson2.get('error'), rjson2.get('message'))
                     condition_last_off = True
                 else:
                     results += rjson2['results']
@@ -2493,15 +2509,12 @@ class res_company(models.Model):
                 #_logger.info( "Prefetch products ("+str(ioff)+"/"+str(rjson['paging']['total'])+")" )
                 response = meli.get("/users/"+company.mercadolibre_seller_id+"/items/search", {'access_token':meli.access_token,'offset': ioff })
                 rjson2 = response.json()
+                if self._meli_ids_auth_failed(meli, rjson2):
+                    self._meli_pause_all_auth_stop("the offset pagination")
+
                 if 'error' in rjson2:
-                    if rjson2['message']=='invalid_token' or rjson2['message']=='expired_token':
-                        ACCESS_TOKEN = ''
-                        REFRESH_TOKEN = ''
-                        company.write({'mercadolibre_access_token': ACCESS_TOKEN, 'mercadolibre_refresh_token': REFRESH_TOKEN, 'mercadolibre_code': '' } )
-                        return {
-                        "type": "ir.actions.act_url",
-                        "url": url_login_meli,
-                        "target": "new",}
+                    _logger.error("meli_pause_all offset: error=%s message=%s",
+                                  rjson2.get('error'), rjson2.get('message'))
                     condition_last_off = True
                 else:
                     results += rjson2['results']
