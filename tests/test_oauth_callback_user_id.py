@@ -223,7 +223,10 @@ class TestOAuthCallbackUserId(HttpCase):
         with patch.object(type(self.env["meli.util"]), "_build_client",
                           return_value=fake), \
                 patch.object(type(self.company), "write", exploding_write):
-            self.url_open("/meli_login?code=%s" % _FAKE_CODE,
+            issued = self.url_open("/meli_login", allow_redirects=False)
+            found = re.search(r"state=([A-Za-z0-9_\-]+)", issued.text)
+            state = found.group(1) if found else ""
+            self.url_open("/meli_login?code=%s&state=%s" % (_FAKE_CODE, state),
                           allow_redirects=False)
         self.env.invalidate_all()
 

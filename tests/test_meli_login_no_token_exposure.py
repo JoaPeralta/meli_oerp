@@ -12,6 +12,7 @@ real credentials) and asserts that:
 * the tokens are nevertheless stored server-side on res.company.
 """
 
+import re
 from unittest.mock import patch
 
 from odoo.tests import tagged
@@ -73,8 +74,13 @@ class TestMeliLoginNoTokenExposure(HttpCase):
         with patch.object(
             type(self.env["meli.util"]), "_build_client", return_value=fake
         ):
+            # The callback now requires a state issued by this session.
+            issued = self.url_open("/meli_login", allow_redirects=False)
+            found = re.search(r"state=([A-Za-z0-9_\-]+)", issued.text)
+            state = found.group(1) if found else ""
             response = self.url_open(
-                "/meli_login?code=%s" % _FAKE_CODE, allow_redirects=False
+                "/meli_login?code=%s&state=%s" % (_FAKE_CODE, state),
+                allow_redirects=False
             )
 
         self.assertEqual(response.status_code, 200)

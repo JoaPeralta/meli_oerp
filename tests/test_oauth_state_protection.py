@@ -32,6 +32,7 @@ unknown, expired or already-used state means no exchange happens at all --
 stored.
 """
 
+import re
 import time
 from unittest.mock import patch
 
@@ -94,11 +95,16 @@ class TestOAuthStateProtection(HttpCase):
         return row if row else (None, None)
 
     def _issue_state(self, fake):
-        """Hit the entry point that renders a login link, which issues a state."""
+        """Hit the entry point that renders a login link, which issues a state.
+
+        The value is read back out of the rendered link rather than off the
+        fake, so the test asserts what a browser would actually receive.
+        """
         with patch.object(type(self.env["meli.util"]), "_build_client",
                           return_value=fake):
-            self.url_open("/meli_login", allow_redirects=False)
-        return fake.last_state
+            response = self.url_open("/meli_login", allow_redirects=False)
+        found = re.search(r"state=([A-Za-z0-9_\-]+)", response.text)
+        return found.group(1) if found else None
 
     def _callback(self, fake, state=None, code=_FAKE_CODE):
         url = "/meli_login?code=%s" % code
