@@ -132,9 +132,11 @@ class TestNoHiddenRefresh(TransactionCase):
         # fakes and what it does not claim to prove.
         self.env.flush_all()
         self.auth_cr = AmbientAuthCursor(self.env.cr)
-        with patch.object(MeliConfiguration, "get_session",
-                          return_value=session),                 patch.object(type(self.util), "_meli_auth_cursor",
-                             return_value=self.auth_cr):
+        with patch.object(
+            MeliConfiguration, "get_session", return_value=session
+        ), patch.object(
+            type(self.util), "_meli_auth_cursor", return_value=self.auth_cr
+        ):
             client = self.util.get_new_instance(self.company, **kwargs)
         self.env.invalidate_all()
         return client
