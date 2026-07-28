@@ -1655,7 +1655,10 @@ class MeliUtil(models.AbstractModel):
         api_rest_client.refresh_token = company.mercadolibre_refresh_token
         api_rest_client.redirect_uri = company.mercadolibre_redirect_uri
         api_rest_client.seller_id = company.mercadolibre_seller_id
-        api_rest_client.AUTH_URL = company.get_ML_AUTH_URL(meli=api_rest_client)
+        # AUTH_URL queda en el default de clase a proposito. Resolverlo llama a
+        # get_ML_AUTH_URL -> _get_ML_sites, que hace un GET /sites: red, y este
+        # constructor no la toca. Lo resuelven los dos consumidores que de verdad
+        # lo necesitan (get_new_instance y el callback de OAuth).
         api_rest_client.needlogin_state = False
         return api_rest_client
 
@@ -1723,6 +1726,7 @@ class MeliUtil(models.AbstractModel):
             company = self.env.user.company_id
 
         api_rest_client = self._build_client(company)
+        api_rest_client.AUTH_URL = company.get_ML_AUTH_URL(meli=api_rest_client)
         last_token = api_rest_client.access_token
         message = "Login to ML needed in Odoo."
 

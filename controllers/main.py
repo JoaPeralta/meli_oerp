@@ -124,6 +124,7 @@ class MercadoLibreLogin(http.Controller):
         # cliente no debe poder rotar credenciales, y lo unico que necesita de el
         # son auth_url() y authorize().
         meli = meli_util_model._build_client(company)
+        meli.AUTH_URL = company.get_ML_AUTH_URL(meli=meli)
 
         codes.setdefault('code','none')
         codes.setdefault('error','none')

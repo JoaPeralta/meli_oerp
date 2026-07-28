@@ -43,6 +43,7 @@ from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
 from odoo.addons.meli_oerp.models.meli_util import MeliConfiguration
+from odoo.addons.meli_oerp.tests.meli_auth_test_cursor import AmbientAuthCursor
 
 _SELLER = "2288636236"
 _OLD_ACCESS = "OLD-ACCESS-000000000000-%s" % _SELLER
@@ -125,8 +126,15 @@ class TestNoHiddenRefresh(TransactionCase):
         return self.env.cr.fetchone()
 
     def _run(self, session, **kwargs):
+        # The TD8 primitive opens a real second connection, which cannot see
+        # this test's uncommitted auth row. AmbientAuthCursor runs its
+        # statements on the test's own cursor; see that module for what it
+        # fakes and what it does not claim to prove.
+        self.env.flush_all()
+        self.auth_cr = AmbientAuthCursor(self.env.cr)
         with patch.object(MeliConfiguration, "get_session",
-                          return_value=session):
+                          return_value=session),                 patch.object(type(self.util), "_meli_auth_cursor",
+                             return_value=self.auth_cr):
             client = self.util.get_new_instance(self.company, **kwargs)
         self.env.invalidate_all()
         return client
