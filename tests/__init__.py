@@ -21,4 +21,5 @@ from . import test_no_variants_log_noise
 from . import test_no_token_secrets_in_logs
 from . import test_token_expiry_metadata
 from . import test_refresh_response_validation
+from . import test_dedicated_auth_row
 from . import test_http_backend_selection
