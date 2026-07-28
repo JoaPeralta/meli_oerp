@@ -74,6 +74,7 @@ class _CountingSession:
     def __init__(self, get_response, token_payload=None):
         self.oauth_post_count = 0
         self.get_count = 0
+        self.identity_probe_count = 0
         self._get_response = get_response
         self._token_payload = token_payload or {
             "access_token": _NEW_ACCESS, "refresh_token": _NEW_REFRESH,
@@ -82,9 +83,14 @@ class _CountingSession:
 
     def get(self, url, **kwargs):
         self.get_count += 1
+        if "/users/" in str(url):
+            self.identity_probe_count += 1
         response = self._get_response
         if callable(response):
-            response = response(self.get_count)
+            # Keyed on the identity probe, not on the call index: resolving
+            # AUTH_URL issues its own GET /sites first, and a response meant for
+            # the identity check must not land on that one.
+            response = response(self.identity_probe_count)
         return response
 
     def post(self, url, **kwargs):
@@ -218,9 +224,9 @@ class TestNoHiddenRefresh(TransactionCase):
     # ------------------------------------------------------------------
     def test_a_401_renews_exactly_once(self):
         """A real MercadoLibre 401 carries no `error` key, and must still renew."""
-        def responses(n):
-            # First probe 401; after the renewal the identity check succeeds.
-            if n == 1:
+        def responses(probe):
+            # First identity probe 401; after the renewal the check succeeds.
+            if probe <= 1:
                 return _Resp(401, {"message": "invalid or expired token"})
             return _Resp(200, {"id": int(_SELLER), "nickname": "VIARENGO"})
 
