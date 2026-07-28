@@ -59,9 +59,16 @@ validation, which is blocked on deployment and is not claimed here.
 from unittest.mock import patch
 
 import psycopg2
+import requests
 
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
+
+from odoo.addons.meli_oerp.models.meli_util import (
+    MeliApiNoSDK,
+    MeliTokenOutcome,
+    configuration_nosdk,
+)
 
 _SELLER = "2288636236"
 _OLD_ACCESS = "OLD-ACCESS-000000000000-%s" % _SELLER
@@ -81,21 +88,35 @@ class _RecordingCursor:
 
     def __init__(self, auth_row=(_AUTH_ROW_ID, _OLD_ACCESS, _OLD_REFRESH),
                  isolation="read committed", for_update_exc=None,
-                 commit_exc=None):
+                 commit_exc=None, update_exc=None, update_rowcount=1,
+                 events=None, name="cursor"):
         self.statements = []
+        self.params = []
         self.committed = False
         self.rolled_back = False
         self.closed = False
+        self.rowcount = 0
         self._auth_row = auth_row
         self._isolation = isolation
         self._for_update_exc = for_update_exc
         self._commit_exc = commit_exc
+        self._update_exc = update_exc
+        self._update_rowcount = update_rowcount
         self._result = []
+        # Shared ordering log, so tests can assert that the original
+        # transaction was released before recovery opened.
+        self._events = events if events is not None else []
+        self._name = name
+
+    def _note(self, what):
+        self._events.append("%s:%s" % (self._name, what))
 
     # -- the bits the primitive uses -----------------------------------
     def execute(self, query, params=None):
         text = " ".join(str(query).split())
         self.statements.append(text)
+        self.params.append(params)
+        self._note("execute")
         low = text.lower()
         if "show transaction_isolation" in low:
             self._result = [(self._isolation,)]
@@ -103,6 +124,11 @@ class _RecordingCursor:
             if self._for_update_exc is not None:
                 raise self._for_update_exc
             self._result = [self._auth_row] if self._auth_row else []
+        elif "update mercadolibre_auth" in low:
+            if self._update_exc is not None:
+                raise self._update_exc
+            self.rowcount = self._update_rowcount
+            self._result = []
         else:
             self._result = []
 
@@ -113,12 +139,21 @@ class _RecordingCursor:
         if self._commit_exc is not None:
             raise self._commit_exc
         self.committed = True
+        self._note("commit")
 
     def rollback(self):
         self.rolled_back = True
 
     def close(self):
         self.closed = True
+        self._note("close")
+
+    def params_for(self, needle):
+        """Parameters of the first statement matching `needle`."""
+        for text, params in zip(self.statements, self.params):
+            if needle.lower() in text.lower():
+                return params
+        return None
 
     def __enter__(self):
         return self
@@ -136,9 +171,13 @@ class _RecordingCursor:
 
 
 class _FakeMeliClient:
-    """Counts POSTs. Never touches the network."""
+    """Counts POSTs. Never touches the network.
 
-    def __init__(self, response=None, exc=None):
+    Returns a ``MeliTokenOutcome``, the contract both backends now honour, so
+    these tests exercise the same shape the real client produces.
+    """
+
+    def __init__(self, outcome=None, exc=None):
         self.access_token = _OLD_ACCESS
         self.refresh_token = _OLD_REFRESH
         self.client_id = "1234567890123456"
@@ -146,7 +185,7 @@ class _FakeMeliClient:
         self.seller_id = _SELLER
         self.post_count = 0
         self.refresh_token_used = None
-        self._response = response
+        self._outcome = outcome
         self._exc = exc
 
     def get_refresh_token(self, code=None, redirect_uri=None):
@@ -154,15 +193,63 @@ class _FakeMeliClient:
         self.refresh_token_used = self.refresh_token
         if self._exc is not None:
             raise self._exc
-        return self._response
+        return self._outcome
 
 
-def _valid_response(**over):
+def _valid_payload(**over):
     payload = {"access_token": _NEW_ACCESS, "refresh_token": _NEW_REFRESH,
                "token_type": "Bearer", "expires_in": 21600,
                "user_id": int(_SELLER)}
     payload.update(over)
     return payload
+
+
+def _valid_response(**over):
+    return MeliTokenOutcome(payload=_valid_payload(**over), http_status=200)
+
+
+class _Resp:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = str(payload)
+
+    def json(self):
+        return self._payload
+
+
+class _PostSession:
+    """Real requests.Session stand-in: counts attempts, can raise or answer."""
+
+    def __init__(self, status=200, payload=None, exc=None):
+        self.attempts = 0
+        self._status = status
+        self._payload = payload if payload is not None else _valid_payload()
+        self._exc = exc
+
+    def post(self, url, **kwargs):
+        self.attempts += 1
+        if self._exc is not None:
+            raise self._exc
+        return _Resp(self._status, self._payload)
+
+
+def _real_nosdk_client(session):
+    """The actual MeliApiNoSDK, driven through a fake socket layer.
+
+    The point of using the real backend: it catches requests.RequestException
+    itself, so a transport failure never surfaces as a Python exception to the
+    caller. A test that raises straight out of a fake client is testing a
+    situation the production code cannot produce.
+    """
+    client = MeliApiNoSDK(config=configuration_nosdk)
+    client._session = session
+    client.access_token = _OLD_ACCESS
+    client.refresh_token = _OLD_REFRESH
+    client.client_id = "1234567890123456"
+    client.client_secret = "client-secret-value-4444444444"
+    client.seller_id = _SELLER
+    return client
 
 
 @tagged("post_install", "-at_install")
@@ -336,8 +423,9 @@ class TestIsolatedSerialisedRefresh(TransactionCase):
 
     def test_invalid_grant_aborts_for_reauth_without_touching_the_tokens(self):
         cursor = _RecordingCursor()
-        client = _FakeMeliClient({"error": "invalid_grant",
-                                  "message": "refresh token expired"})
+        client = _FakeMeliClient(MeliTokenOutcome(
+            payload={"error": "invalid_grant", "message": "refresh token expired"},
+            http_status=400))
 
         result = self._refresh(cursor, client)
 
@@ -345,16 +433,26 @@ class TestIsolatedSerialisedRefresh(TransactionCase):
         self.assertEqual(cursor.matching("update mercadolibre_auth"), [])
         self.assertFalse(cursor.committed)
 
-    def test_a_transport_failure_is_uncertain_and_never_retried(self):
-        """POST sent, no answer: we cannot know whether MercadoLibre spent it."""
-        cursor = _RecordingCursor()
-        client = _FakeMeliClient(exc=Exception("connection reset"))
+    # ------------------------------------------------------------------
+    # the locked row is the only authority on which token to post
+    # ------------------------------------------------------------------
+    def test_an_empty_stored_refresh_token_never_posts(self):
+        """The caller's token is a generation marker, never a fallback.
+
+        Falling back to it would post a token the locked row does not vouch
+        for -- exactly the unserialised behaviour the lock exists to prevent.
+        """
+        cursor = _RecordingCursor(auth_row=(_AUTH_ROW_ID, _OLD_ACCESS, ""))
+        client = _FakeMeliClient(_valid_response())
+        client.refresh_token = _OLD_REFRESH
 
         result = self._refresh(cursor, client)
 
-        self.assertEqual(result.status, "AUTH_UNCERTAIN")
-        self.assertEqual(client.post_count, 1,
-                         "an ambiguous POST must never be retried")
+        self.assertEqual(
+            client.post_count, 0,
+            "posted the caller's refresh token even though the locked row "
+            "carries none")
+        self.assertIn(result.status, ("ABORT_REAUTH", "AUTH_CRITICAL"))
         self.assertEqual(cursor.matching("update mercadolibre_auth"), [])
         self.assertFalse(cursor.committed)
 
@@ -378,3 +476,302 @@ class TestIsolatedSerialisedRefresh(TransactionCase):
         self.assertEqual(client.post_count, 0)
         self.assertFalse(cursor.committed)
         self.assertTrue(cursor.rolled_back)
+
+
+@tagged("post_install", "-at_install")
+class TestRefreshErrorPathsThroughTheRealBackend(TransactionCase):
+    """The error paths, driven through ``MeliApiNoSDK`` rather than around it.
+
+    This class exists because the first version of these tests was wrong. It
+    used a fake client that raised ``Exception`` from ``get_refresh_token`` and
+    asserted the primitive called that ``AUTH_UNCERTAIN``. The real backend
+    never does that: it catches ``requests.RequestException`` itself and returns
+    an error payload, so a genuine timeout reached the primitive looking like
+    any other bad response and was classified ``REJECTED``.
+
+    A refresh that timed out and one MercadoLibre refused are not the same
+    event. After a timeout we cannot know whether the refresh token was spent,
+    so nothing may be retried and nothing may be written. Getting that wrong is
+    how a single-use token gets burned twice.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.company = self.env.user.company_id
+        self.company.write({
+            "mercadolibre_seller_id": _SELLER,
+            "mercadolibre_access_token": _OLD_ACCESS,
+            "mercadolibre_refresh_token": _OLD_REFRESH,
+            "mercadolibre_client_id": "1234567890123456",
+            "mercadolibre_secret_key": "client-secret-value-4444444444",
+        })
+        self.env.flush_all()
+        self.util = self.env["meli.util"]
+
+    def _refresh(self, cursor, client):
+        with patch.object(type(self.util), "_meli_auth_cursor",
+                          return_value=cursor):
+            return self.util._meli_refresh_credentials(self.company, client)
+
+    def _assert_nothing_was_written(self, cursor, result):
+        self.assertEqual(
+            cursor.matching("update mercadolibre_auth"), [],
+            "credentials were written on a path that must not write")
+        self.assertFalse(cursor.committed)
+        self.assertEqual(result.access_token, _OLD_ACCESS)
+        self.assertEqual(result.refresh_token, _OLD_REFRESH)
+
+    # -- transport uncertainty -----------------------------------------
+    def test_a_real_timeout_is_uncertain_and_never_retried(self):
+        session = _PostSession(exc=requests.Timeout("timed out"))
+        cursor = _RecordingCursor()
+
+        result = self._refresh(cursor, _real_nosdk_client(session))
+
+        self.assertEqual(
+            session.attempts, 1,
+            "the POST was attempted more than once after an ambiguous "
+            "timeout; MercadoLibre may already have spent the token")
+        self.assertEqual(
+            result.status, "AUTH_UNCERTAIN",
+            "a timeout was classified as a refusal. We cannot know whether "
+            "the refresh token was consumed, and calling it a refusal invites "
+            "a retry that would spend a second one")
+        self._assert_nothing_was_written(cursor, result)
+
+    def test_a_real_connection_error_is_uncertain(self):
+        session = _PostSession(exc=requests.ConnectionError("reset by peer"))
+        cursor = _RecordingCursor()
+
+        result = self._refresh(cursor, _real_nosdk_client(session))
+
+        self.assertEqual(session.attempts, 1)
+        self.assertEqual(result.status, "AUTH_UNCERTAIN")
+        self._assert_nothing_was_written(cursor, result)
+
+    # -- classified by HTTP status, not by the body --------------------
+    def _assert_indeterminate(self, status_code):
+        session = _PostSession(status=status_code,
+                               payload={"message": "not about the token"})
+        cursor = _RecordingCursor()
+
+        result = self._refresh(cursor, _real_nosdk_client(session))
+
+        self.assertEqual(
+            result.status, "ABORT_INDETERMINATE",
+            "HTTP %s says nothing about whether the token is still valid; "
+            "treating it as expired triggers a refresh that is not needed"
+            % status_code)
+        self.assertEqual(session.attempts, 1,
+                         "HTTP %s was retried" % status_code)
+        self._assert_nothing_was_written(cursor, result)
+
+    def test_http_403_is_indeterminate(self):
+        self._assert_indeterminate(403)
+
+    def test_http_429_is_indeterminate(self):
+        self._assert_indeterminate(429)
+
+    def test_http_500_is_indeterminate(self):
+        self._assert_indeterminate(500)
+
+    def test_http_503_is_indeterminate(self):
+        self._assert_indeterminate(503)
+
+    def test_invalid_grant_is_still_reauth_not_indeterminate(self):
+        """The one refusal that really is about the token."""
+        session = _PostSession(
+            status=400,
+            payload={"error": "invalid_grant", "message": "expired"})
+        cursor = _RecordingCursor()
+
+        result = self._refresh(cursor, _real_nosdk_client(session))
+
+        self.assertEqual(result.status, "ABORT_REAUTH")
+        self._assert_nothing_was_written(cursor, result)
+
+    def test_a_valid_response_through_the_real_backend_is_accepted(self):
+        """Guard: the classifications above mean nothing if nothing succeeds."""
+        session = _PostSession(status=200, payload=_valid_payload())
+        cursor = _RecordingCursor()
+
+        result = self._refresh(cursor, _real_nosdk_client(session))
+
+        self.assertEqual(result.status, "REFRESHED")
+        self.assertTrue(cursor.matching("update mercadolibre_auth"))
+        self.assertTrue(cursor.committed)
+
+
+@tagged("post_install", "-at_install")
+class TestRecoveryAfterAValidRotation(TransactionCase):
+    """Once MercadoLibre has rotated the token, losing it locally is fatal.
+
+    R1 is spent the instant the POST succeeds. If the local UPDATE or COMMIT
+    then fails, A2/R2 exist only in this process's memory, and they are the only
+    credentials that can still reach MercadoLibre. Re-posting is not a recovery:
+    it would spend R2 as well.
+
+    So everything after a valid response -- deriving the expiry, the UPDATE, the
+    COMMIT -- is one protected phase. Any failure inside it releases the
+    original transaction first, then retries the persist alone, under exclusion,
+    with no second POST.
+
+    Recovery must also be able to tell what it is looking at:
+
+        row already holds R2      -> the original commit did land -> success
+        row still holds R1        -> persist exactly A2/R2
+        row holds something else  -> a third generation exists; do not
+                                     overwrite it -> AUTH_CRITICAL
+        no row, or rowcount != 1  -> AUTH_CRITICAL
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.company = self.env.user.company_id
+        self.company.write({
+            "mercadolibre_seller_id": _SELLER,
+            "mercadolibre_access_token": _OLD_ACCESS,
+            "mercadolibre_refresh_token": _OLD_REFRESH,
+            "mercadolibre_client_id": "1234567890123456",
+            "mercadolibre_secret_key": "client-secret-value-4444444444",
+        })
+        self.env.flush_all()
+        self.util = self.env["meli.util"]
+        self.events = []
+
+    def _refresh(self, first, second, client):
+        handed = []
+
+        def _next(*args, **kwargs):
+            cur = first if not handed else second
+            handed.append(cur)
+            return cur
+
+        with patch.object(type(self.util), "_meli_auth_cursor",
+                          side_effect=_next):
+            return self.util._meli_refresh_credentials(self.company, client)
+
+    def _primary(self, **kw):
+        kw.setdefault("events", self.events)
+        kw.setdefault("name", "primary")
+        return _RecordingCursor(**kw)
+
+    def _recovery(self, **kw):
+        kw.setdefault("events", self.events)
+        kw.setdefault("name", "recovery")
+        return _RecordingCursor(**kw)
+
+    # ------------------------------------------------------------------
+    def test_a_failed_update_recovers_without_a_second_post(self):
+        first = self._primary(update_exc=RuntimeError("disk full"))
+        second = self._recovery(
+            auth_row=(_AUTH_ROW_ID, _OLD_ACCESS, _OLD_REFRESH))
+        client = _FakeMeliClient(_valid_response())
+
+        result = self._refresh(first, second, client)
+
+        self.assertEqual(client.post_count, 1,
+                         "recovery issued a second POST, spending R2 as well")
+        # Positive guard: recovery must have WRITTEN A2/R2, not merely
+        # reported success.
+        self.assertTrue(second.matching("update mercadolibre_auth"),
+                        "recovery never wrote the rotated credentials")
+        self.assertIn(
+            _NEW_REFRESH, list(second.params_for("update mercadolibre_auth")),
+            "recovery wrote something other than the rotated refresh token")
+        self.assertTrue(second.committed)
+        self.assertEqual(result.status, "REFRESHED")
+        self.assertEqual(result.refresh_token, _NEW_REFRESH)
+
+    def test_a_failed_commit_recovers_without_a_second_post(self):
+        first = self._primary(commit_exc=RuntimeError("connection lost"))
+        second = self._recovery(
+            auth_row=(_AUTH_ROW_ID, _OLD_ACCESS, _OLD_REFRESH))
+        client = _FakeMeliClient(_valid_response())
+
+        result = self._refresh(first, second, client)
+
+        self.assertEqual(client.post_count, 1)
+        self.assertTrue(second.matching("update mercadolibre_auth"))
+        self.assertIn(
+            _NEW_REFRESH, list(second.params_for("update mercadolibre_auth")))
+        self.assertTrue(second.committed)
+        self.assertEqual(result.status, "REFRESHED")
+
+    def test_the_original_transaction_is_released_before_recovery_starts(self):
+        """Otherwise recovery waits on a FOR UPDATE the failed transaction may
+        still be holding, and blocks against itself."""
+        first = self._primary(commit_exc=RuntimeError("connection lost"))
+        second = self._recovery(
+            auth_row=(_AUTH_ROW_ID, _OLD_ACCESS, _OLD_REFRESH))
+
+        self._refresh(first, second, _FakeMeliClient(_valid_response()))
+
+        self.assertIn("recovery:execute", self.events,
+                      "recovery never ran, so the ordering assertion below "
+                      "would be vacuous")
+        self.assertIn("primary:close", self.events,
+                      "the original cursor was never released")
+        self.assertLess(
+            self.events.index("primary:close"),
+            self.events.index("recovery:execute"),
+            "recovery opened while the original transaction could still hold "
+            "the FOR UPDATE on the same row")
+
+    def test_recovery_treats_an_already_rotated_row_as_success(self):
+        """The original commit may have landed before the failure was seen."""
+        first = self._primary(commit_exc=RuntimeError("connection lost"))
+        second = self._recovery(
+            auth_row=(_AUTH_ROW_ID, _NEW_ACCESS, _NEW_REFRESH))
+
+        result = self._refresh(first, second, _FakeMeliClient(_valid_response()))
+
+        self.assertEqual(result.status, "REFRESHED")
+        self.assertEqual(
+            second.matching("update mercadolibre_auth"), [],
+            "recovery rewrote a row that already held the rotated credentials")
+
+    def test_recovery_refuses_to_overwrite_a_third_generation(self):
+        first = self._primary(commit_exc=RuntimeError("connection lost"))
+        second = self._recovery(
+            auth_row=(_AUTH_ROW_ID, "THIRD-ACCESS-888888", "THIRD-REFRESH-888888"))
+
+        result = self._refresh(first, second, _FakeMeliClient(_valid_response()))
+
+        self.assertEqual(result.status, "AUTH_CRITICAL")
+        self.assertEqual(
+            second.matching("update mercadolibre_auth"), [],
+            "recovery overwrote credentials a third process had rotated")
+
+    def test_recovery_that_matches_no_row_is_critical(self):
+        first = self._primary(commit_exc=RuntimeError("connection lost"))
+        second = self._recovery(auth_row=None)
+
+        result = self._refresh(first, second, _FakeMeliClient(_valid_response()))
+
+        self.assertEqual(result.status, "AUTH_CRITICAL")
+        self.assertFalse(second.committed)
+
+    def test_recovery_that_updates_zero_rows_is_critical(self):
+        first = self._primary(commit_exc=RuntimeError("connection lost"))
+        second = self._recovery(
+            auth_row=(_AUTH_ROW_ID, _OLD_ACCESS, _OLD_REFRESH),
+            update_rowcount=0)
+
+        result = self._refresh(first, second, _FakeMeliClient(_valid_response()))
+
+        self.assertEqual(result.status, "AUTH_CRITICAL")
+        self.assertFalse(second.committed)
+
+    def test_a_failing_recovery_is_critical_and_still_never_posts_twice(self):
+        first = self._primary(commit_exc=RuntimeError("connection lost"))
+        second = self._recovery(
+            auth_row=(_AUTH_ROW_ID, _OLD_ACCESS, _OLD_REFRESH),
+            commit_exc=RuntimeError("still down"))
+        client = _FakeMeliClient(_valid_response())
+
+        result = self._refresh(first, second, client)
+
+        self.assertEqual(result.status, "AUTH_CRITICAL")
+        self.assertEqual(client.post_count, 1,
+                         "a failing recovery must never fall back to posting")
