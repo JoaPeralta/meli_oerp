@@ -5,6 +5,7 @@ import pytz
 from odoo import models, api, fields
 from odoo.tools.translate import _
 
+import psycopg2
 import requests
 from requests.adapters import HTTPAdapter
 import json
@@ -72,6 +73,56 @@ def meli_token_response_summary(response_info, expected_seller_id=None):
         summary["user_id_matches"] = (
             user_id is not None and str(user_id) == str(expected_seller_id))
     return summary
+
+
+_AUTH_ISOLATION = 'read committed'
+
+# Un solo lugar para el UPDATE de la fila auth: lo usan el camino normal y el de
+# recuperacion, y tienen que escribir exactamente lo mismo.
+_AUTH_UPDATE_SQL = (
+    "UPDATE mercadolibre_auth SET access_token = %s, refresh_token = %s, "
+    "code = %s, token_expires_in = %s, token_refreshed_at = %s, "
+    "token_expires_at = %s, write_date = now() AT TIME ZONE 'UTC' "
+    "WHERE id = %s"
+)
+
+
+class MeliAuthResult:
+    """Lo que decidio la transaccion AUTH, devuelto EN MEMORIA.
+
+    La transaccion ambiente conserva su snapshot viejo. Bajo REPEATABLE READ eso
+    no tiene arreglo, y no hace falta que lo tenga: el caller usa estos valores
+    directamente en vez de releer res.company esperando ver un commit que su
+    snapshot nunca va a incluir.
+
+    Estados:
+        REFRESHED           se posteo, valido, se persistio y se commiteo
+        ALREADY_FRESH       otro proceso ya habia rotado; NO se posteo
+        REJECTED            respuesta invalida; credenciales intactas
+        ABORT_REAUTH        invalid_grant; hace falta OAuth manual
+        ABORT_INDETERMINATE no se puede afirmar nada sobre el token
+        AUTH_UNCERTAIN      POST enviado sin respuesta; jamas se reintenta
+        AUTH_CRITICAL       no se pudo serializar o no se pudo persistir
+    """
+
+    __slots__ = ('status', 'access_token', 'refresh_token', 'reason', 'posted')
+
+    def __init__(self, status, access_token=None, refresh_token=None,
+                 reason=None, posted=False):
+        self.status = status
+        self.access_token = access_token
+        self.refresh_token = refresh_token
+        self.reason = reason
+        self.posted = posted
+
+    @property
+    def usable(self):
+        return self.status in ('REFRESHED', 'ALREADY_FRESH')
+
+    def __repr__(self):
+        # Nunca los valores: son credenciales, y un repr termina en un log.
+        return "MeliAuthResult(status=%r, posted=%r, reason=%r)" % (
+            self.status, self.posted, self.reason)
 
 
 def meli_validate_refresh_response(response_info, expected_seller_id):
@@ -1209,6 +1260,180 @@ class MeliUtil(models.AbstractModel):
             _logger.info("DB neutralizada: se omite refresh de token ML para no invalidar producción")
             _NEUTRALIZED_REFRESH_LOGGED = True
 
+    # ------------------------------------------------------------------
+    #  Refresh aislado y serializado
+    # ------------------------------------------------------------------
+    def _meli_auth_cursor(self):
+        """Cursor propio para la transaccion AUTH.
+
+        Metodo aparte a proposito: los tests lo reemplazan para poder observar
+        QUE statements se emiten y EN QUE ORDEN, que es la parte sutil.
+        """
+        return self.env.registry.cursor()
+
+    def _meli_persist_recovered(self, auth_id, access_token, refresh_token,
+                                expiry_vals):
+        """Persiste credenciales ya rotadas por ML, en una transaccion nueva.
+
+        Sin un segundo POST. MercadoLibre ya consumio el refresh token anterior;
+        volver a postear solo gastaria el nuevo. Estos valores son lo unico que
+        puede reconectar la sesion.
+        """
+        cr = self._meli_auth_cursor()
+        try:
+            cr.execute(_AUTH_UPDATE_SQL, (
+                access_token, refresh_token, '',
+                expiry_vals.get('mercadolibre_token_expires_in') or 0,
+                expiry_vals.get('mercadolibre_token_refreshed_at') or None,
+                expiry_vals.get('mercadolibre_token_expires_at') or None,
+                auth_id))
+            cr.commit()
+            return True
+        except Exception:
+            # Deliberadamente sin el detalle: el mensaje puede arrastrar las
+            # credenciales que acabamos de recibir.
+            _logger.error("AUTH recovery failed: rotated credentials could not "
+                          "be persisted")
+            return False
+        finally:
+            cr.close()
+
+    def _meli_refresh_credentials(self, company, api_client):
+        """Renueva el token en su PROPIA transaccion, serializado en la fila auth.
+
+        El orden es obligatorio y esta asertado por tests. Bajo REPEATABLE READ
+        el snapshot lo fija el PRIMER statement de la transaccion, asi que
+        cualquier consulta previa al SET lo congelaria y el re-read posterior al
+        lock no podria ver el commit del proceso que tuvo el lock antes. Eso se
+        MIDIO contra PostgreSQL real con dos conexiones: con advisory lock bajo
+        REPEATABLE READ, el que espera sigue viendo R1 y postea un token ya
+        gastado. Por eso READ COMMITTED + FOR UPDATE.
+        """
+        seen_refresh = api_client.refresh_token
+        old_access = api_client.access_token
+        old_refresh = seen_refresh
+        seller_id = company.mercadolibre_seller_id
+
+        cr = self._meli_auth_cursor()
+        try:
+            # 1. Nada antes de esto.
+            cr.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            # 2. Y comprobarlo: un SET que no aplico degradaria en silencio al
+            #    primitivo que se midio fallando, con apariencia de funcionar.
+            cr.execute("SHOW transaction_isolation")
+            row = cr.fetchone()
+            level = str((row or [''])[0]).strip().lower()
+            if level != _AUTH_ISOLATION:
+                cr.rollback()
+                _logger.error("AUTH transaction is at %r, not read committed: "
+                              "refusing to refresh", level)
+                return MeliAuthResult(
+                    'AUTH_CRITICAL', old_access, old_refresh,
+                    reason='isolation level is %r' % level)
+
+            # 3. Exclusion sobre el recurso exacto que se va a mutar.
+            try:
+                cr.execute(
+                    "SELECT id, access_token, refresh_token "
+                    "FROM mercadolibre_auth WHERE company_id = %s FOR UPDATE",
+                    (company.id,))
+                auth_row = cr.fetchone()
+            except psycopg2.errors.SerializationFailure as e:
+                # READ COMMITTED no levanta 40001 en un FOR UPDATE. Si llega,
+                # la transaccion no esta corriendo donde cree: abortar fuerte.
+                cr.rollback()
+                _logger.error("AUTH serialization failure (40001) under read "
+                              "committed: %s", e)
+                return MeliAuthResult(
+                    'ABORT_INDETERMINATE', old_access, old_refresh,
+                    reason='serialization failure')
+
+            if not auth_row:
+                # Un FOR UPDATE que no matchea ninguna fila NO bloquea nada y no
+                # da error. Seguir desde aca seria un refresh sin serializar con
+                # apariencia de serializado.
+                cr.rollback()
+                _logger.error("no mercadolibre.auth row for company %s: "
+                              "refusing to refresh unserialised", company.id)
+                return MeliAuthResult(
+                    'AUTH_CRITICAL', old_access, old_refresh,
+                    reason='no auth row for company %s' % company.id)
+
+            auth_id, stored_access, stored_refresh = auth_row
+
+            # 4. Re-evaluar por IDENTIDAD del refresh token, no por reloj: sin
+            #    dependencia del clock skew, y sigue funcionando cuando ML no
+            #    informa expires_in.
+            if seen_refresh and stored_refresh and stored_refresh != seen_refresh:
+                cr.rollback()
+                _logger.info("refresh already performed by another process; "
+                             "not posting")
+                return MeliAuthResult('ALREADY_FRESH', stored_access,
+                                      stored_refresh)
+
+            # 5. Como mucho UN POST, con lo re-leido bajo el lock.
+            api_client.refresh_token = stored_refresh or seen_refresh
+            api_client.access_token = stored_access or old_access
+            try:
+                response = api_client.get_refresh_token()
+            except Exception as e:
+                # POST enviado, sin respuesta: no se puede saber si ML consumio
+                # el token. Nunca se reintenta automaticamente.
+                cr.rollback()
+                _logger.error("refresh uncertain: %s", meli_redact(
+                    e, old_access, old_refresh, api_client.client_secret))
+                return MeliAuthResult(
+                    'AUTH_UNCERTAIN', old_access, old_refresh,
+                    reason='no answer to the token request', posted=True)
+
+            summary = meli_token_response_summary(response, seller_id)
+
+            if isinstance(response, dict) and response.get('error') == 'invalid_grant':
+                cr.rollback()
+                _logger.error("refresh rejected: invalid_grant %s", summary)
+                return MeliAuthResult(
+                    'ABORT_REAUTH', old_access, old_refresh,
+                    reason='invalid_grant', posted=True)
+
+            # 6. Validar antes de confiar (y antes de persistir).
+            valid, reason = meli_validate_refresh_response(response, seller_id)
+            if not valid:
+                cr.rollback()
+                _logger.error("refresh rejected (%s): %s", reason, summary)
+                return MeliAuthResult(
+                    'REJECTED', old_access, old_refresh, reason=reason,
+                    posted=True)
+
+            # 7. Persistir y 8. commitear.
+            new_access = response['access_token']
+            new_refresh = response['refresh_token']
+            expiry = meli_token_expiry_vals(response)
+            cr.execute(_AUTH_UPDATE_SQL, (
+                new_access, new_refresh, '',
+                expiry.get('mercadolibre_token_expires_in') or 0,
+                expiry.get('mercadolibre_token_refreshed_at') or None,
+                expiry.get('mercadolibre_token_expires_at') or None,
+                auth_id))
+            try:
+                cr.commit()
+            except Exception:
+                _logger.error("AUTH commit failed after MercadoLibre rotated "
+                              "the token; recovering without a second POST")
+                if self._meli_persist_recovered(auth_id, new_access,
+                                                new_refresh, expiry):
+                    return MeliAuthResult(
+                        'REFRESHED', new_access, new_refresh, posted=True,
+                        reason='persisted by recovery after a failed commit')
+                return MeliAuthResult(
+                    'AUTH_CRITICAL', new_access, new_refresh, posted=True,
+                    reason='rotated credentials could not be persisted')
+
+            _logger.info("refresh committed: %s", summary)
+            return MeliAuthResult('REFRESHED', new_access, new_refresh,
+                                  posted=True)
+        finally:
+            cr.close()
+
     @api.model
     def get_new_instance(self, company=None, refresh_force=False):
 
@@ -1342,59 +1567,42 @@ class MeliUtil(models.AbstractModel):
                                 or message=="expired_token" or message=="invalid_token" or message=="internal_server_error"):
                                 api_rest_client.needlogin_state = True
                                 try:
-                                    #refresh = meli.get_refresh_token()
-                                    refresh = api_rest_client.get_refresh_token()
-                                    # NUNCA str(refresh): es la respuesta de
-                                    # /oauth/token, con access_token y
-                                    # refresh_token en claro. El destino de
-                                    # `logs` es mercadolibre.notification, o sea
-                                    # que volcarla ahi la PERSISTE en la base.
-                                    refresh_summary = meli_token_response_summary(
-                                        refresh, company.mercadolibre_seller_id)
-                                    _logger.info("Refresh result: %s", refresh_summary)
-                                    if (refresh):
-                                        #refjson = refresh.json()
-                                        refjson = refresh
-                                        logs+= str(refresh_summary)+"\n"
-                                        refresh_valid, refresh_reason = meli_validate_refresh_response(
-                                            refjson, company.mercadolibre_seller_id)
-                                        if not refresh_valid:
-                                            # No se tocan las credenciales: las
-                                            # guardadas siguen siendo la unica
-                                            # sesion que puede funcionar.
-                                            _logger.error(
-                                                "refresh rejected (%s): %s",
-                                                refresh_reason, refresh_summary)
-                                        if refresh_valid:
-                                            api_rest_client.access_token = refjson["access_token"]
-                                            api_rest_client.refresh_token = refjson["refresh_token"]
-                                            api_rest_client.code = ''
-                                            token_vals = { 'mercadolibre_access_token': api_rest_client.access_token,
-                                                           'mercadolibre_refresh_token': api_rest_client.refresh_token,
-                                                           'mercadolibre_code': '' }
-                                            # Vigencia informada por ML en ESTA
-                                            # respuesta. Se guarda junto con los
-                                            # tokens, nunca por separado.
-                                            token_vals.update(meli_token_expiry_vals(refjson))
-                                            company.write(token_vals)
-                                            api_rest_client.needlogin_state = False
+                                    # El refresh corre en su PROPIA transaccion,
+                                    # serializado sobre la fila auth. Antes
+                                    # corria dentro de la transaccion de negocio,
+                                    # que no tiene ningun commit boundary
+                                    # (MeliCommit es flush_all, no cr.commit),
+                                    # asi que un import que fallaba despues de
+                                    # renovar volvia por rollback a un token que
+                                    # MercadoLibre ya habia gastado.
+                                    auth = self._meli_refresh_credentials(
+                                        company, api_rest_client)
+                                    logs += "refresh: %s\n" % auth.status
+                                    # Las credenciales vuelven EN MEMORIA. No se
+                                    # relee res.company: el snapshot de esta
+                                    # transaccion es anterior al commit de AUTH
+                                    # y nunca lo va a incluir.
+                                    if auth.access_token:
+                                        api_rest_client.access_token = auth.access_token
+                                    if auth.refresh_token:
+                                        api_rest_client.refresh_token = auth.refresh_token
+                                    if auth.usable:
+                                        api_rest_client.code = ''
+                                        api_rest_client.needlogin_state = False
+                                    else:
+                                        errors += "refresh %s: %s\n" % (
+                                            auth.status, auth.reason or '')
+                                        _logger.error(
+                                            "refresh not usable: %s (%s)",
+                                            auth.status, auth.reason)
                                 except Exception as e:
-                                    # El cliente tiene las credenciales en mano
-                                    # en este punto: el texto de la excepcion
-                                    # puede arrastrarlas.
                                     safe = meli_redact(
                                         e, api_rest_client.access_token,
                                         api_rest_client.refresh_token,
-                                        api_rest_client.client_secret,
-                                        company.mercadolibre_access_token,
-                                        company.mercadolibre_refresh_token,
-                                        company.mercadolibre_secret_key)
+                                        api_rest_client.client_secret)
                                     errors += safe
                                     logs += safe
                                     _logger.error("refresh raised: %s", safe)
-                                    pass;
-                                except:
-                                    pass;
 
                         noti.stop_internal_notification( errors=errors , logs=logs )
 
