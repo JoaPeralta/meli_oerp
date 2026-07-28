@@ -124,7 +124,7 @@ class TestAuthRowMigration(TransactionCase):
     # ------------------------------------------------------------------
     # the defect, characterised
     # ------------------------------------------------------------------
-    @mute_logger("odoo.addons.meli_oerp.migrations.19.0.26.86.post-migrate")
+    @mute_logger("meli_oerp_migration_19_0_26_86")
     def test_2686_copies_nothing_when_the_expiry_columns_are_absent(self):
         """Reproduces the live upgrade path exactly.
 
@@ -222,11 +222,12 @@ class TestAuthRowMigration(TransactionCase):
 
     def test_2687_never_logs_a_credential(self):
         self._add_legacy_columns(with_expiry=False)
+        migration = _load_migration("19.0.26.87")
 
-        with self.assertLogs(
-                "odoo.addons.meli_oerp.migrations.19.0.26.87.post-migrate",
-                level="INFO") as captured:
-            _load_migration("19.0.26.87").migrate(self.env.cr, "19.0.26.85")
+        # The module is loaded by path, so its logger is named after the name
+        # given to importlib, not after an odoo.addons package.
+        with self.assertLogs(migration._logger.name, level="INFO") as captured:
+            migration.migrate(self.env.cr, "19.0.26.85")
 
         text = "\n".join(r.getMessage() for r in captured.records)
         for secret in (_ACCESS, _REFRESH, _CODE):
