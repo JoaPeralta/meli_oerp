@@ -333,25 +333,99 @@ class res_company(models.Model):
     mercadolibre_client_id = fields.Char(string='App Id', help='Client ID para ingresar a MercadoLibre',size=128)
     mercadolibre_secret_key = fields.Char(string='Secret Key', help='Secret Key para ingresar a MercadoLibre',size=128)
     mercadolibre_redirect_uri = fields.Char( string='Redirect Uri', help='Redirect uri (https://yourserver.yourdomain.com/meli_login)',size=1024)
-    mercadolibre_access_token = fields.Char( string='Access Token', help='Access Token', size=256)
-    mercadolibre_refresh_token = fields.Char( string='Refresh Token', help='Refresh Token', size=256)
-    mercadolibre_code = fields.Char( string='Code', help='Code', size=256)
-    # Vigencia del access token, tomada de lo que MercadoLibre informa en cada
-    # /oauth/token. Sin esto el conector solo puede reaccionar a un 401 ya
-    # ocurrido: no hay forma de saber si el token alcanza para la operacion que
-    # esta por empezar. NO se infiere ningun TTL; si ML no manda expires_in, la
-    # vigencia queda desconocida.
+    # --------------------------------------------------------------------
+    # Estado mutable de autenticacion: vive en mercadolibre.auth, NO aca.
+    #
+    # Odoo 19 usa REPEATABLE READ en todos los cursores. Si la transaccion AUTH
+    # aislada commitea sobre res_company, cualquier UPDATE posterior de esa
+    # misma fila desde la transaccion de negocio aborta con "could not
+    # serialize access due to concurrent update" y se lleva puesto el import
+    # entero. Separar los dominios elimina la contencion; auditar para siempre
+    # cada write() sobre res.company solo la posterga.
+    #
+    # Quedan como fachada NO ALMACENADA para no romper vistas,
+    # res.config.settings ni los lectores existentes. store=True aca volveria a
+    # crear la columna, y con ella el conflicto: hay un test que lo impide.
+    #
+    # Los tres campos de vigencia perdieron readonly=True: un campo calculado
+    # necesita ser escribible para que corra su inverse. No aparecen en ninguna
+    # vista, asi que no cambia nada para el usuario.
+    # --------------------------------------------------------------------
+    mercadolibre_access_token = fields.Char(
+        string='Access Token', help='Access Token', size=256, store=False,
+        compute='_compute_meli_auth_fields', inverse='_inverse_meli_auth_fields')
+    mercadolibre_refresh_token = fields.Char(
+        string='Refresh Token', help='Refresh Token', size=256, store=False,
+        compute='_compute_meli_auth_fields', inverse='_inverse_meli_auth_fields')
+    mercadolibre_code = fields.Char(
+        string='Code', help='Code', size=256, store=False,
+        compute='_compute_meli_auth_fields', inverse='_inverse_meli_auth_fields')
     mercadolibre_token_expires_in = fields.Integer(
-        string='Token lifetime (s)', readonly=True,
+        string='Token lifetime (s)', store=False,
+        compute='_compute_meli_auth_fields', inverse='_inverse_meli_auth_fields',
         help='expires_in informado por MercadoLibre en el ultimo /oauth/token. '
              '0 = MercadoLibre no lo informo.')
     mercadolibre_token_refreshed_at = fields.Datetime(
-        string='Token obtained at', readonly=True,
+        string='Token obtained at', store=False,
+        compute='_compute_meli_auth_fields', inverse='_inverse_meli_auth_fields',
         help='Instante en que se recibio el access token vigente.')
     mercadolibre_token_expires_at = fields.Datetime(
-        string='Token expires at', readonly=True,
+        string='Token expires at', store=False,
+        compute='_compute_meli_auth_fields', inverse='_inverse_meli_auth_fields',
         help='Derivado: obtained_at + expires_in. Vacio si MercadoLibre no '
              'informo expires_in; en ese caso la vigencia es desconocida.')
+    def _meli_auth_row(self, create=False):
+        """La fila mercadolibre.auth de esta compania.
+
+        Una sola relacion persistente: la FK esta en mercadolibre.auth.company_id
+        y nada mas. No se agrega un Many2one en res.company para poder usar un
+        `related`, porque serian dos relaciones que pueden divergir; y ademas
+        escribirlo seria un UPDATE sobre res_company, justo lo que se evita.
+
+        sudo() a proposito: mercadolibre.auth esta restringido a administradores
+        porque guarda credenciales, pero el conector corre bajo el usuario que
+        haya disparado la operacion (un cron, un vendedor guardando una orden).
+        El acceso a las credenciales a traves de esta fachada sigue gobernado
+        por los `groups` a nivel de campo que ya declaran las vistas de
+        res.company; esto no lo afloja ni lo endurece.
+        """
+        self.ensure_one()
+        Auth = self.env['mercadolibre.auth'].sudo()
+        # Registro sin guardar (onchange): no hay fila que buscar todavia.
+        if not isinstance(self.id, int):
+            return Auth.browse()
+        row = Auth.search([('company_id', '=', self.id)], limit=1)
+        if not row and create:
+            row = Auth.create({'company_id': self.id})
+        return row
+
+    def _compute_meli_auth_fields(self):
+        for company in self:
+            row = company._meli_auth_row()
+            company.mercadolibre_access_token = row.access_token or False
+            company.mercadolibre_refresh_token = row.refresh_token or False
+            company.mercadolibre_code = row.code or False
+            company.mercadolibre_token_expires_in = row.token_expires_in or 0
+            company.mercadolibre_token_refreshed_at = row.token_refreshed_at or False
+            company.mercadolibre_token_expires_at = row.token_expires_at or False
+
+    def _inverse_meli_auth_fields(self):
+        for company in self:
+            row = company._meli_auth_row(create=True)
+            if not row:
+                continue
+            # Se escriben los seis juntos: los que no venian en el write()
+            # se calculan leyendo esta misma fila, asi que se reescriben con
+            # su valor actual y no se pierde nada.
+            row.write({
+                'access_token': company.mercadolibre_access_token or False,
+                'refresh_token': company.mercadolibre_refresh_token or False,
+                'code': company.mercadolibre_code or False,
+                'token_expires_in': company.mercadolibre_token_expires_in or 0,
+                'token_refreshed_at': company.mercadolibre_token_refreshed_at or False,
+                'token_expires_at': company.mercadolibre_token_expires_at or False,
+            })
+
     mercadolibre_seller_id = fields.Char( string='Vendedor Id', size=256)
     mercadolibre_user_product_seller = fields.Boolean( string='User Product Seller',index=True)
     mercadolibre_multiwarehouse = fields.Boolean( string='Multi Warehouse Seller', index=True,
