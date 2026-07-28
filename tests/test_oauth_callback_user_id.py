@@ -37,6 +37,7 @@ Accounts are never linked automatically. Binding a company to whichever seller
 happened to answer is exactly the confusion this prevents.
 """
 
+import re
 from unittest.mock import patch
 
 from odoo.tests import tagged
@@ -64,8 +65,10 @@ class _FakeMeli:
         self.authorize_calls += 1
         return self._payload
 
-    def auth_url(self, redirect_URI=None):
-        return "https://auth.example/authorization"
+    def auth_url(self, redirect_URI=None, state=None):
+        # El state va en la URL porque es de ahi que el test lo lee de vuelta,
+        # igual que haria un navegador.
+        return "https://auth.example/authorization?state=%s" % (state or "")
 
     def get(self, path, params=None, **kwargs):
         # Resolving AUTH_URL probes /sites; answering nothing keeps this test
@@ -107,12 +110,26 @@ class TestOAuthCallbackUserId(HttpCase):
         return row if row else (None, None)
 
     def _callback(self, payload):
+        """Drives the real flow: get a login link, then come back with its state.
+
+        The callback refuses any code it cannot match to an authorization
+        request from this session, so these tests have to ask for one first.
+        """
         fake = _FakeMeli(payload)
         self.authenticate("admin", "admin")
         with patch.object(type(self.env["meli.util"]), "_build_client",
                           return_value=fake):
+            issued = self.url_open("/meli_login", allow_redirects=False)
+            self.assertEqual(
+                issued.status_code, 200,
+                "the login entry point failed (%s), so no state was issued and "
+                "every assertion below would hold for the wrong reason"
+                % issued.status_code)
+            found = re.search(r"state=([A-Za-z0-9_\-]+)", issued.text)
+            state = found.group(1) if found else ""
             response = self.url_open(
-                "/meli_login?code=%s" % _FAKE_CODE, allow_redirects=False)
+                "/meli_login?code=%s&state=%s" % (_FAKE_CODE, state),
+                allow_redirects=False)
         self.env.invalidate_all()
         return response, fake
 
@@ -223,7 +240,10 @@ class TestOAuthCallbackUserId(HttpCase):
         with patch.object(type(self.env["meli.util"]), "_build_client",
                           return_value=fake), \
                 patch.object(type(self.company), "write", exploding_write):
-            self.url_open("/meli_login?code=%s" % _FAKE_CODE,
+            issued = self.url_open("/meli_login", allow_redirects=False)
+            found = re.search(r"state=([A-Za-z0-9_\-]+)", issued.text)
+            state = found.group(1) if found else ""
+            self.url_open("/meli_login?code=%s&state=%s" % (_FAKE_CODE, state),
                           allow_redirects=False)
         self.env.invalidate_all()
 

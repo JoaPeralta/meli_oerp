@@ -12,6 +12,7 @@ real credentials) and asserts that:
 * the tokens are nevertheless stored server-side on res.company.
 """
 
+import re
 from unittest.mock import patch
 
 from odoo.tests import tagged
@@ -40,8 +41,10 @@ class _FakeMeli:
                 "token_type": "Bearer", "expires_in": 21600,
                 "user_id": int(_SELLER)}
 
-    def auth_url(self, redirect_URI=None):
-        return "https://auth.example/authorization"
+    def auth_url(self, redirect_URI=None, state=None):
+        # El state va en la URL porque es de ahi que el test lo lee de vuelta,
+        # igual que haria un navegador.
+        return "https://auth.example/authorization?state=%s" % (state or "")
 
     def get(self, path, params=None, **kwargs):
         # The callback resolves AUTH_URL, which walks get_ML_AUTH_URL ->
@@ -73,8 +76,17 @@ class TestMeliLoginNoTokenExposure(HttpCase):
         with patch.object(
             type(self.env["meli.util"]), "_build_client", return_value=fake
         ):
+            # The callback now requires a state issued by this session.
+            issued = self.url_open("/meli_login", allow_redirects=False)
+            self.assertEqual(
+                issued.status_code, 200,
+                "the login entry point failed (%s), so no state was issued"
+                % issued.status_code)
+            found = re.search(r"state=([A-Za-z0-9_\-]+)", issued.text)
+            state = found.group(1) if found else ""
             response = self.url_open(
-                "/meli_login?code=%s" % _FAKE_CODE, allow_redirects=False
+                "/meli_login?code=%s&state=%s" % (_FAKE_CODE, state),
+                allow_redirects=False
             )
 
         self.assertEqual(response.status_code, 200)

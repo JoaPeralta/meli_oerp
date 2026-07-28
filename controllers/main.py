@@ -19,7 +19,49 @@ pp = pprint.PrettyPrinter(indent=4)
 
 import pdb
 import logging
+import secrets
+# Con guion bajo a proposito. Mas abajo este modulo hace `from ..models.versions
+# import *`, y versions hace `from datetime import *`, con lo cual el nombre
+# `time` termina apuntando a la CLASE datetime.time y `time.time()` revienta.
+# Los import wildcard omiten los nombres que empiezan con guion bajo, asi que
+# este alias no lo puede pisar ninguno.
+from time import time as _clock_seconds
 _logger = logging.getLogger(__name__)
+
+# El state de OAuth: aleatorio, atado a la sesion, con vencimiento y de un solo
+# uso. Antes se emitia str(datetime.now()) y no se validaba nunca, con lo cual el
+# callback intercambiaba cualquier code que le llegara, de cualquier origen.
+_OAUTH_STATE_SESSION_KEY = "meli_oauth_state"
+_OAUTH_STATE_TTL_SECONDS = 600
+
+
+def _issue_oauth_state():
+    """Emite un state nuevo y lo guarda en la sesion de este usuario."""
+    value = secrets.token_urlsafe(32)
+    request.session[_OAUTH_STATE_SESSION_KEY] = {
+        "value": value,
+        "issued_at": _clock_seconds(),
+    }
+    return value
+
+
+def _consume_oauth_state(received):
+    """Valida y CONSUME el state. Devuelve (ok, motivo).
+
+    Se consume haya coincidido o no: un intento fallido invalida el state en
+    curso en vez de dejarlo disponible para seguir probando.
+    """
+    stored = request.session.pop(_OAUTH_STATE_SESSION_KEY, None)
+    if not received:
+        return False, "no state in the callback"
+    if not stored or not stored.get("value"):
+        return False, "no state was issued in this session"
+    if _clock_seconds() - stored.get("issued_at", 0) > _OAUTH_STATE_TTL_SECONDS:
+        return False, "the issued state expired"
+    if not secrets.compare_digest(str(stored["value"]), str(received)):
+        return False, "the state does not match the one issued"
+    return True, None
+
 
 
 from ..models.versions import *
@@ -134,7 +176,7 @@ class MercadoLibreLogin(http.Controller):
         codes.setdefault('error','none')
         if codes['error']!='none':
             message = "ERROR: %s" % codes['error']
-            return "<h5>"+message+"</h5><br/>Retry (check your redirect_uri field in MercadoLibre company configuration, also the actual user and public user default company must be the same company ): <a href='"+meli.auth_url(redirect_URI=company.mercadolibre_redirect_uri)+"'>Login</a>"
+            return "<h5>"+message+"</h5><br/>Retry (check your redirect_uri field in MercadoLibre company configuration, also the actual user and public user default company must be the same company ): <a href='"+meli.auth_url(redirect_URI=company.mercadolibre_redirect_uri, state=_issue_oauth_state())+"'>Login</a>"
 
         if codes['code']!='none':
             # Do NOT log the authorization code: it is a short-lived OAuth secret
@@ -145,6 +187,17 @@ class MercadoLibreLogin(http.Controller):
             # callback descubra. Sin el no hay contra que validar, y vincular la
             # compania a la cuenta que haya contestado es exactamente la
             # confusion que esta validacion existe para evitar.
+            # Antes que nada: probar que este code responde a un pedido que
+            # hicimos nosotros. Si no, no se intercambia -- authorize() ni
+            # siquiera se llama, asi que no se pide ninguna credencial.
+            state_ok, state_reason = _consume_oauth_state(codes.get('state'))
+            if not state_ok:
+                _logger.error("OAuth callback rejected: %s", state_reason)
+                return ("<h5>MercadoLibre authorization rejected.</h5>"
+                        "This callback could not be matched to an authorization "
+                        "request from this session. Nothing was exchanged or "
+                        "stored. Start the login again from Odoo.")
+
             expected_seller = company.mercadolibre_seller_id
             if not expected_seller:
                 _logger.error("OAuth callback rejected: no MercadoLibre seller "
@@ -183,7 +236,7 @@ class MercadoLibreLogin(http.Controller):
             # Only a neutral success confirmation is returned.
             return 'MercadoLibre authorization completed successfully. You can close this window.<br>MercadoLibre Publisher for Odoo - Copyright Moldeo Interactive <br><a href="javascript:window.history.go(-2);">Volver a Odoo</a> <script>window.history.go(-2)</script>'
         else:
-            return "<a href='"+meli.auth_url()+"'>Try to Login Again Please</a>"
+            return "<a href='"+meli.auth_url(state=_issue_oauth_state())+"'>Try to Login Again Please</a>"
 
 class MercadoLibreAuthorize(http.Controller):
     @http.route('/meli_authorize/', auth='public')

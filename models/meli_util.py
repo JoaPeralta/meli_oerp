@@ -798,17 +798,18 @@ class MeliApiNoSDK:
 
         return self
 
-    def auth_url(self, redirect_URI=None):
+    def auth_url(self, redirect_URI=None, state=None):
         """Genera la URL de autorización OAuth para login"""
-        now = datetime.now()
         if redirect_URI:
             self.redirect_uri = redirect_URI
-        random_id = str(now)
+        # El state lo emite el controlador, que es quien puede atarlo a la
+        # sesion del usuario y consumirlo una sola vez. El fallback existe solo
+        # para no romper llamadas que no lo pasan; no protege de nada.
         params = {
             'client_id': self.client_id,
             'response_type': 'code',
             'redirect_uri': self.redirect_uri,
-            'state': random_id
+            'state': state or str(datetime.now())
         }
         url = self.AUTH_URL + '?' + urlencode(params)
         return url
@@ -1189,12 +1190,14 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
                 self.rjson = {"error": str(e)}
             return self
 
-        def auth_url(self, redirect_URI=None):
-            now = datetime.now()
+        def auth_url(self, redirect_URI=None, state=None):
             if redirect_URI:
                 self.redirect_uri = redirect_URI
-            random_id = str(now)
-            params = {'client_id': self.client_id, 'response_type': 'code', 'redirect_uri': self.redirect_uri, 'state': random_id}
+            # Mismo criterio que el backend NoSDK: el state lo emite el
+            # controlador, que es quien puede atarlo a la sesion.
+            params = {'client_id': self.client_id, 'response_type': 'code',
+                      'redirect_uri': self.redirect_uri,
+                      'state': state or str(datetime.now())}
             return self.AUTH_URL + '?' + urlencode(params)
 
         def redirect_login(self):
