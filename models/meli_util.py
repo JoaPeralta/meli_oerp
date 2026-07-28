@@ -908,13 +908,20 @@ class MeliApiNoSDK:
                                     http_status=resp.status_code)
 
         except requests.RequestException as e:
-            # El POST salio y no sabemos como termino. Se marca como incierto en
-            # vez de devolver un payload de error, que era indistinguible de un
-            # rechazo de MercadoLibre y llevaba a clasificarlo mal.
-            _logger.error("get_refresh_token transport failure: %s",
-                          type(e).__name__)
-            return MeliTokenOutcome(transport_uncertain=True,
-                                    reason=type(e).__name__)
+            # TEMPORARY MUTATION -- verification branch only, never merged.
+            # Restores the pre-fix behaviour: a transport failure reported as an
+            # ordinary error payload, NOT marked uncertain. Used to demonstrate
+            # that the timeout tests actually bite, since the RED baseline for
+            # them was an ImportError and therefore proved nothing.
+            _logger.error("get_refresh_token error: %s",
+                          meli_redact(e, self.access_token, self.refresh_token,
+                                      self.client_secret))
+            return MeliTokenOutcome(
+                payload={"error": "refresh_token_error",
+                         "message": meli_redact(e, self.access_token,
+                                                self.refresh_token,
+                                                self.client_secret)},
+                http_status=None, transport_uncertain=False)
 
     def get_sale_terms(self, category_id=None, sale_term_id=None, productjson=None):
         """Obtiene los términos de venta para una categoría"""
