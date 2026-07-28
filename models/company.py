@@ -382,12 +382,16 @@ class res_company(models.Model):
         `related`, porque serian dos relaciones que pueden divergir; y ademas
         escribirlo seria un UPDATE sobre res_company, justo lo que se evita.
 
-        sudo() a proposito: mercadolibre.auth esta restringido a administradores
-        porque guarda credenciales, pero el conector corre bajo el usuario que
-        haya disparado la operacion (un cron, un vendedor guardando una orden).
-        El acceso a las credenciales a traves de esta fachada sigue gobernado
-        por los `groups` a nivel de campo que ya declaran las vistas de
-        res.company; esto no lo afloja ni lo endurece.
+        sudo() es deliberado: mercadolibre.auth tiene un ACL restringido porque
+        guarda credenciales, y el conector puede ejecutarse bajo usuarios no
+        administradores (un cron, un vendedor guardando una orden).
+
+        Ese ACL protege unicamente el acceso DIRECTO a mercadolibre.auth. Esta
+        fachada mantiene el comportamiento ORM previo: los `groups` de las
+        vistas solo controlan visibilidad de UI y no constituyen seguridad de
+        campo ORM.
+
+        La restriccion ORM de estos secretos queda registrada como TD10.
         """
         self.ensure_one()
         Auth = self.env['mercadolibre.auth'].sudo()
