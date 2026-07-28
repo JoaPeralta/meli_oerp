@@ -26,4 +26,5 @@ from . import test_auth_row_migration
 from . import test_isolated_serialised_refresh
 from . import test_no_hidden_refresh
 from . import test_oauth_callback_user_id
+from . import test_fulfillment_preserves_credentials
 from . import test_http_backend_selection

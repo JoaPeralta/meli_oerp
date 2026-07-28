@@ -1347,16 +1347,20 @@ class res_company(models.Model):
                 rjson2 = response.json()
                 
                 if 'error' in rjson2:
-                    _logger.error(rjson2)
-                    if rjson2['message']=='invalid_token' or rjson2['message']=='expired_token':
-                        ACCESS_TOKEN = ''
-                        REFRESH_TOKEN = ''
-                        company.write({'mercadolibre_access_token': ACCESS_TOKEN, 'mercadolibre_refresh_token': REFRESH_TOKEN, 'mercadolibre_code': '' } )
+                    # Nunca el body: puede arrastrar datos de la cuenta.
+                    _logger.error("fulfillment scan stopped on an error response")
+                    if rjson2.get('message') in ('invalid_token', 'expired_token'):
+                        # Un access token vencido NO significa que el refresh
+                        # token este muerto: ese es el caso recuperable. Borrarlo
+                        # convierte un vencimiento de rutina en una sesion que ya
+                        # no se puede renovar, porque el refresh de ML es de un
+                        # solo uso y el anterior queda gastado. Se corta la lectura
+                        # y se devuelve la accion de login; las credenciales quedan
+                        # intactas.
                         condition = True
-                        url_login_meli = meli.auth_url()
                         return {
                         "type": "ir.actions.act_url",
-                        "url": url_login_meli,
+                        "url": meli.auth_url(),
                         "target": "new",}
                     condition_last_off = True
                 else:
@@ -1395,13 +1399,20 @@ class res_company(models.Model):
                 rjson2 = response.json()
                 
                 if 'error' in rjson2:
-                    if rjson2['message']=='invalid_token' or rjson2['message']=='expired_token':
-                        ACCESS_TOKEN = ''
-                        REFRESH_TOKEN = ''
-                        company.write({'mercadolibre_access_token': ACCESS_TOKEN, 'mercadolibre_refresh_token': REFRESH_TOKEN, 'mercadolibre_code': '' } )
+                    if rjson2.get('message') in ('invalid_token', 'expired_token'):
+                        # Un access token vencido NO significa que el refresh
+                        # token este muerto: ese es el caso recuperable. Borrarlo
+                        # convierte un vencimiento de rutina en una sesion que ya
+                        # no se puede renovar, porque el refresh de ML es de un
+                        # solo uso y el anterior queda gastado. Se corta la lectura
+                        # y se devuelve la accion de login; las credenciales quedan
+                        # intactas.
+                        # url_login_meli solo se asignaba en la otra rama, asi
+                        # que llegar aca levantaba UnboundLocalError encima de
+                        # la perdida de datos. Se resuelve en el momento.
                         return {
                         "type": "ir.actions.act_url",
-                        "url": url_login_meli,
+                        "url": meli.auth_url(),
                         "target": "new",}
                     condition_last_off = True
                 else:
