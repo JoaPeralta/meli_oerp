@@ -881,10 +881,24 @@ class res_company(models.Model):
         return meli_ids
 
     def	meli_logout(self):
-        #_logger.info('company.meli_logout() ')
+        """Desconexion LOCAL de MercadoLibre. Destructiva y a proposito.
+
+        Borra unicamente las tres credenciales que Odoo tiene guardadas. No
+        llama a MercadoLibre ni revoca nada del lado de ellos: lo unico que
+        desaparece es lo almacenado aca.
+
+        Es destructiva porque conservar los tokens significaria que la cuenta
+        sigue realmente conectada. Y como el refresh token de MercadoLibre es
+        de un solo uso, despues de esto solo una autorizacion OAuth nueva
+        devuelve el conector a funcionar. Por eso el boton pide confirmacion.
+
+        Actua sobre el registro desde el que se la invoco. Antes escribia sobre
+        self.env.user.company_id -la compania ACTIVA del usuario-, que con mas
+        de una compania puede no ser la que muestra el formulario: el cartel
+        describia una cuenta y se desconectaba otra.
+        """
         self.ensure_one()
-        company = self.env.user.company_id
-        company.write({'mercadolibre_access_token': '', 'mercadolibre_refresh_token': '', 'mercadolibre_code': '' } )
+        self.write({'mercadolibre_access_token': '', 'mercadolibre_refresh_token': '', 'mercadolibre_code': '' } )
         url_logout_meli = '/web?debug=#'
         #_logger.info( url_logout_meli )
         return {

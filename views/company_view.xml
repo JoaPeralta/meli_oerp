@@ -27,8 +27,9 @@
                                 icon="fa-user-circle"/>
 
             								<button name='meli_logout' type="object"
-                                string="Cerrar sesión"
-                                title="Cerrar sesión con ML"
+                                string="Desconectar MercadoLibre de Odoo"
+                                title="Elimina las credenciales de MercadoLibre guardadas en Odoo"
+                                confirm="Esta acción eliminará las credenciales de MercadoLibre guardadas en Odoo. Para volver a conectar la cuenta será necesario realizar nuevamente la autorización OAuth. ¿Querés continuar?"
                                 invisible="mercadolibre_state == True"
                                 class="btn btn-primary oe_stat_button"
                                 icon="fa-user-circle"/>
