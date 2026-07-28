@@ -117,7 +117,12 @@ class _FakeMeli:
             raise self._raises
         if self._responses:
             return self._responses.pop(0)
-        return _Resp({"results": [], "paging": {"total": 0, "limit": 100}})
+        # Deliberadamente ruidoso. Un fixture agotado significa que el metodo
+        # siguio pidiendo paginas cuando ya deberia haber parado, y eso hay que
+        # leerlo como "el bucle no corta", no como un cuelgue silencioso.
+        raise AssertionError(
+            "the method issued more GETs (%d) than the fixture scripts: the "
+            "scroll loop did not stop when it should have" % self.get_count)
 
     def post(self, *args, **kwargs):
         self.post_count += 1
@@ -219,7 +224,7 @@ class TestFetchListPreservesAuth(TransactionCase):
         """
         return _FakeMeli([
             _Resp({"results": ["MLA1"],
-                   "paging": {"total": 300, "limit": 100, "offset": 0},
+                   "paging": {"total": 2, "limit": 100, "offset": 0},
                    "scroll_id": "scroll-1"}),
             _Resp(error_payload),
         ], status=status)
