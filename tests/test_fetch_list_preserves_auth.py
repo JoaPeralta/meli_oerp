@@ -78,9 +78,10 @@ def _fp(value):
 
 
 class _Resp:
-    def __init__(self, payload, parseable=True):
+    def __init__(self, payload, parseable=True, status=200):
         self._payload = payload
         self._parseable = parseable
+        self.status = status
 
     def json(self):
         if not self._parseable:
@@ -91,11 +92,15 @@ class _Resp:
 class _FakeMeli:
     """A scripted client. Never reaches a network, never renews anything."""
 
-    def __init__(self, responses, status=None, raises=None):
+    def __init__(self, responses, raises=None):
         self.access_token = _ACCESS
         self.refresh_token = _REFRESH
         self.seller_id = _SELLER
-        self.last_status_code = status
+        # Se actualiza en cada GET, como hace el cliente real. Fijarlo en el
+        # constructor haria que el PRIMER request ya pareciera un 401 y el
+        # metodo cortaria antes de entrar al scroll, que es justo la rama que
+        # estos tests tienen que ejercitar.
+        self.last_status_code = None
         self._responses = list(responses)
         self._raises = raises
         self.get_count = 0
@@ -116,7 +121,9 @@ class _FakeMeli:
         if self._raises is not None:
             raise self._raises
         if self._responses:
-            return self._responses.pop(0)
+            response = self._responses.pop(0)
+            self.last_status_code = response.status
+            return response
         # Deliberadamente ruidoso. Un fixture agotado significa que el metodo
         # siguio pidiendo paginas cuando ya deberia haber parado, y eso hay que
         # leerlo como "el bucle no corta", no como un cuelgue silencioso.
@@ -214,7 +221,7 @@ class TestFetchListPreservesAuth(TransactionCase):
     # ------------------------------------------------------------------
     # fixtures
     # ------------------------------------------------------------------
-    def _scan_then(self, error_payload, status=None):
+    def _scan_then(self, error_payload, status=200):
         """A fixture that actually reaches the scroll loop.
 
         Three GETs happen before the loop body can hit an error: the initial
@@ -226,8 +233,8 @@ class TestFetchListPreservesAuth(TransactionCase):
             _Resp({"results": ["MLA1"],
                    "paging": {"total": 2, "limit": 100, "offset": 0},
                    "scroll_id": "scroll-1"}),
-            _Resp(error_payload),
-        ], status=status)
+            _Resp(error_payload, status=status),
+        ])
 
     def _assert_reached_the_scroll_loop(self, fake, why):
         """Positive signal, before any 'nothing changed' assertion."""
@@ -356,8 +363,8 @@ class TestFetchListPreservesAuth(TransactionCase):
         self._assert_auth_untouched(before, fake, "invalid_token on request 1")
 
     def test_a_401_on_the_first_request_preserves_everything(self):
-        fake = _FakeMeli([_Resp({"message": "invalid or expired token"})],
-                         status=401)
+        fake = _FakeMeli([_Resp({"message": "invalid or expired token"},
+                                status=401)])
         before = self._auth_row()
 
         _result, raised = self._run(fake)
@@ -366,7 +373,7 @@ class TestFetchListPreservesAuth(TransactionCase):
         self._assert_auth_untouched(before, fake, "HTTP 401 on request 1")
 
     def test_a_403_on_the_first_request_preserves_everything(self):
-        fake = _FakeMeli([_Resp({"message": "forbidden"})], status=403)
+        fake = _FakeMeli([_Resp({"message": "forbidden"}, status=403)])
         before = self._auth_row()
 
         _result, raised = self._run(fake)
@@ -377,8 +384,7 @@ class TestFetchListPreservesAuth(TransactionCase):
     def test_a_non_auth_error_on_the_first_request_preserves_everything(self):
         """A 500 says nothing about the credentials, so nothing is touched and
         nothing is renewed."""
-        fake = _FakeMeli([_Resp({"error": "internal_error", "status": 500})],
-                         status=500)
+        fake = _FakeMeli([_Resp({"error": "internal_error"}, status=500)])
         before = self._auth_row()
 
         _result, raised = self._run(fake)
