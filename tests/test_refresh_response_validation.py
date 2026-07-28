@@ -27,15 +27,37 @@ non-empty ``access_token``, a non-empty ``refresh_token``, and a ``user_id``
 matching the configured seller. Anything else leaves the stored credentials
 untouched — a bad refresh must not be able to destroy a working session.
 
-Scope: validating the response. Serialising concurrent refreshes and the
-transaction boundary are separate changes.
+Validating is not enough on its own. ``get_refresh_token`` mutates the client
+**before** the caller gets a chance to validate:
+
+    # get_refresh_token()  -- runs first
+    self.access_token = response_info["access_token"]
+
+    # get_new_instance()   -- runs after
+    meli_validate_refresh_response(...)
+
+So a rejected response still reaches the caller: the credentials are correctly
+kept out of the database, but the client object returned by ``get_new_instance``
+is already carrying them. "Not persisted" and "not used" are two different
+properties, and only the first one was covered. Every request made with that
+returned client would be sent with credentials we just decided not to trust.
+
+The rule this file pins down: a rejected refresh leaves the returned client on
+the credentials that were there before the attempt.
+
+Scope: validating the response, and not trusting it in memory either.
+Serialising concurrent refreshes and the transaction boundary are separate
+changes.
 """
 
+import ast
+import inspect
 from unittest.mock import patch
 
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
+from odoo.addons.meli_oerp.models import meli_util as meli_util_module
 from odoo.addons.meli_oerp.models.meli_util import MeliConfiguration
 
 _SELLER = "2288636236"
@@ -106,6 +128,11 @@ class TestRefreshResponseValidation(TransactionCase):
     def _assert_credentials_untouched(self, why):
         self.assertEqual(self.company.mercadolibre_access_token, _OLD_ACCESS, why)
         self.assertEqual(self.company.mercadolibre_refresh_token, _OLD_REFRESH, why)
+
+    def _assert_client_untouched(self, client, why):
+        """The returned client must not carry credentials we refused to store."""
+        self.assertEqual(client.access_token, _OLD_ACCESS, why)
+        self.assertEqual(client.refresh_token, _OLD_REFRESH, why)
 
     # ------------------------------------------------------------------
     # the happy path still works
@@ -180,3 +207,134 @@ class TestRefreshResponseValidation(TransactionCase):
         self.assertFalse(
             self.company.mercadolibre_token_refreshed_at,
             "a rejected refresh stamped the expiry metadata as if it had worked")
+
+    # ------------------------------------------------------------------
+    # rejected != unused: the returned client must not carry the rejected
+    # credentials either. Keeping them out of the database is only half the
+    # property; get_new_instance hands this object to the caller, and every
+    # request it makes would travel with credentials we refused to trust.
+    # ------------------------------------------------------------------
+    def test_client_after_wrong_seller_keeps_the_old_credentials(self):
+        client = self._refresh_with(self._good(user_id=int(_OTHER_SELLER)))
+
+        self._assert_client_untouched(
+            client,
+            "the returned client is using credentials issued for a different "
+            "MercadoLibre account; the refresh was rejected but the client was "
+            "mutated before the validation ran")
+
+    def test_client_after_missing_user_id_keeps_the_old_credentials(self):
+        payload = self._good()
+        del payload["user_id"]
+
+        client = self._refresh_with(payload)
+
+        self._assert_client_untouched(
+            client,
+            "the returned client is using credentials from a response whose "
+            "owning account was never verified")
+
+    def test_client_after_missing_refresh_token_keeps_the_old_credentials(self):
+        payload = self._good()
+        del payload["refresh_token"]
+
+        client = self._refresh_with(payload)
+
+        self._assert_client_untouched(
+            client,
+            "the returned client took the access token from a refresh that was "
+            "rejected for having no refresh token")
+
+    def test_client_after_empty_access_token_keeps_the_old_credentials(self):
+        client = self._refresh_with(self._good(access_token=""))
+
+        self._assert_client_untouched(
+            client,
+            "the returned client lost its working credentials to a refresh "
+            "that carried an empty access token")
+
+    def test_client_after_invalid_grant_keeps_the_old_credentials(self):
+        client = self._refresh_with({"error": "invalid_grant",
+                                     "message": "refresh token expired"})
+
+        self._assert_client_untouched(
+            client, "an invalid_grant response reached the returned client")
+
+    def test_client_after_a_valid_refresh_uses_the_new_credentials(self):
+        """The counterpart: refusing bad credentials must not refuse good ones.
+
+        Without this, "never mutate the client" would pass trivially and the
+        connector would keep using an expired access token forever.
+        """
+        client = self._refresh_with(self._good())
+
+        self.assertEqual(client.access_token, _NEW_ACCESS,
+                         "an accepted refresh did not reach the returned client")
+        self.assertEqual(client.refresh_token, _NEW_REFRESH,
+                         "an accepted refresh did not reach the returned client")
+
+
+@tagged("post_install", "-at_install")
+class TestRefreshTokenHasNoCredentialSideEffect(TransactionCase):
+    """Both HTTP backends must leave credential assignment to their caller.
+
+    The tests above drive the NoSDK backend, the only one CI can execute:
+    ``USE_MELI_SDK`` is False and the optional ``meli`` package is not
+    installed, so ``MeliApiSDK`` is ``None`` and its ``get_refresh_token``
+    cannot even be imported, let alone called. Skipping it would leave the SDK
+    copy of the same defect uncovered, so it is checked at the source level
+    instead — that part of the file is parseable whether or not the package
+    that would make the class exist is installed.
+
+    The single functional caller is ``get_new_instance``, which already assigns
+    the credentials itself once the response is validated (audited: the only
+    other references to ``get_refresh_token`` are this test suite and
+    ``melisdk/meli.py``, whose every import is commented out).
+    """
+
+    _CREDENTIAL_ATTRS = ("access_token", "refresh_token")
+
+    def _refresh_token_definitions(self):
+        source_file = inspect.getsourcefile(meli_util_module)
+        with open(source_file, "r", encoding="utf-8") as fh:
+            tree = ast.parse(fh.read(), filename=source_file)
+        return [node for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "get_refresh_token"]
+
+    def test_both_backends_are_reachable_by_this_test(self):
+        """Guard against a vacuous pass.
+
+        A zero count of mutations only means something once the definitions
+        under test have actually been found. If a rename or a refactor makes
+        this list empty, every assertion below would pass while checking
+        nothing at all.
+        """
+        self.assertEqual(
+            len(self._refresh_token_definitions()), 2,
+            "expected exactly two get_refresh_token implementations in "
+            "models/meli_util.py (NoSDK and SDK); the source-level check below "
+            "is only meaningful if both were found")
+
+    def test_no_backend_mutates_credentials_before_validation(self):
+        offenders = []
+        for definition in self._refresh_token_definitions():
+            for node in ast.walk(definition):
+                if not isinstance(node, (ast.Assign, ast.AugAssign)):
+                    continue
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if (isinstance(target, ast.Attribute)
+                            and isinstance(target.value, ast.Name)
+                            and target.value.id == "self"
+                            and target.attr in self._CREDENTIAL_ATTRS):
+                        offenders.append("line %d: self.%s"
+                                         % (target.lineno, target.attr))
+
+        self.assertEqual(
+            offenders, [],
+            "get_refresh_token assigns credentials onto the client before any "
+            "validation can run, so a rejected response still reaches the "
+            "caller in memory. The POST belongs to the backend; deciding "
+            "whether to trust the answer belongs to get_new_instance. "
+            "Offending assignments: %s" % ", ".join(offenders))
