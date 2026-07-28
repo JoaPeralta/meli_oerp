@@ -20,6 +20,7 @@
 ##############################################################################
 
 from odoo import fields, models, api
+from odoo.exceptions import UserError
 from odoo.tools.translate import _
 from markupsafe import Markup
 import logging
@@ -668,8 +669,52 @@ class res_company(models.Model):
 
     #mercadolibre_use_buyer_name = fields.Boolean(string="Use buyer name",default=True)
 
+    # ------------------------------------------------------------------
+    # Errores de autenticacion al listar publicaciones.
+    #
+    # Esta ruta NO renueva credenciales: el cliente autenticado ya viene de
+    # get_new_instance(). Y no borra ninguna: que el access_token haya vencido
+    # no dice nada del refresh_token, que en MercadoLibre es de un solo uso.
+    # ------------------------------------------------------------------
+    _MELI_IDS_AUTH_MESSAGES = ('invalid_token', 'expired_token')
+
+    def _meli_ids_auth_failed(self, meli, rjson):
+        """Decide si la sesion quedo inutilizable. Solo dos senales cuentan.
+
+        El status HTTP 401/403, o el par error/message con el que MercadoLibre
+        nombra un token invalido o vencido. Nada mas: un 5xx, un cuerpo
+        ilegible o una clave 'error' cualquiera no dicen nada de la credencial.
+        """
+        status = getattr(meli, 'last_status_code', None)
+        if status in (401, 403):
+            return True
+        if isinstance(rjson, dict) and rjson.get('error'):
+            return str(rjson.get('message') or '') in self._MELI_IDS_AUTH_MESSAGES
+        return False
+
+    def _meli_ids_auth_stop(self, detail):
+        """Corta la operacion sin tocar una sola credencial.
+
+        UserError es la parada controlada de Odoo: revierte la transaccion y el
+        motivo le llega a una persona. Devolver una accion de redirect no
+        servia, porque todos los callers hacen len() del resultado y lo iteran:
+        el dict terminaba leyendose como tres meli_ids llamados type, url y
+        target.
+        """
+        _logger.warning("fetch_list_meli_ids stopped: %s", detail)
+        raise UserError(_(
+            "MercadoLibre rejected the current session while listing the "
+            "seller's items (%s). The stored credentials were left untouched. "
+            "Reconnect the MercadoLibre account to continue.") % detail)
+
     #Toma y lista los ids de las publicaciones del sitio de MercadoLibre, filtrados por official_store_id
     def fetch_list_meli_ids( self, params=None, meli=None ):
+        """Devuelve SIEMPRE una lista de meli_ids.
+
+        Si la sesion no sirve, corta con UserError en vez de devolver una
+        accion de redirect: los callers hacen len() del resultado y lo iteran,
+        asi que un dict no era un redirect seguro sino tres ids falsos.
+        """
 
         company = self or self.env.user.company_id
 
@@ -681,7 +726,7 @@ class res_company(models.Model):
         if not meli:
             meli = self.env['meli.util'].get_new_instance( company )
             if meli.need_login():
-                return meli.redirect_login()
+                self._meli_ids_auth_stop("the connector is not logged in")
 
         official_store_id = config.mercadolibre_official_store_id or None
         seller_id = config.mercadolibre_seller_id
@@ -695,6 +740,9 @@ class res_company(models.Model):
                             **params })
 
         rjson = response.json()
+        if self._meli_ids_auth_failed(meli, rjson):
+            self._meli_ids_auth_stop("the item search was rejected")
+
         scroll_id = ""
         results = []
         ofresults = (rjson and "results" in rjson and rjson["results"]) or []
@@ -725,18 +773,13 @@ class res_company(models.Model):
             }
             response = meli.get("/users/"+str(seller_id)+"/items/search", search_params )
             rjson2 = response.json()
+            if self._meli_ids_auth_failed(meli, rjson2):
+                self._meli_ids_auth_stop("a page of the item scan was rejected")
+
             if (rjson2 and 'error' in rjson2):
-                _logger.error(rjson2)
-                if rjson2['message']=='invalid_token' or rjson2['message']=='expired_token':
-                    ACCESS_TOKEN = ''
-                    REFRESH_TOKEN = ''
-                    account.write({'access_token': ACCESS_TOKEN, 'refresh_token': REFRESH_TOKEN, 'code': '' } )
-                    condition = True
-                    url_login_meli = meli.auth_url()
-                    return {
-                        "type": "ir.actions.act_url",
-                        "url": url_login_meli,
-                        "target": "new",}
+                # Solo el error y el mensaje: el cuerpo entero no se vuelca.
+                _logger.error("fetch_list_meli_ids: error=%s message=%s",
+                              rjson2.get('error'), rjson2.get('message'))
                 condition_last_off = True
             else:
                 #results+= (rjson2 and "results" in rjson2 and rjson2["results"]) or []
