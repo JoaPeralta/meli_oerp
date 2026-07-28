@@ -12,6 +12,13 @@ Scope note: this file only READS the backend. It does not modify
 ``USE_MELI_SDK``, ``MELI_SDK_AVAILABLE``, the backend selection, requirements, or
 any business model. Where the observed behaviour is noteworthy for the upcoming
 backend switch, it is documented in the test docstring rather than "fixed".
+
+One exception, on purpose: ``get_refresh_token`` used to assign the refreshed
+credentials onto the client, and this file pinned that. The assignment happened
+before the caller could validate the response, so it was a defect rather than a
+behaviour worth preserving. It was removed, and the test now pins the opposite.
+Pinning observed behaviour is a safety net for a refactor — it is not a reason
+to keep something that is wrong.
 """
 
 from unittest.mock import patch
@@ -231,8 +238,33 @@ class TestHttpBackendContract(TransactionCase):
         data = call["kwargs"].get("data") or {}
         self.assertEqual(data.get("grant_type"), "refresh_token")
         self.assertNotIn("access_token", call["url"])
-        self.assertEqual(c.access_token, "REFRESHED-ACCESS")
         self.assertEqual(result.get("access_token"), "REFRESHED-ACCESS")
+
+    def test_get_refresh_token_leaves_the_client_credentials_alone(self):
+        """Deliberate change: this file used to pin the opposite behaviour.
+
+        ``get_refresh_token`` used to assign the new credentials onto the
+        client. That assignment ran *before* the caller could validate the
+        response, so a refresh that was rejected still left the client using
+        credentials nobody had accepted — kept out of the database, but used on
+        every subsequent request.
+
+        The POST now only reports what MercadoLibre answered.
+        ``get_new_instance`` validates and assigns. See
+        ``tests/test_refresh_response_validation.py``.
+        """
+        token_resp = _FakeResponse(json_data={
+            "access_token": "REFRESHED-ACCESS", "refresh_token": "REFRESHED-REFRESH",
+        })
+        c = _make_client(token_resp)
+        c.refresh_token = "OLD-REFRESH"
+
+        c.get_refresh_token()
+
+        self.assertEqual(c.access_token, _TOKEN,
+                         "the backend mutated the client's access token")
+        self.assertEqual(c.refresh_token, "OLD-REFRESH",
+                         "the backend mutated the client's refresh token")
 
     # ---- 8: User Products / x-version -----------------------------------
 

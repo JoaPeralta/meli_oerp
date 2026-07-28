@@ -796,15 +796,16 @@ class MeliApiNoSDK:
             )
             response_info = self._parse_response(resp)
 
-            if isinstance(response_info, dict) and response_info.get('access_token'):
-                self.access_token = response_info['access_token']
-                # Solo se reemplaza si vino uno nuevo. Pisarlo con '' dejaba al
-                # cliente sin nada que enviar en la proxima renovacion, y como
-                # el refresh token de ML es de un solo uso el anterior ya estaba
-                # gastado: la sesion quedaba irrecuperable sin OAuth manual.
-                if response_info.get('refresh_token'):
-                    self.refresh_token = response_info['refresh_token']
-            else:
+            # Este metodo hace el POST y devuelve lo que contesto ML. Nada mas:
+            # no toca las credenciales del cliente. Decidir si la respuesta
+            # merece reemplazar la sesion es del caller, que valida primero y
+            # recien despues asigna (get_new_instance).
+            #
+            # Cuando la asignacion vivia aca corria ANTES de esa validacion, asi
+            # que un refresh rechazado igual se llevaba puesto al cliente en
+            # memoria: no se persistia, pero se usaba. "No guardar" y "no usar"
+            # son dos propiedades distintas.
+            if not (isinstance(response_info, dict) and response_info.get('access_token')):
                 # Nunca el body: trae credenciales cuando el refresh sale bien.
                 _logger.warning("get_refresh_token failed: %s",
                                 meli_token_response_summary(response_info, self.seller_id))
@@ -1123,12 +1124,8 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
             response_info = api_auth_client.get_token(
                 grant_type='refresh_token', client_id=self.client_id,
                 client_secret=self.client_secret, refresh_token=self.refresh_token)
-            if isinstance(response_info, dict) and response_info.get('access_token'):
-                self.access_token = response_info['access_token']
-                # Mismo criterio que en el backend NoSDK: nunca blanquear un
-                # refresh token que todavia sirve.
-                if response_info.get('refresh_token'):
-                    self.refresh_token = response_info['refresh_token']
+            # Mismo criterio que en el backend NoSDK: el POST no toca las
+            # credenciales del cliente. Valida y asigna el caller.
             return response_info
 
         def get_sale_terms(self, category_id=None, sale_term_id=None, productjson=None):
