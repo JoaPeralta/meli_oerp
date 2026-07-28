@@ -1613,18 +1613,22 @@ class MeliUtil(models.AbstractModel):
             'AUTH_CRITICAL', new_access, new_refresh, posted=True,
             reason='rotated credentials could not be persisted')
 
-    @api.model
-    def get_new_instance(self, company=None, refresh_force=False):
+    def _build_client(self, company):
+        """Arma el cliente y nada mas: sin red, sin refresh, sin escrituras.
 
-        if not company:
-            company = self.env.user.company_id
+        Separado de get_new_instance a proposito. Obtener un objeto cliente y
+        rotar credenciales son dos cosas distintas, y mezclarlas hacia que
+        cualquier camino que solo necesitaba un cliente pudiera terminar
+        gastando un refresh token de un solo uso.
 
+        Lo usan el callback de OAuth y cualquier camino no autenticado.
+        """
         # Proxy de rescate: si la empresa tiene configurado un host alternativo,
-        # rutear la API (y el OAuth, vía _abs_url) por ese reverse proxy.
+        # rutear la API (y el OAuth, via _abs_url) por ese reverse proxy.
         api_host = company.mercadolibre_http_proxy or "https://api.mercadolibre.com"
         use_custom_host = api_host != "https://api.mercadolibre.com"
 
-        # Crear instancia de MeliApi según modo activo (SDK o requests)
+        # Crear instancia de MeliApi segun modo activo (SDK o requests)
         if _versions.USE_MELI_SDK and MeliApiSDK is not None:
             if use_custom_host:
                 sdk_config = _meli_sdk.Configuration(host=api_host)
@@ -1640,7 +1644,7 @@ class MeliUtil(models.AbstractModel):
                 # Host de rescate: sin auto-retry (los 429 agravan el rate-limit del proxy).
                 # Espeja la rama SDK: el config fresco por-host NO debe heredar el Retry
                 # por defecto (status_forcelist=[413,429,503]); reintentar contra el proxy
-                # sólo amplifica el bloqueo. Resiliencia = sin reintentos in-band.
+                # solo amplifica el bloqueo. Resiliencia = sin reintentos in-band.
                 config.retries = False
             else:
                 config = configuration_nosdk
@@ -1652,157 +1656,185 @@ class MeliUtil(models.AbstractModel):
         api_rest_client.redirect_uri = company.mercadolibre_redirect_uri
         api_rest_client.seller_id = company.mercadolibre_seller_id
         api_rest_client.AUTH_URL = company.get_ML_AUTH_URL(meli=api_rest_client)
-        last_token = api_rest_client.access_token
-
-        #api_response = api_instance.get_token(grant_type=grant_type, client_id=CLIENT_ID, client_secret=CLIENT_SECRET, redirect_uri=REDIRECT_URI, code=CODE, refresh_token=REFRESH_TOKEN)
-        #taken from res.company get_meli_state()
         api_rest_client.needlogin_state = False
+        return api_rest_client
+
+    def _meli_identity_probe(self, api_rest_client, company):
+        """GET /users/{seller}. No refresca, no escribe.
+
+        Devuelve (status_code, rjson, response). rjson es None si el cuerpo no
+        se puede parsear: un cuerpo ilegible no dice nada sobre el token.
+        """
+        response = api_rest_client.get(
+            "/users/" + str(company.mercadolibre_seller_id),
+            {'access_token': api_rest_client.access_token})
+        try:
+            rjson = response.json()
+        except Exception:
+            rjson = None
+        status = getattr(api_rest_client, "last_status_code", None)
+        return status, rjson, response
+
+    def _meli_refresh_is_due(self, company, refresh_force=False):
+        """Decide si corresponde renovar, ANTES de mirar ninguna respuesta.
+
+        Solo dos razones se pueden saber de antemano: que alguien lo pida
+        explicitamente, o que la vigencia que informo MercadoLibre ya haya
+        pasado. La tercera, un 401 en el probe de identidad, se evalua despues.
+
+        Deliberadamente NO son razones: 403, timeout, cuerpo ilegible, 5xx, ni
+        la presencia de una clave 'error'. Ninguna dice que el token vencio, y
+        cada renovacion gasta una credencial de un solo uso.
+        """
+        if refresh_force:
+            return "refresh_force"
+        expires_at = company.mercadolibre_token_expires_at
+        if expires_at and expires_at <= fields.Datetime.now():
+            return "reported expiry already past"
+        return None
+
+    def _meli_save_seller_tags(self, company, rjson):
+        """Guarda lo que el probe sano devolvio sobre la cuenta."""
+        if not isinstance(rjson, dict):
+            return
+        if "mercadolibre_user_product_seller" in company._fields:
+            value = ("tags" in rjson and "user_product_seller" in rjson["tags"])
+            if company.mercadolibre_user_product_seller != value:
+                company.mercadolibre_user_product_seller = value
+        if "mercadolibre_multiwarehouse" in company._fields:
+            value = ("tags" in rjson and "multiwarehouse" in rjson["tags"])
+            if company.mercadolibre_multiwarehouse != value:
+                company.mercadolibre_multiwarehouse = value
+
+    @api.model
+    def get_new_instance(self, company=None, refresh_force=False):
+        """Frontera autenticada central. Renueva COMO MUCHO UNA VEZ por llamada.
+
+        Disparadores, y solo estos tres:
+            refresh_force
+            la vigencia informada por ML ya vencida
+            el probe de identidad devuelve 401
+
+        Nunca: 403, timeout, cuerpo ilegible, 5xx, ni una clave 'error' en el
+        body. El gate anterior era exactamente eso ultimo, con lo cual un 403
+        podia renovar y un 401 real de ML -que no trae 'error'- no.
+        """
+        if not company:
+            company = self.env.user.company_id
+
+        api_rest_client = self._build_client(company)
+        last_token = api_rest_client.access_token
         message = "Login to ML needed in Odoo."
 
-        #pdb.set_trace()
         try:
-            if not (company.mercadolibre_seller_id==False) and api_rest_client.access_token!='':
-                response = api_rest_client.get("/users/"+str(company.mercadolibre_seller_id), {'access_token':api_rest_client.access_token} )
-
-                #_logger.info("get_new_instance connection response:"+str(response))
-                rjson = response.json()
-
-                # La sesion invalida se reconoce por el codigo HTTP, no por las
-                # claves del body: el backend NoSDK devuelve el JSON crudo de ML
-                # y un 401 real no trae ni 'error' ni 'status', con lo cual la
-                # cascada de abajo lo dejaba pasar como sesion sana.
-                # Se marca SIN cortar el flujo: si el body ademas trae 'error',
-                # la rama de refresh existente sigue corriendo igual que antes y
-                # puede volver a poner needlogin_state en False si se recupera.
-                # 403 cuenta como no utilizable solo aca, en el probe de
-                # identidad: si el token no puede leer su propio usuario, no
-                # sirve. No se generaliza 403 al resto de las requests.
-                if getattr(api_rest_client, "last_status_code", None) in (401, 403):
-                    api_rest_client.needlogin_state = True
-
-                status = "status" in rjson and rjson["status"]
-                cause = "cause" in rjson and rjson["cause"]
-
-                if status==429:
-                    return api_rest_client
-                
-                if status==500 and cause=="Internal Server Error":
-                    return api_rest_client
-
-                if status==504 and cause=="Gateway Time-out":
-                    return api_rest_client
-
-                if cause and status and int(status)>=500:
-                    return api_rest_client
-
-                right_access_token = ("-"+str(api_rest_client.seller_id)) in str(api_rest_client.access_token)
-                if not right_access_token:
-                    api_rest_client.needlogin_state = True
-                    return api_rest_client
-
-                #_logger.info(rjson)
-                if ( rjson and "error" in rjson) or refresh_force==True:
-
-                    if company.mercadolibre_cron_refresh or api_rest_client.access_token:
-                        internals = {
-                            "application_id": company.mercadolibre_client_id,
-                            "user_id": company.mercadolibre_seller_id,
-                            "topic": "internal",
-                            "resource": "get_new_instance #"+str(company.name),
-                            "state": "PROCESSING"
-                        }
-                        noti = self.env["mercadolibre.notification"].start_internal_notification( internals )
-
-                        errors = str(rjson)+"\n"
-                        logs = str(rjson)+"\n"
-
-                        api_rest_client.needlogin_state = True
-
-                        #_logger.error(rjson)
-
-                        if rjson["error"]=="not_found":
-                            api_rest_client.needlogin_state = True
-                            logs+= "NOT FOUND"+"\n"
-
-                        if "message" in rjson:
-                            message = rjson["message"]
-                            if "message" in message:
-                                #message is e.body, fix thiss
-                                try:
-                                    mesjson = json.loads(message)
-                                    message = mesjson["message"]
-                                except:
-                                    message = "invalid_token"
-                                    pass;
-                            logs+= str(message)+"\n"
-                            _logger.info("message: " +str(message))
-                            if self._meli_is_neutralized():
-                                # DB neutralizada (staging/duplicado en Odoo.sh): NUNCA rotar el refresh_token.
-                                # El POST grant_type=refresh_token lo rota server-side en ML y le robaría la
-                                # sesión a PRODUCCIÓN. needlogin_state ya quedó True arriba; el entorno de test
-                                # puede seguir LEYENDO con el access_token vigente hasta que expire (aceptable).
-                                self._meli_log_neutralized_skip()
-                            elif (refresh_force or ( message and "invalid" in str(message)) or ( message and "expired" in str(message)) 
-                                or message=="expired_token" or message=="invalid_token" or message=="internal_server_error"):
-                                api_rest_client.needlogin_state = True
-                                try:
-                                    # El refresh corre en su PROPIA transaccion,
-                                    # serializado sobre la fila auth. Antes
-                                    # corria dentro de la transaccion de negocio,
-                                    # que no tiene ningun commit boundary
-                                    # (MeliCommit es flush_all, no cr.commit),
-                                    # asi que un import que fallaba despues de
-                                    # renovar volvia por rollback a un token que
-                                    # MercadoLibre ya habia gastado.
-                                    auth = self._meli_refresh_credentials(
-                                        company, api_rest_client)
-                                    logs += "refresh: %s\n" % auth.status
-                                    # Las credenciales vuelven EN MEMORIA. No se
-                                    # relee res.company: el snapshot de esta
-                                    # transaccion es anterior al commit de AUTH
-                                    # y nunca lo va a incluir.
-                                    if auth.access_token:
-                                        api_rest_client.access_token = auth.access_token
-                                    if auth.refresh_token:
-                                        api_rest_client.refresh_token = auth.refresh_token
-                                    if auth.usable:
-                                        api_rest_client.code = ''
-                                        api_rest_client.needlogin_state = False
-                                    else:
-                                        errors += "refresh %s: %s\n" % (
-                                            auth.status, auth.reason or '')
-                                        _logger.error(
-                                            "refresh not usable: %s (%s)",
-                                            auth.status, auth.reason)
-                                except Exception as e:
-                                    safe = meli_redact(
-                                        e, api_rest_client.access_token,
-                                        api_rest_client.refresh_token,
-                                        api_rest_client.client_secret)
-                                    errors += safe
-                                    logs += safe
-                                    _logger.error("refresh raised: %s", safe)
-
-                        noti.stop_internal_notification( errors=errors , logs=logs )
-
-                else:
-                    #saving user info, brand, official store ids, etc...
-                    #if "phone" in rjson:
-                    #    _logger.info("phone:")
-                    response.user = rjson
-                    if "mercadolibre_user_product_seller" in company._fields:
-                        mercadolibre_user_product_seller = ("tags"in rjson and "user_product_seller" in rjson["tags"])
-                        if (company.mercadolibre_user_product_seller!=mercadolibre_user_product_seller):
-                            company.mercadolibre_user_product_seller = mercadolibre_user_product_seller
-
-                    if "mercadolibre_multiwarehouse" in company._fields:
-                        mercadolibre_multiwarehouse = ("tags" in rjson and "multiwarehouse" in rjson["tags"])
-                        if (company.mercadolibre_multiwarehouse != mercadolibre_multiwarehouse):
-                            company.mercadolibre_multiwarehouse = mercadolibre_multiwarehouse
-
-
-            else:
+            if company.mercadolibre_seller_id == False or api_rest_client.access_token == '':
                 api_rest_client.needlogin_state = True
+            else:
+                reason = self._meli_refresh_is_due(company, refresh_force)
+
+                if reason is None:
+                    status, rjson, response = self._meli_identity_probe(
+                        api_rest_client, company)
+
+                    # Indeterminado: no se puede afirmar nada del token.
+                    # Se devuelve el cliente tal cual, sin renovar.
+                    body_status = isinstance(rjson, dict) and rjson.get("status")
+                    body_cause = isinstance(rjson, dict) and rjson.get("cause")
+                    if body_status == 429:
+                        return api_rest_client
+                    if body_status == 500 and body_cause == "Internal Server Error":
+                        return api_rest_client
+                    if body_status == 504 and body_cause == "Gateway Time-out":
+                        return api_rest_client
+                    if body_cause and body_status and int(body_status) >= 500:
+                        return api_rest_client
+                    if status and int(status) >= 500:
+                        return api_rest_client
+
+                    # 403 marca la sesion como no utilizable en ESTE probe, pero
+                    # no renueva: no dice que el token haya vencido.
+                    if status == 403:
+                        api_rest_client.needlogin_state = True
+                        return api_rest_client
+
+                    right_access_token = (
+                        ("-" + str(api_rest_client.seller_id))
+                        in str(api_rest_client.access_token))
+                    if not right_access_token:
+                        api_rest_client.needlogin_state = True
+                        return api_rest_client
+
+                    if status == 401:
+                        reason = "identity probe returned 401"
+                    else:
+                        # Sesion sana. Nada que renovar.
+                        if isinstance(rjson, dict):
+                            response.user = rjson
+                            self._meli_save_seller_tags(company, rjson)
+                        return api_rest_client
+
+                # ---- Renovacion. Una sola vez, pase lo que pase despues. ----
+                api_rest_client.needlogin_state = True
+
+                if self._meli_is_neutralized():
+                    # DB neutralizada (staging/duplicado): NUNCA rotar el refresh
+                    # token, porque el POST lo rota server-side en ML y le roba la
+                    # sesion a PRODUCCION.
+                    self._meli_log_neutralized_skip()
+                    return api_rest_client
+
+                internals = {
+                    "application_id": company.mercadolibre_client_id,
+                    "user_id": company.mercadolibre_seller_id,
+                    "topic": "internal",
+                    "resource": "get_new_instance #" + str(company.name),
+                    "state": "PROCESSING",
+                }
+                noti = self.env["mercadolibre.notification"].start_internal_notification(internals)
+                errors = ""
+                logs = "refresh due: %s\n" % reason
+
+                try:
+                    # El refresh corre en su PROPIA transaccion, serializado sobre
+                    # la fila auth, y vuelve EN MEMORIA: el snapshot de esta
+                    # transaccion es anterior a ese commit y nunca lo va a incluir.
+                    auth = self._meli_refresh_credentials(company, api_rest_client)
+                    logs += "refresh: %s\n" % auth.status
+                    if auth.access_token:
+                        api_rest_client.access_token = auth.access_token
+                    if auth.refresh_token:
+                        api_rest_client.refresh_token = auth.refresh_token
+                    if auth.usable:
+                        api_rest_client.code = ''
+                        # Una unica validacion de identidad. Si vuelve a fallar se
+                        # informa, pero NO se renueva otra vez: eso gastaria la
+                        # credencial que acabamos de obtener.
+                        status, rjson, response = self._meli_identity_probe(
+                            api_rest_client, company)
+                        if status == 200 and isinstance(rjson, dict):
+                            api_rest_client.needlogin_state = False
+                            response.user = rjson
+                            self._meli_save_seller_tags(company, rjson)
+                            logs += "identity revalidated\n"
+                        else:
+                            logs += "identity still not usable after refresh\n"
+                            message = "identity check failed after refresh"
+                    else:
+                        errors += "refresh %s: %s\n" % (auth.status, auth.reason or "")
+                        message = auth.reason or auth.status
+                        _logger.error("refresh not usable: %s (%s)",
+                                      auth.status, auth.reason)
+                except Exception as e:
+                    safe = meli_redact(
+                        e, api_rest_client.access_token,
+                        api_rest_client.refresh_token,
+                        api_rest_client.client_secret)
+                    errors += safe
+                    logs += safe
+                    _logger.error("refresh raised: %s", safe)
+
+                noti.stop_internal_notification(errors=errors, logs=logs)
+
 
             #        except requests.exceptions.HTTPError as e:
             #            _logger.info( "And you get an HTTPError:", e.message )

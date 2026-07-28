@@ -120,7 +120,10 @@ class MercadoLibreLogin(http.Controller):
     def index(self, **codes ):
         company = request.env.user.company_id
         meli_util_model = request.env['meli.util']
-        meli = meli_util_model.get_new_instance(company)
+        # Constructor puro. Este camino todavia NO esta autenticado: pedirle un
+        # cliente no debe poder rotar credenciales, y lo unico que necesita de el
+        # son auth_url() y authorize().
+        meli = meli_util_model._build_client(company)
 
         codes.setdefault('code','none')
         codes.setdefault('error','none')
