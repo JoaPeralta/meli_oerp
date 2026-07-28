@@ -156,29 +156,55 @@ class TestFulfillmentPreservesCredentials(TransactionCase):
     # ------------------------------------------------------------------
     # every error shape: credentials survive
     # ------------------------------------------------------------------
-    def test_an_expired_token_mid_scan_preserves_the_credentials(self):
-        """The exact case that erased them: `expired_token` on a later page."""
-        fake = _FakeMeli([
+    def _scan_then(self, error_payload):
+        """Fixture that actually reaches the scroll loop.
+
+        The method issues three GETs before it can hit the destructive branch:
+        the initial search, then the `search_type=scan` request whose response
+        must carry a scroll_id, and only then the first scroll page. A fixture
+        with fewer responses lands the error on the scan request instead, the
+        loop never starts, and the test passes while proving nothing.
+        """
+        return _FakeMeli([
+            # 1. initial search: total > 10 selects the scan path
             _Resp({"results": ["MLA1"],
-                   "paging": {"total": 300, "limit": 100, "offset": 0},
-                   "scroll_id": "s1"}),
-            _Resp({"error": "invalid_token", "message": "expired_token"}),
+                   "paging": {"total": 300, "limit": 100, "offset": 0}}),
+            # 2. the scan request: a scroll_id is what opens the loop
+            _Resp({"results": ["MLA1"], "scroll_id": "scroll-1",
+                   "paging": {"total": 300, "limit": 100, "offset": 0}}),
+            # 3. first scroll page: the auth error
+            _Resp(error_payload),
         ])
+
+    def _assert_reached_the_scroll_loop(self, fake):
+        """Positive signal, before any 'nothing changed' assertion.
+
+        Three GETs means the scroll loop ran and the branch under test was
+        reachable. Fewer means the fixture stopped earlier and the assertions
+        below would hold for the wrong reason.
+        """
+        self.assertGreaterEqual(
+            fake.get_count, 3,
+            "the scroll loop was never reached (%d GETs), so this test would "
+            "pass without exercising the branch it is about" % fake.get_count)
+
+    def test_an_expired_token_mid_scan_preserves_the_credentials(self):
+        """The exact case that erased them: `expired_token` on a scroll page."""
+        fake = self._scan_then({"error": "invalid_token",
+                                "message": "expired_token"})
 
         _result, raised = self._run(fake)
 
+        self._assert_reached_the_scroll_loop(fake)
         self._assert_credentials_survived("an expired token mid-scan", raised)
 
     def test_an_invalid_token_mid_scan_preserves_the_credentials(self):
-        fake = _FakeMeli([
-            _Resp({"results": ["MLA1"],
-                   "paging": {"total": 300, "limit": 100, "offset": 0},
-                   "scroll_id": "s1"}),
-            _Resp({"error": "not_found", "message": "invalid_token"}),
-        ])
+        fake = self._scan_then({"error": "not_found",
+                                "message": "invalid_token"})
 
         _result, raised = self._run(fake)
 
+        self._assert_reached_the_scroll_loop(fake)
         self._assert_credentials_survived("an invalid token mid-scan", raised)
 
     def test_a_401_shaped_error_preserves_the_credentials(self):
