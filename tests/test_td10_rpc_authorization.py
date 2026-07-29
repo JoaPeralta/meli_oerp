@@ -95,9 +95,16 @@ class _FakeMeli:
 
     def redirect_login(self):
         return {"type": "ir.actions.act_url",
-                "url": "https://auth.example/authorization?company=%s"
-                       % self.marker,
-                "target": "self"}
+                "url": self.auth_url(), "target": "self"}
+
+    def auth_url(self, redirect_URI=None, state=None):
+        # El marcador identifica la compania para la que se construyo, que es
+        # como los tests distinguen A de B.
+        return ("https://auth.example/authorization?company=%s&state=%s"
+                % (self.marker, state or ""))
+
+    def get(self, path, params=None, **kwargs):
+        return None
 
 
 @tagged("post_install", "-at_install")

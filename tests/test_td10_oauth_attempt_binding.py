@@ -48,6 +48,7 @@ Every value here is obviously fake, and the two companies hold different ones.
 """
 
 import hashlib
+import json
 from unittest.mock import patch
 
 from odoo.exceptions import AccessError, UserError
@@ -175,15 +176,33 @@ class TestTd10OauthAttemptBinding(HttpCase):
                 patch.object(self.util, "_meli_identity_probe", probe))
 
     def _press_button(self, company, fake, counters):
+        """Aprieta el boton por la MISMA superficie RPC que usa el cliente web.
+
+        Llamar meli_login() directo desde el test no sirve: crea el intento en
+        la sesion HTTP, y una llamada fuera de una peticion no tiene ninguna.
+        Ademas asi el intento queda en la sesion que despues usa el callback,
+        que es exactamente lo que hay que probar.
+        """
         patches = self._guarded(counters, fake)
         try:
             for p in patches:
                 p.start()
-            action = company.meli_login()
+            response = self.url_open(
+                "/web/dataset/call_kw",
+                data=json.dumps({
+                    "jsonrpc": "2.0", "method": "call",
+                    "params": {"model": "res.company",
+                               "method": "meli_login",
+                               "args": [[company.id]], "kwargs": {}}}),
+                headers={"Content-Type": "application/json"})
         finally:
             for p in patches:
                 p.stop()
-        url = action.get("url", "")
+        payload = response.json()
+        self.assertNotIn("error", payload,
+                         "meli_login failed over RPC: %s"
+                         % str(payload.get("error"))[:200])
+        url = (payload.get("result") or {}).get("url", "")
         self.assertIn("state=", url, "the login action carries no state")
         return url.split("state=", 1)[1].split("&")[0]
 
