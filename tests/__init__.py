@@ -34,3 +34,4 @@ from . import test_explicit_meli_disconnect
 from . import test_pause_all_preserves_auth
 from . import test_td10_private_capability_gateway
 from . import test_td10_credential_exposure_matrix
+from . import test_td10_rpc_authorization
