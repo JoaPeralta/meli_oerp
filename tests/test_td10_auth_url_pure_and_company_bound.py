@@ -177,6 +177,13 @@ class TestTd10AuthUrlPureAndCompanyBound(HttpCase):
         return {"access": _fp(row[0]), "refresh": _fp(row[1])} if row else None
 
     def _guarded(self, counters, fake):
+        # El contador del intento se instala donde el nombre SE BUSCA, no donde
+        # se define: company.py y controllers/main.py importaron la funcion por
+        # nombre, asi que cada uno tiene su propia referencia y parchear el
+        # modulo de origen no los alcanza. Un spy mal ubicado se queda en cero
+        # y se lee como "no paso nada".
+        from odoo.addons.meli_oerp.controllers import main as controllers_main
+        from odoo.addons.meli_oerp.models import company as company_module
         from odoo.addons.meli_oerp.models import meli_util
 
         original_issue = meli_util.meli_oauth_attempt_issue
@@ -205,7 +212,10 @@ class TestTd10AuthUrlPureAndCompanyBound(HttpCase):
                 patch.object(self.util, "get_new_instance", get_new_instance),
                 patch.object(self.util, "_meli_identity_probe", probe),
                 patch.object(self.util, "_meli_refresh_credentials", refresh),
-                patch.object(meli_util, "meli_oauth_attempt_issue", attempt))
+                patch.object(company_module, "meli_oauth_attempt_issue",
+                             attempt),
+                patch.object(controllers_main, "meli_oauth_attempt_issue",
+                             attempt))
 
     def _press_button(self, company, fake, counters):
         patches = self._guarded(counters, fake)
