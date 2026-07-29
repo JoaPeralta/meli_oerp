@@ -7,6 +7,7 @@ from odoo import http, api
 
 from odoo import fields, http
 from odoo.http import Controller, Response, request, route
+from odoo.exceptions import AccessError
 try:
     from odoo.http import content_disposition
 except ImportError:
@@ -142,6 +143,12 @@ class MercadoLibreLogin(http.Controller):
         codes.setdefault('code','none')
         codes.setdefault('error','none')
 
+        def _refused():
+            # Mensaje neutro: no dice si la compania existe, quien inicio el
+            # intento ni que vendedor se esperaba.
+            return ("<h5>MercadoLibre authorization rejected.</h5>"
+                    "Nothing was exchanged or stored.")
+
         def _client_for(company):
             """Constructor puro. Solo despues de pasar la frontera del intento.
 
@@ -183,12 +190,22 @@ class MercadoLibreLogin(http.Controller):
             # ni de un company_id del navegador: si no, iniciar el flujo para B
             # y volver con A activa escribiria las credenciales en A.
             company = request.env['res.company'].browse(attempt_company_id)
-            if (not company.exists()
-                    or company not in request.env.user.company_ids):
+            if not company.exists():
                 _logger.error("OAuth callback rejected: the attempt's company "
-                              "is no longer available to this user")
-                return ("<h5>MercadoLibre authorization rejected.</h5>"
-                        "Nothing was exchanged or stored.")
+                              "no longer exists")
+                return _refused()
+
+            # La MISMA frontera privada que usa el boton: grupo y multiempresa
+            # se comprueban una sola vez, en un solo lugar, y se comprueban de
+            # nuevo AL VOLVER. Quien era administrador al iniciar y dejo de
+            # serlo no puede completar el intercambio. El intento ya se
+            # consumio mas arriba, asi que este rechazo no lo deja reutilizable.
+            try:
+                company._meli_require_credentials_admin()
+            except AccessError:
+                _logger.error("OAuth callback rejected: the user is no longer "
+                              "allowed to manage this connection")
+                return _refused()
 
             meli = _client_for(company)
 
@@ -231,6 +248,17 @@ class MercadoLibreLogin(http.Controller):
             return 'MercadoLibre authorization completed successfully. You can close this window.<br>MercadoLibre Publisher for Odoo - Copyright Moldeo Interactive <br><a href="javascript:window.history.go(-2);">Volver a Odoo</a> <script>window.history.go(-2)</script>'
         else:
             company = request.env.user.company_id
+            # auth="user" es autenticacion, no autorizacion. Sin esto cualquier
+            # usuario logueado cruzaba _build_client -una capacidad privada con
+            # sudo() angosto sobre el client secret y la fila auth- y se llevaba
+            # una URL OAuth utilizable. Los groups de campo llegan tarde: la
+            # frontera de capacidad ya quedo atras.
+            try:
+                company._meli_require_credentials_admin()
+            except AccessError:
+                _logger.error("Direct OAuth start rejected: the user may not "
+                              "manage this connection")
+                return _refused()
             meli = _client_for(company)
             state = meli_oauth_attempt_issue(company)
             return "<a href='"+meli.auth_url(state=state)+"'>Try to Login Again Please</a>"

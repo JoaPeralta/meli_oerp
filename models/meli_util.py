@@ -229,12 +229,20 @@ def meli_oauth_attempt_issue(company):
         raise UserError(_(
             "The MercadoLibre authorization can only be started from a web "
             "session."))
+    # El uid se resuelve ANTES de crear el nonce y antes de tocar la sesion.
+    # Un intento con uid nulo no esta ligado a nadie, y al consumirlo el
+    # None == None lo leeria como coincidencia: seria un intento que cualquiera
+    # completa.
+    uid = _oauth_uid()
+    if not uid:
+        raise UserError(_(
+            "The MercadoLibre authorization could not be linked to a user."))
     company.ensure_one()
     value = secrets.token_urlsafe(32)
     session[_OAUTH_ATTEMPT_SESSION_KEY] = {
         "value": value,
         "issued_at": _clock_seconds(),
-        "uid": _oauth_uid(),
+        "uid": uid,
         "company_id": company.id,
     }
     return value
@@ -256,7 +264,10 @@ def meli_oauth_attempt_consume(received):
         return False, "the issued state expired", None
     if not secrets.compare_digest(str(stored["value"]), str(received)):
         return False, "the state does not match the one issued", None
-    if stored.get("uid") != _oauth_uid():
+    current_uid = _oauth_uid()
+    if not current_uid:
+        return False, "there is no current user to match the state to", None
+    if stored.get("uid") != current_uid:
         return False, "the state belongs to another user", None
     company_id = stored.get("company_id")
     if not company_id:
