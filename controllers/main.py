@@ -161,15 +161,20 @@ class MercadoLibreLogin(http.Controller):
             return ("<h5>MercadoLibre authorization rejected.</h5>"
                     "Nothing was exchanged or stored.")
 
-        def _client_for(company):
+        def _client_for(company, with_auth_url=False):
             """Constructor puro. Solo despues de pasar la frontera del intento.
 
             Este camino todavia NO esta autenticado: pedirle un cliente no debe
             poder rotar credenciales, y lo unico que necesita de el son
             auth_url() y authorize().
+
+            El AUTH_URL solo se resuelve cuando hace falta construir la URL de
+            autorizacion. authorize() postea a TOKEN_URL, asi que el callback
+            no lo necesita para nada.
             """
             client = meli_util_model._build_client(company)
-            client.AUTH_URL = company.get_ML_AUTH_URL(meli=client)
+            if with_auth_url:
+                client.AUTH_URL = company.get_ML_AUTH_URL()
             return client
         if codes['error']!='none':
             # Una respuesta OAuth con error igual consume el intento: dejarlo
@@ -277,7 +282,7 @@ class MercadoLibreLogin(http.Controller):
                 _logger.error("Direct OAuth start rejected: the user may not "
                               "manage this connection")
                 return _refused()
-            meli = _client_for(company)
+            meli = _client_for(company, with_auth_url=True)
             state = meli_oauth_attempt_issue(company)
             return "<a href='"+meli.auth_url(state=state)+"'>Try to Login Again Please</a>"
 
