@@ -56,12 +56,24 @@ def _get_headers(filename, filetype, content):
 class MercadoLibre(http.Controller):
     @http.route('/meli/', auth='public')
     def index(self):
-        company = request.env.user.company_id
-        meli_util_model = request.env['meli.util']
-        meli = meli_util_model.get_new_instance(company)
-        if meli.need_login():
-            return "<a href='"+meli.auth_url()+"'>Login Please</a>"
+        """Aviso informativo. No mira compania, usuario, credenciales ni
+        estado de MercadoLibre.
 
+        Antes llamaba a get_new_instance, que es la frontera autenticada: hace
+        un identity probe y, si la vigencia informada ya vencio o el probe
+        vuelve 401, renueva. O sea que un GET ANONIMO podia hacer hablar al
+        conector con MercadoLibre y, en el peor caso, gastar el refresh token
+        -de un solo uso- del que depende toda la integracion.
+
+        auth='public' no era el problema: describe como se autentica la RUTA,
+        no la capacidad que la ruta invoca. Ponerle auth='user' o exigirle el
+        grupo de credenciales dejaria el mismo error en pie, porque una pagina
+        informativa no tiene nada que hacer del otro lado de esa frontera.
+
+        Devolver algo fijo tambien elimina una fuga chica que tenia: la
+        respuesta cambiaba segun el conector estuviera conectado o no, y eso lo
+        podia leer cualquiera.
+        """
         return "MercadoLibre Publisher for Odoo - Copyright Moldeo Interactive 2021"
 
     # csrf=False is required because this endpoint is a webhook called
