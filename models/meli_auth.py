@@ -60,9 +60,12 @@ class MercadolibreAuth(models.Model):
         'res.company', string='Company', required=True,
         ondelete='cascade', index=True)
 
-    access_token = fields.Char(string='Access Token', size=256)
-    refresh_token = fields.Char(string='Refresh Token', size=256)
-    code = fields.Char(string='Code', size=256)
+    access_token = fields.Char(string='Access Token', size=256,
+                               groups="base.group_system")
+    refresh_token = fields.Char(string='Refresh Token', size=256,
+                                groups="base.group_system")
+    code = fields.Char(string='Code', size=256,
+                       groups="base.group_system")
 
     token_expires_in = fields.Integer(
         string='Token Lifetime (s)',

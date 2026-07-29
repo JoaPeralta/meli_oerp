@@ -448,3 +448,52 @@ class TestTd10CredentialExposureMatrix(TransactionCase):
                     field not in described,
                     "%s sees res.config.settings.%s, a related mirror of a "
                     "secret" % (actor, field))
+
+    def test_the_settings_screen_default_get_does_not_expose_the_secrets(self):
+        mirrored = ("mercadolibre_secret_key", "mercadolibre_access_token",
+                    "mercadolibre_refresh_token")
+        for actor in _UNAUTHORISED:
+            if actor not in self.actors:
+                continue
+            Settings = self.env["res.config.settings"].with_user(
+                self.actors[actor])
+            for field in mirrored:
+                self._assert_field_unreachable(
+                    actor, field, "res.config.settings.default_get()",
+                    lambda f=field, s=Settings: s.default_get([f]).get(f))
+
+    def test_the_settings_screen_cannot_be_read_into(self):
+        """The web client opens Settings with create + web_read."""
+        mirrored = ("mercadolibre_secret_key", "mercadolibre_access_token",
+                    "mercadolibre_refresh_token")
+        for actor in _UNAUTHORISED:
+            if actor not in self.actors:
+                continue
+            Settings = self.env["res.config.settings"].with_user(
+                self.actors[actor])
+            for field in mirrored:
+                def getter(f=field, s=Settings):
+                    record = s.create({})
+                    return record.read([f])[0].get(f)
+                self._assert_field_unreachable(
+                    actor, field, "res.config.settings.read()", getter)
+
+    # ==================================================================
+    # the superuser keeps administrative access
+    # ==================================================================
+    def test_the_superuser_keeps_administrative_access(self):
+        """Restricting a field must not lock out the one account that has to
+        be able to repair the connector."""
+        root = self.env["res.company"].with_user(1).browse(self.company_a.id)
+        data = root.read(list(_COMPANY_SECRETS))[0]
+        for field, canary in _COMPANY_SECRETS.items():
+            self.assertEqual(data[field], canary,
+                             "the superuser lost access to %s" % field)
+
+    def test_the_auth_row_stays_reachable_for_system(self):
+        rows = self.env["mercadolibre.auth"].with_user(
+            self.actors["system"]).search([("company_id", "=",
+                                            self.company_a.id)])
+        self.assertTrue(rows, "System Administrator cannot see the auth row")
+        self.assertEqual(rows[0].access_token, _ACCESS_CANARY,
+                         "System Administrator cannot read the auth row")

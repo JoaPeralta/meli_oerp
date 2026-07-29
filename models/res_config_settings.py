@@ -13,21 +13,24 @@ class ResConfigSettings(models.TransientModel):
         readonly=False
     )
     mercadolibre_secret_key = fields.Char(
-        string='Secret key', 
+        string='Secret key',
         help='Secret key',
         related="company_id.mercadolibre_secret_key",
+        groups="base.group_system",
         readonly=False
     )
     mercadolibre_access_token = fields.Char(
-        string='Access Token', 
-        help='Access Token', 
+        string='Access Token',
+        help='Access Token',
         related="company_id.mercadolibre_access_token",
+        groups="base.group_system",
         readonly=False
     )
     mercadolibre_refresh_token = fields.Char(
-        string='Refresh Token', 
+        string='Refresh Token',
         help='Refresh Token',
         related="company_id.mercadolibre_refresh_token",
+        groups="base.group_system",
         readonly=False
     )
     mercadolibre_sending_message_to_customer = fields.Boolean(
