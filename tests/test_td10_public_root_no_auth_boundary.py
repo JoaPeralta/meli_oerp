@@ -249,16 +249,31 @@ class TestTd10PublicRootNoAuthBoundary(HttpCase):
     # ==================================================================
     def test_the_source_no_longer_reaches_for_anything(self):
         """Stated directly, so re-introducing the lookup fails as a statement
-        about the rule rather than as a puzzle about mocks."""
+        about the rule rather than as a puzzle about mocks.
+
+        Read with ``ast`` rather than by matching strings: the docstring above
+        the route names the very calls being forbidden, in order to explain why
+        they are gone, and a textual scan cannot tell prose from code.
+        """
+        import ast
         import inspect
+        import textwrap
 
         from odoo.addons.meli_oerp.controllers import main as controllers_main
 
-        source = inspect.getsource(controllers_main.MercadoLibre.index)
-        offenders = [line.strip() for line in source.splitlines()
-                     if any(needle in line for needle in (
-                         "get_new_instance", "_build_client", "need_login",
-                         "auth_url", "request.env", "sudo("))]
+        forbidden = {"get_new_instance", "_build_client", "need_login",
+                     "auth_url", "sudo", "meli_oauth_attempt_issue", "browse",
+                     "search", "env"}
+        tree = ast.parse(textwrap.dedent(
+            inspect.getsource(controllers_main.MercadoLibre.index)))
+
+        offenders = sorted({
+            node.attr for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and node.attr in forbidden
+        } | {
+            node.id for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and node.id in {"request"}
+        })
 
         self.assertEqual(
             offenders, [],
