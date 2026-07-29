@@ -450,17 +450,41 @@ class TestTd10CredentialExposureMatrix(TransactionCase):
                     "secret" % (actor, field))
 
     def test_the_settings_screen_default_get_does_not_expose_the_secrets(self):
+        """Asking Settings for the default of a restricted field.
+
+        A non-system user gets a KeyError: the field is not in their field set
+        at all, which is the strongest form of "absent" the contract allows.
+        The positive control below proves that is the restriction talking and
+        not a pre-existing crash -- for a system user the very same call
+        answers normally.
+        """
         mirrored = ("mercadolibre_secret_key", "mercadolibre_access_token",
                     "mercadolibre_refresh_token")
+
+        for field in mirrored:
+            try:
+                self.env["res.config.settings"].with_user(
+                    self.actors["system"]).default_get([field])
+            except KeyError:
+                self.fail("default_get(%s) raises for System Administrator "
+                          "too, so the KeyError below is not the restriction "
+                          "and this test would prove nothing" % field)
+
         for actor in _UNAUTHORISED:
             if actor not in self.actors:
                 continue
             Settings = self.env["res.config.settings"].with_user(
                 self.actors[actor])
             for field in mirrored:
-                self._assert_field_unreachable(
-                    actor, field, "res.config.settings.default_get()",
-                    lambda f=field, s=Settings: s.default_get([f]).get(f))
+                try:
+                    with self.env.cr.savepoint():
+                        value = Settings.default_get([field]).get(field)
+                except (AccessError, UserError, KeyError):
+                    continue
+                self.assertFalse(
+                    self._leaks(value),
+                    "%s obtained %s through res.config.settings.default_get()"
+                    % (actor, field))
 
     def test_the_settings_screen_cannot_be_read_into(self):
         """The web client opens Settings with create + web_read."""
