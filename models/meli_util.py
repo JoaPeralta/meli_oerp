@@ -1625,7 +1625,16 @@ class MeliUtil(models.AbstractModel):
         gastando un refresh token de un solo uso.
 
         Lo usan el callback de OAuth y cualquier camino no autenticado.
+
+        Es TAMBIEN la unica frontera privada de capacidad: el codigo interno
+        consume las credenciales a traves de este cliente, no leyendolas como
+        datos. Privado a proposito -el guion bajo lo deja fuera de RPC- y con
+        la compania explicita, nunca deducida del usuario en curso.
         """
+        # Una sola compania: con un recordset de varias no hay forma de saber
+        # de cual son las credenciales que se estan por cargar.
+        company.ensure_one()
+
         # Proxy de rescate: si la empresa tiene configurado un host alternativo,
         # rutear la API (y el OAuth, via _abs_url) por ese reverse proxy.
         api_host = company.mercadolibre_http_proxy or "https://api.mercadolibre.com"
@@ -1652,10 +1661,24 @@ class MeliUtil(models.AbstractModel):
             else:
                 config = configuration_nosdk
             api_rest_client = MeliApi(config=config)
+        # ---- La frontera de capacidad ----------------------------------
+        # Los secretos NO se leen por la fachada publica de res.company. Esos
+        # campos van a quedar restringidos a base.group_system, y todo proceso
+        # interno que corre como usuario comercial -un cron, una importacion de
+        # pedidos, una notificacion- dejaria de poder autenticarse.
+        #
+        # El sudo() es angosto a proposito: la fila auth de ESTA compania y el
+        # campo concreto del client secret. Nada de pedidos, productos,
+        # publicaciones ni ninguna operacion comercial.
+        #
+        # Lo que sale de aca es un cliente configurado, no un diccionario de
+        # secretos: devolver los valores solo correria la exposicion una
+        # llamada mas afuera.
+        auth = company._meli_auth_row()
         api_rest_client.client_id = company.mercadolibre_client_id
-        api_rest_client.client_secret = company.mercadolibre_secret_key
-        api_rest_client.access_token = company.mercadolibre_access_token or ''
-        api_rest_client.refresh_token = company.mercadolibre_refresh_token
+        api_rest_client.client_secret = company.sudo().mercadolibre_secret_key
+        api_rest_client.access_token = (auth and auth.access_token) or ''
+        api_rest_client.refresh_token = (auth and auth.refresh_token) or False
         api_rest_client.redirect_uri = company.mercadolibre_redirect_uri
         api_rest_client.seller_id = company.mercadolibre_seller_id
         # AUTH_URL queda en el default de clase a proposito. Resolverlo llama a
