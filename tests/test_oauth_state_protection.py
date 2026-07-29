@@ -205,8 +205,10 @@ class TestOAuthStateProtection(HttpCase):
         state = self._issue_state(fake)
 
         # Age the issued state past its window without waiting for it.
-        from odoo.addons.meli_oerp.controllers import main as controllers_main
-        with patch.object(controllers_main, "_OAUTH_STATE_TTL_SECONDS", -1):
+        # El intento vive ahora en models/meli_util.py: lo comparten los dos
+        # iniciadores (esta ruta y el boton res.company.meli_login()).
+        from odoo.addons.meli_oerp.models import meli_util
+        with patch.object(meli_util, "_OAUTH_ATTEMPT_TTL_SECONDS", -1):
             self._callback(fake, state=state)
 
         self._assert_no_exchange(fake, "a state past its expiry")

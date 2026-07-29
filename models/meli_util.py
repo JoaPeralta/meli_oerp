@@ -193,6 +193,29 @@ _OAUTH_ATTEMPT_SESSION_KEY = "meli_oauth_state"
 _OAUTH_ATTEMPT_TTL_SECONDS = 600
 
 
+def _oauth_session():
+    """La sesion HTTP en curso, o None si no hay peticion.
+
+    odoo.http.request es un LocalProxy: fuera de una peticion no vale None,
+    sino que LANZA al tocarlo. Por eso no alcanza con `is None` ni con getattr.
+    """
+    from odoo.http import request as _request
+
+    try:
+        return _request.session
+    except Exception:
+        return None
+
+
+def _oauth_uid():
+    from odoo.http import request as _request
+
+    try:
+        return _request.env.uid
+    except Exception:
+        return None
+
+
 def meli_oauth_attempt_issue(company):
     """Crea el intento y devuelve el nonce a mandar a MercadoLibre.
 
@@ -201,18 +224,17 @@ def meli_oauth_attempt_issue(company):
     esto existe para cerrar: se falla explicitamente, antes de cualquier
     efecto.
     """
-    from odoo.http import request as _request
-
-    if _request is None or getattr(_request, "session", None) is None:
+    session = _oauth_session()
+    if session is None:
         raise UserError(_(
             "The MercadoLibre authorization can only be started from a web "
             "session."))
     company.ensure_one()
     value = secrets.token_urlsafe(32)
-    _request.session[_OAUTH_ATTEMPT_SESSION_KEY] = {
+    session[_OAUTH_ATTEMPT_SESSION_KEY] = {
         "value": value,
         "issued_at": _clock_seconds(),
-        "uid": _request.env.uid,
+        "uid": _oauth_uid(),
         "company_id": company.id,
     }
     return value
@@ -224,11 +246,8 @@ def meli_oauth_attempt_consume(received):
     Se consume haya coincidido o no: un intento fallido invalida el que estaba
     en curso en vez de dejarlo disponible para seguir probando.
     """
-    from odoo.http import request as _request
-
-    stored = None
-    if _request is not None and getattr(_request, "session", None) is not None:
-        stored = _request.session.pop(_OAUTH_ATTEMPT_SESSION_KEY, None)
+    session = _oauth_session()
+    stored = session.pop(_OAUTH_ATTEMPT_SESSION_KEY, None) if session else None
     if not received:
         return False, "no state in the callback", None
     if not stored or not stored.get("value"):
@@ -237,7 +256,7 @@ def meli_oauth_attempt_consume(received):
         return False, "the issued state expired", None
     if not secrets.compare_digest(str(stored["value"]), str(received)):
         return False, "the state does not match the one issued", None
-    if stored.get("uid") != _request.env.uid:
+    if stored.get("uid") != _oauth_uid():
         return False, "the state belongs to another user", None
     company_id = stored.get("company_id")
     if not company_id:

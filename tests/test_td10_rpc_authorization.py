@@ -185,6 +185,9 @@ class TestTd10RpcAuthorization(TransactionCase):
             counters["client"] += 1
             return _FakeMeli(company.name)
 
+        def auth_url_of(company_record, meli=None):
+            return "https://auth.example/authorization"
+
         def get_new_instance(self_model, company=None, *a, **kw):
             counters["instance"] += 1
             return _FakeMeli(company.name if company else "?")
@@ -199,14 +202,34 @@ class TestTd10RpcAuthorization(TransactionCase):
 
         return counters, (
             patch.object(util, "_build_client", build_client),
+            patch.object(type(self.company_a), "get_ML_AUTH_URL", auth_url_of),
             patch.object(util, "get_new_instance", get_new_instance),
             patch.object(util, "_meli_refresh_credentials", refresh),
             patch.object(util, "_meli_identity_probe", probe),
         )
 
+    def _fake_request(self, uid):
+        """meli_login crea el intento OAuth en la sesion, asi que necesita una.
+
+        Sin peticion HTTP falla explicitamente a proposito -eso lo cubre PR D-,
+        pero aca lo que se prueba es la autorizacion, no ese contrato: se le da
+        una sesion para que el rechazo, cuando llega, sea por el motivo bajo
+        prueba y no por la falta de request.
+        """
+        class _Req:
+            pass
+
+        req = _Req()
+        req.session = {}
+        req.env = self.env(user=uid)
+        return req
+
     def _call(self, actor, method, company):
         counters, patches = self._spies()
         record = company.with_user(self.actors[actor])
+        patches = patches + (
+            patch("odoo.http.request", self._fake_request(
+                self.actors[actor].id)),)
         try:
             for p in patches:
                 p.start()
@@ -263,9 +286,9 @@ class TestTd10RpcAuthorization(TransactionCase):
                                                self.company_a)
         self.assertIsNone(raised, "the positive control raised %r" % raised)
         self.assertEqual(
-            counters["instance"], 1,
-            "the authenticated boundary was never reached even when allowed, "
-            "so 'zero calls' proves nothing")
+            counters["client"], 1,
+            "the capability boundary was never reached even when allowed, so "
+            "'zero calls' proves nothing")
 
     # ==================================================================
     # denial
@@ -295,7 +318,7 @@ class TestTd10RpcAuthorization(TransactionCase):
         self.assertIsNone(raised)
         self.assertEqual(result.get("type"), "ir.actions.act_url",
                          "the legitimate return contract changed")
-        self.assertEqual(counters["instance"], 1)
+        self.assertEqual(counters["client"], 1)
 
     def test_a_system_administrator_can_log_out(self):
         _result, raised, _counters = self._call("system", "meli_logout",
