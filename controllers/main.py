@@ -7,6 +7,7 @@ from odoo import http, api
 
 from odoo import fields, http
 from odoo.http import Controller, Response, request, route
+from odoo.exceptions import AccessError
 try:
     from odoo.http import content_disposition
 except ImportError:
@@ -28,44 +29,17 @@ import secrets
 from time import time as _clock_seconds
 _logger = logging.getLogger(__name__)
 
-# El state de OAuth: aleatorio, atado a la sesion, con vencimiento y de un solo
-# uso. Antes se emitia str(datetime.now()) y no se validaba nunca, con lo cual el
-# callback intercambiaba cualquier code que le llegara, de cualquier origen.
-_OAUTH_STATE_SESSION_KEY = "meli_oauth_state"
-_OAUTH_STATE_TTL_SECONDS = 600
-
-
-def _issue_oauth_state():
-    """Emite un state nuevo y lo guarda en la sesion de este usuario."""
-    value = secrets.token_urlsafe(32)
-    request.session[_OAUTH_STATE_SESSION_KEY] = {
-        "value": value,
-        "issued_at": _clock_seconds(),
-    }
-    return value
-
-
-def _consume_oauth_state(received):
-    """Valida y CONSUME el state. Devuelve (ok, motivo).
-
-    Se consume haya coincidido o no: un intento fallido invalida el state en
-    curso en vez de dejarlo disponible para seguir probando.
-    """
-    stored = request.session.pop(_OAUTH_STATE_SESSION_KEY, None)
-    if not received:
-        return False, "no state in the callback"
-    if not stored or not stored.get("value"):
-        return False, "no state was issued in this session"
-    if _clock_seconds() - stored.get("issued_at", 0) > _OAUTH_STATE_TTL_SECONDS:
-        return False, "the issued state expired"
-    if not secrets.compare_digest(str(stored["value"]), str(received)):
-        return False, "the state does not match the one issued"
-    return True, None
+# El intento de OAuth vive en models/meli_util.py: lo crean DOS iniciadores
+# distintos -esta ruta y el boton res.company.meli_login()- y con una copia en
+# cada lado terminarian existiendo dos formatos que el callback no entenderia
+# por igual.
 
 
 
 from ..models.versions import *
 from ..models.meli_util import (
+    meli_oauth_attempt_consume,
+    meli_oauth_attempt_issue,
     meli_token_expiry_vals,
     meli_token_response_summary,
     meli_validate_refresh_response,
@@ -164,25 +138,38 @@ class MercadoLibreLogin(http.Controller):
 
     @http.route(['/meli_login'], type='http', auth="user", methods=['GET'], website=True)
     def index(self, **codes ):
-        company = request.env.user.company_id
         meli_util_model = request.env['meli.util']
-        # Constructor puro. Este camino todavia NO esta autenticado: pedirle un
-        # cliente no debe poder rotar credenciales, y lo unico que necesita de el
-        # son auth_url() y authorize().
-        meli = meli_util_model._build_client(company)
-        meli.AUTH_URL = company.get_ML_AUTH_URL(meli=meli)
 
         codes.setdefault('code','none')
         codes.setdefault('error','none')
+
+        def _refused():
+            # Mensaje neutro: no dice si la compania existe, quien inicio el
+            # intento ni que vendedor se esperaba.
+            return ("<h5>MercadoLibre authorization rejected.</h5>"
+                    "Nothing was exchanged or stored.")
+
+        def _client_for(company):
+            """Constructor puro. Solo despues de pasar la frontera del intento.
+
+            Este camino todavia NO esta autenticado: pedirle un cliente no debe
+            poder rotar credenciales, y lo unico que necesita de el son
+            auth_url() y authorize().
+            """
+            client = meli_util_model._build_client(company)
+            client.AUTH_URL = company.get_ML_AUTH_URL(meli=client)
+            return client
         if codes['error']!='none':
-            message = "ERROR: %s" % codes['error']
-            return "<h5>"+message+"</h5><br/>Retry (check your redirect_uri field in MercadoLibre company configuration, also the actual user and public user default company must be the same company ): <a href='"+meli.auth_url(redirect_URI=company.mercadolibre_redirect_uri, state=_issue_oauth_state())+"'>Login</a>"
+            # Una respuesta OAuth con error igual consume el intento: dejarlo
+            # vivo permitiria reusarlo despues de que el usuario ya rechazo.
+            # No se intercambia ningun code y no se construye ningun cliente.
+            meli_oauth_attempt_consume(codes.get('state'))
+            _logger.error("OAuth callback returned an error from MercadoLibre")
+            return ("<h5>MercadoLibre authorization was not completed.</h5>"
+                    "Nothing was exchanged or stored. Start the login again "
+                    "from Odoo.")
 
         if codes['code']!='none':
-            # Do NOT log the authorization code: it is a short-lived OAuth secret
-            # that can be exchanged for access/refresh tokens.
-            _logger.info( "Meli: Authorize: REDIRECT_URI: %s, authorization code received", company.mercadolibre_redirect_uri )
-
             # El vendedor configurado es una PRECONDICION, no algo que este
             # callback descubra. Sin el no hay contra que validar, y vincular la
             # compania a la cuenta que haya contestado es exactamente la
@@ -190,13 +177,37 @@ class MercadoLibreLogin(http.Controller):
             # Antes que nada: probar que este code responde a un pedido que
             # hicimos nosotros. Si no, no se intercambia -- authorize() ni
             # siquiera se llama, asi que no se pide ninguna credencial.
-            state_ok, state_reason = _consume_oauth_state(codes.get('state'))
+            state_ok, state_reason, attempt_company_id = (
+                meli_oauth_attempt_consume(codes.get('state')))
             if not state_ok:
                 _logger.error("OAuth callback rejected: %s", state_reason)
                 return ("<h5>MercadoLibre authorization rejected.</h5>"
                         "This callback could not be matched to an authorization "
                         "request from this session. Nothing was exchanged or "
                         "stored. Start the login again from Odoo.")
+
+            # El destino sale del intento validado, NUNCA de la compania activa
+            # ni de un company_id del navegador: si no, iniciar el flujo para B
+            # y volver con A activa escribiria las credenciales en A.
+            company = request.env['res.company'].browse(attempt_company_id)
+            if not company.exists():
+                _logger.error("OAuth callback rejected: the attempt's company "
+                              "no longer exists")
+                return _refused()
+
+            # La MISMA frontera privada que usa el boton: grupo y multiempresa
+            # se comprueban una sola vez, en un solo lugar, y se comprueban de
+            # nuevo AL VOLVER. Quien era administrador al iniciar y dejo de
+            # serlo no puede completar el intercambio. El intento ya se
+            # consumio mas arriba, asi que este rechazo no lo deja reutilizable.
+            try:
+                company._meli_require_credentials_admin()
+            except AccessError:
+                _logger.error("OAuth callback rejected: the user is no longer "
+                              "allowed to manage this connection")
+                return _refused()
+
+            meli = _client_for(company)
 
             expected_seller = company.mercadolibre_seller_id
             if not expected_seller:
@@ -236,7 +247,27 @@ class MercadoLibreLogin(http.Controller):
             # Only a neutral success confirmation is returned.
             return 'MercadoLibre authorization completed successfully. You can close this window.<br>MercadoLibre Publisher for Odoo - Copyright Moldeo Interactive <br><a href="javascript:window.history.go(-2);">Volver a Odoo</a> <script>window.history.go(-2)</script>'
         else:
-            return "<a href='"+meli.auth_url(state=_issue_oauth_state())+"'>Try to Login Again Please</a>"
+            # Re-browse en request.env A PROPOSITO. env.user devuelve el
+            # registro del usuario en un entorno con su=True, y todo lo que se
+            # alcanza desde ahi -company_id incluido- hereda ese superusuario.
+            # Un recordset asi pasa de largo cualquier control que mire env.su,
+            # que es exactamente lo que hace la frontera de abajo.
+            company = request.env['res.company'].browse(
+                request.env.user.company_id.id)
+            # auth="user" es autenticacion, no autorizacion. Sin esto cualquier
+            # usuario logueado cruzaba _build_client -una capacidad privada con
+            # sudo() angosto sobre el client secret y la fila auth- y se llevaba
+            # una URL OAuth utilizable. Los groups de campo llegan tarde: la
+            # frontera de capacidad ya quedo atras.
+            try:
+                company._meli_require_credentials_admin()
+            except AccessError:
+                _logger.error("Direct OAuth start rejected: the user may not "
+                              "manage this connection")
+                return _refused()
+            meli = _client_for(company)
+            state = meli_oauth_attempt_issue(company)
+            return "<a href='"+meli.auth_url(state=state)+"'>Try to Login Again Please</a>"
 
 class MercadoLibreAuthorize(http.Controller):
     @http.route('/meli_authorize/', auth='public')
