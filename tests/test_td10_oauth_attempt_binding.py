@@ -1,28 +1,91 @@
 # -*- coding: utf-8 -*-
-"""Evidence probe for PR D: where does the OAuth attempt actually begin?
+"""The OAuth attempt must be bound to a session, a user and a company.
 
-PR D has to bind the attempt to a uid and a company. That is only possible at
-the point where the attempt is created. This file establishes, behaviourally,
-which entry points create one today.
+THE DEFECT
+----------
+Two problems, one root.
+
+**The login button created no attempt at all.** ``meli_login`` went through
+``get_new_instance`` to ``redirect_login`` to ``auth_url()`` with no state, so
+the URL carried ``str(datetime.now())`` and the session stayed empty. When
+MercadoLibre redirected back, the callback popped nothing and refused: *"could
+not be matched to an authorization request from this session"*. The button flow
+could not complete OAuth at all.
+
+Only the bare ``/meli_login`` entry point issued a real attempt, which is why
+the earlier tests -- which drive that entry point directly -- never noticed.
+
+**The callback chose the company from the active context.** It read
+``request.env.user.company_id`` on the way back, so starting the flow for
+company B and returning with company A active wrote B's credentials onto A.
+
+THE CONTRACT
+------------
+The attempt is created where the flow starts, and carries:
+
+    value       a random opaque nonce -- the only part MercadoLibre ever sees
+    issued_at   for the TTL
+    uid         who asked
+    company_id  which account the credentials are for
+
+``uid`` and ``company_id`` stay server-side in the session. The browser gets no
+vote on the destination: not a query parameter, not the active company, not the
+context.
+
+The callback resolves the company from the validated attempt and nothing else,
+re-checks the user may still use it, and consumes the attempt exactly once. A
+replay, an altered nonce, another session or another user all fail before a
+client is built or a code is exchanged.
+
+``meli_login`` uses the pure constructor, not ``get_new_instance``. The button
+exists for when the credentials no longer work, so crossing the authenticated
+boundary just to produce a login URL would spend the single-use refresh token
+on the way to reconnecting.
+
+CANARIES
+--------
+Every value here is obviously fake, and the two companies hold different ones.
 """
 
+import hashlib
 from unittest.mock import patch
 
+from odoo.exceptions import AccessError, UserError
 from odoo.tests import tagged
 from odoo.tests.common import HttpCase
 
-_SELLER = "2288636236"
+_SELLER_A = "2288636236"
+_SELLER_B = "9999999999"
+
+_A_ACCESS = "TD10_D_A_ACCESS_CANARY-%s" % _SELLER_A
+_A_REFRESH = "TD10_D_A_REFRESH_CANARY"
+_B_ACCESS = "TD10_D_B_ACCESS_CANARY-%s" % _SELLER_B
+_B_REFRESH = "TD10_D_B_REFRESH_CANARY"
+
+_NEW_ACCESS_B = "TD10_D_NEW_B_ACCESS_CANARY-%s" % _SELLER_B
+_NEW_REFRESH_B = "TD10_D_NEW_B_REFRESH_CANARY"
+
+_FAKE_CODE = "TD10-D-FAKE-AUTH-CODE"
+
+
+def _fp(value):
+    if not value:
+        return None
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:12]
 
 
 class _FakeMeli:
-    def __init__(self):
-        self.access_token = "TD10_D_ACCESS_CANARY"
-        self.refresh_token = "TD10_D_REFRESH_CANARY"
-        self.seller_id = _SELLER
-        self.AUTH_URL = "https://auth.example/authorization"
+    """Scripted client. Never reaches a network, never renews anything."""
+
+    def __init__(self, seller, payload=None):
+        self.seller_id = seller
         self.client_id = "1111111111111111"
         self.redirect_uri = "https://example.test/meli_login"
+        self.AUTH_URL = "https://auth.example/authorization"
+        self.access_token = ""
+        self.refresh_token = ""
         self.authorize_calls = 0
+        self._payload = payload
 
     def need_login(self):
         return True
@@ -36,10 +99,14 @@ class _FakeMeli:
 
     def authorize(self, code, redirect_uri=None):
         self.authorize_calls += 1
-        return {"access_token": "x", "refresh_token": "y",
-                "user_id": int(_SELLER), "expires_in": 21600}
+        return self._payload or {
+            "access_token": _NEW_ACCESS_B, "refresh_token": _NEW_REFRESH_B,
+            "token_type": "Bearer", "expires_in": 21600,
+            "user_id": int(self.seller_id)}
 
     def get(self, path, params=None, **kwargs):
+        # Resolver AUTH_URL sondea /sites; no contestar nada lo mantiene fuera
+        # de la red.
         return None
 
 
@@ -48,38 +115,335 @@ class TestTd10OauthAttemptBinding(HttpCase):
 
     def setUp(self):
         super().setUp()
-        self.company = self.env.ref("base.main_company")
-        self.company.write({
-            "mercadolibre_seller_id": _SELLER,
-            "mercadolibre_client_id": "1111111111111111",
-            "mercadolibre_secret_key": "TD10_D_SECRET_CANARY",
-            "mercadolibre_redirect_uri": "https://example.test/meli_login",
-        })
+        Company = self.env["res.company"]
+        self.company_a = self.env.ref("base.main_company")
+        self.company_b = Company.create({"name": "TD10-D Company B"})
+
+        for company, seller, access, refresh in (
+            (self.company_a, _SELLER_A, _A_ACCESS, _A_REFRESH),
+            (self.company_b, _SELLER_B, _B_ACCESS, _B_REFRESH),
+        ):
+            company.write({
+                "mercadolibre_seller_id": seller,
+                "mercadolibre_client_id": "1111111111111111",
+                "mercadolibre_secret_key": "TD10_D_SECRET_CANARY",
+                "mercadolibre_redirect_uri": "https://example.test/meli_login",
+                "mercadolibre_access_token": access,
+                "mercadolibre_refresh_token": refresh,
+            })
+
+        # El administrador puede trabajar en ambas, con A activa.
+        self.admin = self.env.ref("base.user_admin")
+        self.admin.write({"company_ids": [(4, self.company_b.id)],
+                          "company_id": self.company_a.id})
         self.env.flush_all()
+        self.util = type(self.env["meli.util"])
 
-    def test_the_button_creates_an_attempt_the_callback_can_match(self):
-        """meli_login is the entry point PR C secured, so it is where an
-        attempt should be created. If it creates none, PR D has nothing to
-        bind a uid and a company to."""
-        self.authenticate("admin", "admin")
-        fake = _FakeMeli()
+    # ------------------------------------------------------------------
+    def _row(self, company):
+        self.env.cr.execute(
+            "SELECT access_token, refresh_token FROM mercadolibre_auth "
+            "WHERE company_id = %s", (company.id,))
+        row = self.env.cr.fetchone()
+        return {"access": _fp(row[0]), "refresh": _fp(row[1])} if row else None
 
-        util = type(self.env["meli.util"])
-        with patch.object(util, "get_new_instance", return_value=fake):
-            action = self.env["res.company"].browse(
-                self.company.id).meli_login()
+    def _counters(self):
+        return {"client": 0, "instance": 0, "refresh": 0, "probe": 0}
 
+    def _guarded(self, counters, fake):
+        """Patches counting every boundary the flow could cross."""
+        def build_client(model, company, *a, **kw):
+            counters["client"] += 1
+            return fake
+
+        def get_new_instance(model, company=None, *a, **kw):
+            counters["instance"] += 1
+            raise AssertionError(
+                "the authenticated boundary was crossed; it can refresh")
+
+        def refresh(*a, **kw):
+            counters["refresh"] += 1
+            raise AssertionError("a refresh was attempted")
+
+        def probe(*a, **kw):
+            counters["probe"] += 1
+            raise AssertionError("an identity probe was attempted")
+
+        return (patch.object(self.util, "_build_client", build_client),
+                patch.object(self.util, "get_new_instance", get_new_instance),
+                patch.object(self.util, "_meli_refresh_credentials", refresh),
+                patch.object(self.util, "_meli_identity_probe", probe))
+
+    def _press_button(self, company, fake, counters):
+        patches = self._guarded(counters, fake)
+        try:
+            for p in patches:
+                p.start()
+            action = company.meli_login()
+        finally:
+            for p in patches:
+                p.stop()
         url = action.get("url", "")
-        self.assertIn("state=", url, "the login action carries no state at all")
-        state = url.split("state=", 1)[1].split("&")[0]
+        self.assertIn("state=", url, "the login action carries no state")
+        return url.split("state=", 1)[1].split("&")[0]
 
-        # Lo decisivo: ese state tiene que poder cerrar el circuito.
-        with patch.object(util, "_build_client", return_value=fake):
+    def _callback(self, state, fake, counters, extra=""):
+        patches = self._guarded(counters, fake)
+        try:
+            for p in patches:
+                p.start()
             response = self.url_open(
-                "/meli_login?code=TD10-D-FAKE-CODE&state=%s" % state,
+                "/meli_login?code=%s&state=%s%s" % (_FAKE_CODE, state, extra),
                 allow_redirects=False)
+        finally:
+            for p in patches:
+                p.stop()
+        self.env.invalidate_all()
+        return response
+
+    def _fake_request(self, uid, session=None):
+        class _Req:
+            pass
+
+        req = _Req()
+        req.session = {} if session is None else session
+        req.env = self.env(user=uid)
+        return req
+
+    # ==================================================================
+    # the flow works end to end -- and is the positive control
+    # ==================================================================
+    def test_the_button_creates_an_attempt_the_callback_can_match(self):
+        """The original evidence probe: the button flow must complete."""
+        self.authenticate("admin", "admin")
+        fake = _FakeMeli(_SELLER_B)
+        counters = self._counters()
+
+        state = self._press_button(self.company_b, fake, counters)
+        response = self._callback(state, fake, counters)
 
         self.assertIn(
             "completed successfully", response.text,
-            "the callback refused the state that the login button itself "
-            "produced, so the button flow cannot complete OAuth at all")
+            "the callback refused the state the button itself produced")
+        self.assertEqual(fake.authorize_calls, 1,
+                         "expected exactly one code exchange")
+        self.assertEqual(counters["instance"], 0)
+        self.assertEqual(counters["refresh"], 0)
+        self.assertEqual(counters["probe"], 0)
+
+    def test_the_credentials_land_on_the_company_the_button_was_pressed_on(self):
+        """The decisive one: start for B, come back with A active."""
+        self.authenticate("admin", "admin")
+        self.assertEqual(self.admin.company_id, self.company_a,
+                         "the active company is not A, so this proves nothing")
+        before_a = self._row(self.company_a)
+        fake = _FakeMeli(_SELLER_B)
+        counters = self._counters()
+
+        state = self._press_button(self.company_b, fake, counters)
+        self._callback(state, fake, counters)
+
+        self.assertEqual(self._row(self.company_b)["access"],
+                         _fp(_NEW_ACCESS_B),
+                         "company B did not receive its credentials")
+        self.assertEqual(self._row(self.company_a), before_a,
+                         "company A was overwritten by an attempt started for "
+                         "company B")
+
+    def test_a_company_id_in_the_query_cannot_redirect_the_credentials(self):
+        """The browser does not get a vote on the destination."""
+        self.authenticate("admin", "admin")
+        before_a = self._row(self.company_a)
+        fake = _FakeMeli(_SELLER_B)
+        counters = self._counters()
+
+        state = self._press_button(self.company_b, fake, counters)
+        self._callback(state, fake, counters,
+                       extra="&company_id=%s" % self.company_a.id)
+
+        self.assertEqual(self._row(self.company_a), before_a,
+                         "a company_id in the query string chose the target")
+        self.assertEqual(self._row(self.company_b)["access"],
+                         _fp(_NEW_ACCESS_B))
+
+    # ==================================================================
+    # single use
+    # ==================================================================
+    def test_the_attempt_cannot_be_replayed(self):
+        self.authenticate("admin", "admin")
+        fake = _FakeMeli(_SELLER_B)
+        counters = self._counters()
+
+        state = self._press_button(self.company_b, fake, counters)
+        first = self._callback(state, fake, counters)
+        self.assertIn("completed successfully", first.text,
+                      "the first exchange did not happen")
+
+        second = self._callback(state, fake, counters)
+
+        self.assertNotIn("completed successfully", second.text,
+                         "the same attempt was accepted twice")
+        self.assertEqual(fake.authorize_calls, 1,
+                         "a replay exchanged the code a second time")
+
+    def test_an_unknown_state_is_refused_without_building_a_client(self):
+        self.authenticate("admin", "admin")
+        fake = _FakeMeli(_SELLER_B)
+        counters = self._counters()
+        before = self._row(self.company_b)
+
+        self._press_button(self.company_b, fake, counters)
+        counters["client"] = 0
+        response = self._callback("not-the-issued-nonce", fake, counters)
+
+        self.assertNotIn("completed successfully", response.text)
+        self.assertEqual(fake.authorize_calls, 0, "a code was exchanged")
+        self.assertEqual(counters["client"], 0,
+                         "a client was built before the refusal")
+        self.assertEqual(self._row(self.company_b), before)
+
+    def test_an_attempt_from_another_session_is_refused(self):
+        self.authenticate("admin", "admin")
+        fake = _FakeMeli(_SELLER_B)
+        counters = self._counters()
+        state = self._press_button(self.company_b, fake, counters)
+        before = self._row(self.company_b)
+
+        # Sesion nueva: el intento quedo en la anterior.
+        self.authenticate("admin", "admin")
+        counters["client"] = 0
+        response = self._callback(state, fake, counters)
+
+        self.assertNotIn("completed successfully", response.text)
+        self.assertEqual(fake.authorize_calls, 0)
+        self.assertEqual(counters["client"], 0)
+        self.assertEqual(self._row(self.company_b), before)
+
+    # ==================================================================
+    # the primitive itself: uid, TTL, and no session at all
+    # ==================================================================
+    def test_the_attempt_records_the_user_and_the_company(self):
+        from odoo.addons.meli_oerp.models import meli_util
+
+        req = self._fake_request(self.admin.id)
+        with patch("odoo.http.request", req):
+            meli_util.meli_oauth_attempt_issue(self.company_b)
+
+        stored = req.session["meli_oauth_state"]
+        self.assertEqual(stored["company_id"], self.company_b.id)
+        self.assertEqual(stored["uid"], self.admin.id)
+        self.assertNotIn(_B_ACCESS, str(stored),
+                         "a credential was stored in the session")
+        self.assertGreaterEqual(len(stored["value"]), 20,
+                                "the nonce is too short to be unguessable")
+
+    def test_another_user_cannot_consume_the_attempt(self):
+        """Same session, different user.
+
+        Isolates the uid check from the session check, which would otherwise
+        hide it: re-authenticating would drop the attempt and the refusal would
+        come from the wrong rule.
+        """
+        from odoo.addons.meli_oerp.models import meli_util
+
+        other = self.env["res.users"].create({
+            "name": "TD10-D other", "login": "td10_d_other",
+            "company_id": self.company_a.id,
+            "company_ids": [(6, 0, [self.company_a.id])],
+            "group_ids": [(6, 0, [self.env.ref("base.group_user").id])]})
+
+        session = {}
+        with patch("odoo.http.request",
+                   self._fake_request(self.admin.id, session)):
+            nonce = meli_util.meli_oauth_attempt_issue(self.company_b)
+
+        with patch("odoo.http.request",
+                   self._fake_request(other.id, session)):
+            ok, reason, company_id = meli_util.meli_oauth_attempt_consume(nonce)
+
+        self.assertFalse(ok, "another user completed the attempt")
+        self.assertEqual(reason, "the state belongs to another user",
+                         "refused, but not for the reason under test")
+        self.assertIsNone(company_id)
+
+    def test_an_expired_attempt_is_refused(self):
+        from odoo.addons.meli_oerp.models import meli_util
+
+        session = {}
+        with patch("odoo.http.request",
+                   self._fake_request(self.admin.id, session)):
+            nonce = meli_util.meli_oauth_attempt_issue(self.company_b)
+            # Envejecer el intento sin esperar.
+            with patch.object(meli_util, "_OAUTH_ATTEMPT_TTL_SECONDS", -1):
+                ok, reason, _cid = meli_util.meli_oauth_attempt_consume(nonce)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "the issued state expired")
+
+    def test_a_fresh_attempt_inside_the_ttl_is_accepted(self):
+        """Anti-vacuity for the expiry test."""
+        from odoo.addons.meli_oerp.models import meli_util
+
+        session = {}
+        with patch("odoo.http.request",
+                   self._fake_request(self.admin.id, session)):
+            nonce = meli_util.meli_oauth_attempt_issue(self.company_b)
+            ok, reason, company_id = meli_util.meli_oauth_attempt_consume(nonce)
+
+        self.assertTrue(ok, "a fresh attempt was refused: %s" % reason)
+        self.assertEqual(company_id, self.company_b.id)
+
+    def test_without_an_http_session_the_attempt_fails_explicitly(self):
+        """No degrading to an unbound state, and no inventing a session."""
+        from odoo.addons.meli_oerp.models import meli_util
+
+        with patch("odoo.http.request", None):
+            with self.assertRaises(UserError):
+                meli_util.meli_oauth_attempt_issue(self.company_b)
+
+    # ==================================================================
+    # authorisation still comes first
+    # ==================================================================
+    def test_an_unauthorised_caller_creates_no_attempt(self):
+        """PR C refuses first, so nothing reaches the session."""
+        user = self.env["res.users"].create({
+            "name": "TD10-D plain", "login": "td10_d_plain",
+            "company_id": self.company_a.id,
+            "company_ids": [(6, 0, [self.company_a.id])],
+            "group_ids": [(6, 0, [self.env.ref("base.group_user").id])]})
+
+        session = {}
+        counters = self._counters()
+        fake = _FakeMeli(_SELLER_A)
+        patches = self._guarded(counters, fake)
+        try:
+            for p in patches:
+                p.start()
+            with patch("odoo.http.request",
+                       self._fake_request(user.id, session)):
+                with self.assertRaises(AccessError):
+                    self.company_a.with_user(user).meli_login()
+        finally:
+            for p in patches:
+                p.stop()
+
+        self.assertEqual(session, {},
+                         "an unauthorised caller wrote an attempt")
+        self.assertEqual(counters["client"], 0,
+                         "an unauthorised caller built a client")
+
+    # ==================================================================
+    # nothing leaks
+    # ==================================================================
+    def test_the_success_page_carries_no_credential(self):
+        self.authenticate("admin", "admin")
+        fake = _FakeMeli(_SELLER_B)
+        counters = self._counters()
+
+        state = self._press_button(self.company_b, fake, counters)
+        response = self._callback(state, fake, counters)
+
+        for secret in (_NEW_ACCESS_B, _NEW_REFRESH_B, _FAKE_CODE,
+                       "TD10_D_SECRET_CANARY", state):
+            self.assertNotIn(secret, response.text,
+                             "the response carries a secret or the state")

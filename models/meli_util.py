@@ -4,6 +4,13 @@ import pytz
 
 from odoo import models, api, fields
 from odoo.tools.translate import _
+from odoo.exceptions import UserError
+import secrets
+# Con guion bajo: mas abajo este modulo hace `from .versions import *`,
+# y versions hace `from datetime import *`, con lo cual el nombre `time`
+# terminaria apuntando a la CLASE datetime.time. Los wildcard imports
+# omiten los nombres que empiezan con guion bajo.
+from time import time as _clock_seconds
 
 import psycopg2
 import requests
@@ -166,6 +173,76 @@ class MeliAuthResult:
         # Nunca los valores: son credenciales, y un repr termina en un log.
         return "MeliAuthResult(status=%r, posted=%r, reason=%r)" % (
             self.status, self.posted, self.reason)
+
+
+# ----------------------------------------------------------------------
+# El intento OAuth.
+#
+# Vive aca y no en el controlador porque tiene DOS iniciadores: la entrada
+# directa /meli_login y el boton res.company.meli_login(). Con una copia en
+# cada lado terminarian existiendo dos formatos de intento y el callback solo
+# entenderia uno.
+#
+# Lo que viaja a MercadoLibre es unicamente el nonce, opaco. El uid y la
+# compania quedan del lado del servidor, en la sesion: son la respuesta a
+# "quien pidio esto y para que cuenta", y el navegador no puede opinar.
+#
+# No se guarda ningun secreto OAuth en la sesion.
+# ----------------------------------------------------------------------
+_OAUTH_ATTEMPT_SESSION_KEY = "meli_oauth_state"
+_OAUTH_ATTEMPT_TTL_SECONDS = 600
+
+
+def meli_oauth_attempt_issue(company):
+    """Crea el intento y devuelve el nonce a mandar a MercadoLibre.
+
+    Exige una peticion HTTP con sesion. Sin eso no hay a que atar el intento,
+    y degradarse a un state suelto seria devolver justo la vulnerabilidad que
+    esto existe para cerrar: se falla explicitamente, antes de cualquier
+    efecto.
+    """
+    from odoo.http import request as _request
+
+    if _request is None or getattr(_request, "session", None) is None:
+        raise UserError(_(
+            "The MercadoLibre authorization can only be started from a web "
+            "session."))
+    company.ensure_one()
+    value = secrets.token_urlsafe(32)
+    _request.session[_OAUTH_ATTEMPT_SESSION_KEY] = {
+        "value": value,
+        "issued_at": _clock_seconds(),
+        "uid": _request.env.uid,
+        "company_id": company.id,
+    }
+    return value
+
+
+def meli_oauth_attempt_consume(received):
+    """Valida y CONSUME el intento. Devuelve (ok, motivo, company_id).
+
+    Se consume haya coincidido o no: un intento fallido invalida el que estaba
+    en curso en vez de dejarlo disponible para seguir probando.
+    """
+    from odoo.http import request as _request
+
+    stored = None
+    if _request is not None and getattr(_request, "session", None) is not None:
+        stored = _request.session.pop(_OAUTH_ATTEMPT_SESSION_KEY, None)
+    if not received:
+        return False, "no state in the callback", None
+    if not stored or not stored.get("value"):
+        return False, "no state was issued in this session", None
+    if _clock_seconds() - stored.get("issued_at", 0) > _OAUTH_ATTEMPT_TTL_SECONDS:
+        return False, "the issued state expired", None
+    if not secrets.compare_digest(str(stored["value"]), str(received)):
+        return False, "the state does not match the one issued", None
+    if stored.get("uid") != _request.env.uid:
+        return False, "the state belongs to another user", None
+    company_id = stored.get("company_id")
+    if not company_id:
+        return False, "the state carries no company", None
+    return True, None, company_id
 
 
 def meli_validate_refresh_response(response_info, expected_seller_id):

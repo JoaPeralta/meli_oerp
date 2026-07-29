@@ -29,6 +29,7 @@ _logger = logging.getLogger(__name__)
 import pdb
 import threading
 
+from .meli_util import meli_oauth_attempt_issue
 from .meli_oerp_config import *
 from .warning import warning
 from . import versions
@@ -961,9 +962,27 @@ class res_company(models.Model):
         """
         self._meli_require_credentials_admin()
 
-        meli = self.env['meli.util'].get_new_instance(self)
+        # El intento se crea ATADO a self: a la sesion HTTP, al usuario que
+        # apreto el boton y a ESTA compania. El nonce es lo unico que viaja a
+        # MercadoLibre; el uid y la compania quedan del lado del servidor, y
+        # el callback resuelve el destino desde ahi. Asi, cambiar de compania
+        # activa entre el inicio y la vuelta no puede desviar las credenciales.
+        state = meli_oauth_attempt_issue(self)
 
-        return meli.redirect_login()
+        # Constructor puro, NO get_new_instance. get_new_instance es la
+        # frontera autenticada: hace identity probe y puede renovar. Este boton
+        # existe justo para cuando las credenciales ya no sirven, con lo cual
+        # cruzar esa frontera para poder mostrar una URL de login gastaria el
+        # refresh token -de un solo uso- antes de que el usuario reconecte.
+        meli = self.env['meli.util']._build_client(self)
+        meli.AUTH_URL = self.get_ML_AUTH_URL(meli=meli)
+
+        return {
+            "type": "ir.actions.act_url",
+            "url": meli.auth_url(redirect_URI=self.mercadolibre_redirect_uri,
+                                 state=state),
+            "target": "self",
+        }
 
     def meli_query_get_questions(self):
 
