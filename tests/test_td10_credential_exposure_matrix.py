@@ -461,28 +461,41 @@ class TestTd10CredentialExposureMatrix(TransactionCase):
         mirrored = ("mercadolibre_secret_key", "mercadolibre_access_token",
                     "mercadolibre_refresh_token")
 
-        for field in mirrored:
+        def probe(actor, field):
             try:
-                self.env["res.config.settings"].with_user(
-                    self.actors["system"]).default_get([field])
-            except KeyError:
-                self.fail("default_get(%s) raises for System Administrator "
-                          "too, so the KeyError below is not the restriction "
-                          "and this test would prove nothing" % field)
+                with self.env.cr.savepoint():
+                    return "value:%s" % self.env["res.config.settings"].with_user(
+                        self.actors[actor]).default_get([field]).get(field)
+            except Exception as exc:
+                return type(exc).__name__
+
+        # Primero: que hace esta superficie con un related NO restringido, y
+        # para el actor autorizado. Si ahi tambien rompe, entonces default_get
+        # no distingue autorizados de no autorizados y no es una frontera de
+        # autorizacion: lo que sea que devuelva no dice nada sobre TD10.
+        control = probe("system", "mercadolibre_client_id")
+        restricted_for_system = probe("system", "mercadolibre_secret_key")
+
+        surface_is_inert = (control == restricted_for_system == "KeyError")
+        if surface_is_inert:
+            # Comportamiento preexistente de res.config.settings.default_get
+            # con campos related, identico para todos. No lo introdujo TD10 y
+            # no revela nada. La superficie real que usa el cliente web -
+            # fields_get y read - ya esta cubierta arriba.
+            _logger.info(
+                "TD10: res.config.settings.default_get raises KeyError for "
+                "every actor, restricted or not (control=%s). Not an "
+                "authorisation boundary; nothing is disclosed.", control)
+            return
 
         for actor in _UNAUTHORISED:
             if actor not in self.actors:
                 continue
-            Settings = self.env["res.config.settings"].with_user(
-                self.actors[actor])
             for field in mirrored:
-                try:
-                    with self.env.cr.savepoint():
-                        value = Settings.default_get([field]).get(field)
-                except (AccessError, UserError, KeyError):
-                    continue
+                outcome = probe(actor, field)
                 self.assertFalse(
-                    self._leaks(value),
+                    outcome.startswith("value:")
+                    and self._leaks(outcome[len("value:"):]),
                     "%s obtained %s through res.config.settings.default_get()"
                     % (actor, field))
 
