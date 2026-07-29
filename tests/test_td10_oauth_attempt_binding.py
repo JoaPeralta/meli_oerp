@@ -137,6 +137,21 @@ class TestTd10OauthAttemptBinding(HttpCase):
         self.admin = self.env.ref("base.user_admin")
         self.admin.write({"company_ids": [(4, self.company_b.id)],
                           "company_id": self.company_a.id})
+        # Usuarios con contrasena: authenticate() los necesita para abrir una
+        # sesion HTTP real.
+        self.system_user = self.env["res.users"].create({
+            "name": "TD10-D system", "login": "td10_d_system",
+            "password": "td10_d_system_pw",
+            "company_id": self.company_a.id,
+            "company_ids": [(6, 0, [self.company_a.id, self.company_b.id])],
+            "group_ids": [(6, 0, [self.env.ref("base.group_user").id,
+                                  self.env.ref("base.group_system").id])]})
+        self.plain_user = self.env["res.users"].create({
+            "name": "TD10-D internal", "login": "td10_d_internal",
+            "password": "td10_d_internal_pw",
+            "company_id": self.company_a.id,
+            "company_ids": [(6, 0, [self.company_a.id])],
+            "group_ids": [(6, 0, [self.env.ref("base.group_user").id])]})
         self.env.flush_all()
         self.util = type(self.env["meli.util"])
 
@@ -466,3 +481,142 @@ class TestTd10OauthAttemptBinding(HttpCase):
                        "TD10_D_SECRET_CANARY", state):
             self.assertNotIn(secret, response.text,
                              "the response carries a secret or the state")
+
+    # ==================================================================
+    # the direct route is the other initiator, and it must gate the same way
+    # ==================================================================
+    def _open_direct(self, fake, counters):
+        """GET /meli_login with no code: the direct start branch."""
+        patches = self._guarded(counters, fake)
+        try:
+            for p in patches:
+                p.start()
+            response = self.url_open("/meli_login", allow_redirects=False)
+        finally:
+            for p in patches:
+                p.stop()
+        return response
+
+    def test_a_plain_user_cannot_start_a_flow_from_the_direct_route(self):
+        """auth="user" is authentication, not authorisation.
+
+        The start branch took the active company, reached _build_client -- a
+        private capability that uses a narrow sudo() for the client secret and
+        the auth row -- and handed back a usable OAuth URL. PR B's field groups
+        arrive far too late: the capability boundary is already behind them.
+        """
+        self.authenticate("td10_d_internal", "td10_d_internal_pw")
+        fake = _FakeMeli(_SELLER_A)
+        counters = self._counters()
+
+        response = self._open_direct(fake, counters)
+
+        self.assertNotIn("auth.example", response.text,
+                         "a plain user was handed an OAuth URL")
+        self.assertNotIn("state=", response.text,
+                         "a plain user was issued an attempt")
+        self.assertEqual(counters["client"], 0,
+                         "a plain user reached the capability boundary")
+        self.assertEqual(counters["instance"], 0)
+        self.assertEqual(counters["refresh"], 0)
+        self.assertEqual(counters["probe"], 0)
+
+    def test_a_system_user_can_still_start_from_the_direct_route(self):
+        """Positive control: the gate must not close on the legitimate path."""
+        self.authenticate("td10_d_system", "td10_d_system_pw")
+        fake = _FakeMeli(_SELLER_A)
+        counters = self._counters()
+
+        response = self._open_direct(fake, counters)
+
+        self.assertIn("state=", response.text,
+                      "a System Administrator was refused the direct route")
+        self.assertEqual(counters["client"], 1,
+                         "the capability boundary was never reached, so the "
+                         "zeros in the negative test prove nothing")
+
+    def test_losing_the_admin_group_between_start_and_callback_fails_closed(self):
+        """Authorisation is re-checked on the way back, not only on the way out.
+
+        The callback only verified that the company belonged to the user, so
+        someone who was an administrator when the flow started and is not one
+        any more could still complete the exchange.
+        """
+        self.authenticate("td10_d_system", "td10_d_system_pw")
+        fake = _FakeMeli(_SELLER_B)
+        counters = self._counters()
+        state = self._press_button(self.company_b, fake, counters)
+        before = self._row(self.company_b)
+
+        # Deja de ser administrador, con el intento ya emitido.
+        self.system_user.write({
+            "group_ids": [(3, self.env.ref("base.group_system").id)]})
+        self.env.flush_all()
+        self.assertFalse(self.system_user.has_group("base.group_system"),
+                         "the group was not actually removed")
+
+        counters["client"] = 0
+        response = self._callback(state, fake, counters)
+
+        self.assertNotIn("completed successfully", response.text)
+        self.assertEqual(fake.authorize_calls, 0,
+                         "the code was exchanged by a user who is no longer "
+                         "an administrator")
+        self.assertEqual(counters["client"], 0,
+                         "a client was built before the refusal")
+        self.assertEqual(self._row(self.company_b), before,
+                         "credentials were written after losing the group")
+
+        # El intento se consumio igual: no queda reutilizable.
+        second = self._callback(state, fake, counters)
+        self.assertNotIn("completed successfully", second.text,
+                         "the consumed attempt survived the refusal")
+
+    # ==================================================================
+    # the attempt must carry an identity, not a None one
+    # ==================================================================
+    def test_an_attempt_without_a_resolvable_user_is_refused(self):
+        """A session with no usable environment is not an identity.
+
+        Storing "uid": None would let a later None == None comparison read an
+        attempt that belongs to nobody as if it matched.
+        """
+        from odoo.addons.meli_oerp.models import meli_util
+
+        class _Req(object):
+            def __init__(self):
+                self.session = {}
+
+            @property
+            def env(self):
+                raise RuntimeError("no environment on this request")
+
+        req = _Req()
+        with patch("odoo.http.request", req):
+            with self.assertRaises(UserError):
+                meli_util.meli_oauth_attempt_issue(self.company_b)
+
+        self.assertEqual(dict(req.session), {},
+                         "an attempt with no identity was written anyway")
+
+    def test_a_consumer_without_a_resolvable_user_is_refused(self):
+        from odoo.addons.meli_oerp.models import meli_util
+
+        session = {}
+        with patch("odoo.http.request",
+                   self._fake_request(self.admin.id, session)):
+            nonce = meli_util.meli_oauth_attempt_issue(self.company_b)
+
+        class _Req(object):
+            def __init__(self, store):
+                self.session = store
+
+            @property
+            def env(self):
+                raise RuntimeError("no environment on this request")
+
+        with patch("odoo.http.request", _Req(session)):
+            ok, reason, company_id = meli_util.meli_oauth_attempt_consume(nonce)
+
+        self.assertFalse(ok, "an attempt was consumed with no current user")
+        self.assertIsNone(company_id)
