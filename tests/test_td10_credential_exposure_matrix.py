@@ -176,7 +176,8 @@ class TestTd10CredentialExposureMatrix(TransactionCase):
         protection, so the caller checks the real value separately.
         """
         try:
-            value = getter()
+            with self.env.cr.savepoint():
+                value = getter()
         except (AccessError, UserError):
             # Rechazo explicito: resultado aceptable para esta superficie.
             return
@@ -194,8 +195,13 @@ class TestTd10CredentialExposureMatrix(TransactionCase):
         asserts 'no canary came back' cannot tell protection from an unrelated
         AccessError, and would report a surface as safe for the wrong reason.
         """
+        # Cada celda va en su propio savepoint. Buscar por un campo calculado
+        # no almacenado llega a PostgreSQL y deja la transaccion abortada: sin
+        # esto, la primera celda invalida se lleva puesta toda la corrida y no
+        # queda ni resultado que leer.
         try:
-            value = getter()
+            with self.env.cr.savepoint():
+                value = getter()
         except AccessError:
             return "DENIED(access)"
         except UserError:
@@ -332,9 +338,10 @@ class TestTd10CredentialExposureMatrix(TransactionCase):
                 continue
             for field in _COMPANY_SECRETS:
                 try:
-                    self._as(actor).write({field: "TD10_OVERWRITTEN"})
-                    self.env.flush_all()
-                except (AccessError, Exception):
+                    with self.env.cr.savepoint():
+                        self._as(actor).write({field: "TD10_OVERWRITTEN"})
+                        self.env.flush_all()
+                except Exception:
                     self.env.invalidate_all()
                     continue
                 self.env.invalidate_all()
@@ -359,8 +366,9 @@ class TestTd10CredentialExposureMatrix(TransactionCase):
                     [(field, "ilike", canary[:10])],
                 ):
                     try:
-                        found = Company.search(domain)
-                    except (AccessError, ValueError):
+                        with self.env.cr.savepoint():
+                            found = Company.search(domain)
+                    except Exception:
                         continue
                     self.assertNotIn(
                         self.company_a, found,
@@ -374,8 +382,9 @@ class TestTd10CredentialExposureMatrix(TransactionCase):
             Company = self.env["res.company"].with_user(self.actors[actor])
             for field, canary in _COMPANY_SECRETS.items():
                 try:
-                    count = Company.search_count([(field, "=", canary)])
-                except (AccessError, ValueError):
+                    with self.env.cr.savepoint():
+                        count = Company.search_count([(field, "=", canary)])
+                except Exception:
                     continue
                 self.assertEqual(
                     count, 0,
@@ -389,9 +398,10 @@ class TestTd10CredentialExposureMatrix(TransactionCase):
             if actor not in self.actors:
                 continue
             try:
-                rows = self._auth_as(actor).search([])
-                values = rows.read(list(_AUTH_SECRETS))
-            except AccessError:
+                with self.env.cr.savepoint():
+                    rows = self._auth_as(actor).search([])
+                    values = rows.read(list(_AUTH_SECRETS))
+            except Exception:
                 continue
             for row in values:
                 for field in _AUTH_SECRETS:
