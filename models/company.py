@@ -38,6 +38,33 @@ from .versions import *
 import requests
 import time
 
+# Mapa de sitios de MercadoLibre por moneda. Uno solo, a nivel de modulo:
+# lo comparten la resolucion local del dominio OAuth y _get_ML_sites, y tener
+# dos copias garantizaba que tarde o temprano se separaran.
+#
+# Nadie debe mutarlo: quien necesite completarlo con datos remotos trabaja
+# sobre una copia.
+_MELI_SITES_BY_CURRENCY = {
+    "ARS": {"name": "Argentina", "id": "MLA", "default_currency_id": "ARS"},
+    "MXN": {"name": "México", "id": "MLM", "default_currency_id": "MXN"},
+    "COP": {"name": "Colombia", "id": "MCO", "default_currency_id": "COP"},
+    "PEN": {"name": "Perú", "id": "MPE", "default_currency_id": "PEN"},
+    "BOB": {"name": "Bolivia", "id": "MBO", "default_currency_id": "BOB"},
+    "BRL": {"name": "Brasil", "id": "MLB", "default_currency_id": "BRL"},
+    "CLP": {"name": "Chile", "id": "MLC", "default_currency_id": "CLP"},
+    "CRC": {"name": "Costa Rica", "id": "MCR", "default_currency_id": "CRC"},
+    "UYU": {"name": "Uruguay", "id": "MLU", "default_currency_id": "UYU"},
+    "VES": {"name": "Venezuela", "id": "MLV", "default_currency_id": "VES"},
+    "PAB": {"name": "Panamá", "id": "MPA", "default_currency_id": "PAB"},
+    "USD": {"name": "Uruguay", "id": "MLU", "default_currency_id": "UYU"},
+}
+
+# El pais manda sobre la moneda en estos casos.
+_MELI_COUNTRY_OVERRIDES = {
+    "UY": "UYU", "VE": "VES", "MX": "MXN", "CL": "CLP", "CO": "COP",
+}
+
+
 class res_company(models.Model):
     _name = "res.company"
     _inherit = "res.company"
@@ -45,7 +72,38 @@ class res_company(models.Model):
     def meli_get_object( self ):
         return True
 
+    def _meli_site_id_local(self):
+        """El site de ESTA compania, resuelto solo con configuracion local.
+
+        Sin red, sin credenciales, sin refresh, sin escrituras. Sale del pais y
+        la moneda que ya estan guardados en el registro.
+
+        Existe porque _get_ML_sites hace dos cosas que este camino no puede
+        permitirse: elige self.env.user.company_id en vez de self, y consulta
+        GET /sites autenticando con el access token vigente. Esto ultimo es
+        justo lo que no se puede exigir cuando alguien esta reconectando
+        PORQUE sus credenciales dejaron de servir.
+
+        Y la consulta remota nunca cambio el resultado: /sites solo agrega
+        entradas al mapa por default_currency_id, la resolucion unicamente lee
+        ML_sites[<moneda>]["id"], y las doce monedas que admite la seleccion
+        mercadolibre_currency ya estan en el mapa local.
+        """
+        self.ensure_one()
+        country_code = self.country_id and self.country_id.code
+        key = _MELI_COUNTRY_OVERRIDES.get(country_code)
+        if not key:
+            key = self.mercadolibre_currency
+        site = _MELI_SITES_BY_CURRENCY.get(key)
+        return (site and site["id"]) or "MLA"
+
     def get_ML_AUTH_URL(self,meli=False):
+        """Dominio de autorizacion de ESTA compania. Operacion pura.
+
+        `meli` se acepta por compatibilidad con los tres callers existentes,
+        pero ya no se usa: resolver el dominio no necesita un cliente, y
+        pedirlo obligaba a tener credenciales que funcionaran.
+        """
 
         AUTH_URL = "https://auth.mercadolibre.com.ar"
 
@@ -65,7 +123,7 @@ class res_company(models.Model):
             "MEC": { "name": "Ecuador", "AUTH_URL": "https://auth.mercadolibre.com.ec" },
             "MLU": { "name": "Uruguay", "AUTH_URL": "https://auth.mercadolibre.com.uy" },
         }
-        MLsite = self._get_ML_sites(meli=meli)
+        MLsite = self._meli_site_id_local()
         if MLsite in ML_AUTH_URL:
             AUTH_URL =  ML_AUTH_URL[MLsite]["AUTH_URL"] or AUTH_URL
 
@@ -134,20 +192,10 @@ class res_company(models.Model):
         country = company and company.country_id
         country_code = country and country.code
 
-        ML_sites = {
-            "ARS": { "name": "Argentina", "id": "MLA", "default_currency_id": "ARS" },
-            "MXN": { "name": "México", "id": "MLM", "default_currency_id": "MXN" },
-            "COP": { "name": "Colombia", "id": "MCO", "default_currency_id": "COP" },
-            "PEN": { "name": "Perú", "id": "MPE", "default_currency_id": "PEN" },
-            "BOB": { "name": "Bolivia", "id": "MBO", "default_currency_id": "BOB" },
-            "BRL": { "name": "Brasil", "id": "MLB", "default_currency_id": "BRL" },
-            "CLP": { "name": "Chile", "id": "MLC", "default_currency_id": "CLP" },
-            "CRC": {"name": "Costa Rica", "id": "MCR", "default_currency_id": "CRC"},
-            "UYU": { "name": "Uruguay", "id": "MLU", "default_currency_id": "UYU" },
-            "VES":  { "name": "Venezuela", "id": "MLV", "default_currency_id": "VES" },
-            "PAB": { "name": "Panamá", "id": "MPA", "default_currency_id": "PAB" },
-            "USD": { "name": "Uruguay", "id": "MLU", "default_currency_id": "UYU" },
-        }
+        # Copia: el mapa compartido no se muta. La rama remota de abajo
+        # completa entradas, y hacerlo sobre el modulo las filtraria a
+        # todas las llamadas siguientes.
+        ML_sites = dict(_MELI_SITES_BY_CURRENCY)
         response = meli and meli.get("/sites",{ "access_token": str(meli.access_token) } )
         if (response):
             sites = response.json()
