@@ -20,7 +20,7 @@
 ##############################################################################
 
 from odoo import fields, models, api
-from odoo.exceptions import UserError
+from odoo.exceptions import AccessError, UserError
 from odoo.tools.translate import _
 from markupsafe import Markup
 import logging
