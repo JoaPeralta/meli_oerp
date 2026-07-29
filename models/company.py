@@ -332,7 +332,9 @@ class res_company(models.Model):
             self.env['mercadolibre.orders'].orders_resync_status(meli=apistate, config=company)
 
     mercadolibre_client_id = fields.Char(string='App Id', help='Client ID para ingresar a MercadoLibre',size=128)
-    mercadolibre_secret_key = fields.Char(string='Secret Key', help='Secret Key para ingresar a MercadoLibre',size=128)
+    mercadolibre_secret_key = fields.Char(
+        string='Secret Key', help='Secret Key para ingresar a MercadoLibre',
+        size=128, groups="base.group_system")
     mercadolibre_redirect_uri = fields.Char( string='Redirect Uri', help='Redirect uri (https://yourserver.yourdomain.com/meli_login)',size=1024)
     # --------------------------------------------------------------------
     # Estado mutable de autenticacion: vive en mercadolibre.auth, NO aca.
@@ -354,12 +356,15 @@ class res_company(models.Model):
     # --------------------------------------------------------------------
     mercadolibre_access_token = fields.Char(
         string='Access Token', help='Access Token', size=256, store=False,
+        groups="base.group_system",
         compute='_compute_meli_auth_fields', inverse='_inverse_meli_access_token')
     mercadolibre_refresh_token = fields.Char(
         string='Refresh Token', help='Refresh Token', size=256, store=False,
+        groups="base.group_system",
         compute='_compute_meli_auth_fields', inverse='_inverse_meli_refresh_token')
     mercadolibre_code = fields.Char(
         string='Code', help='Code', size=256, store=False,
+        groups="base.group_system",
         compute='_compute_meli_auth_fields', inverse='_inverse_meli_code')
     mercadolibre_token_expires_in = fields.Integer(
         string='Token lifetime (s)', store=False,
