@@ -890,6 +890,35 @@ class res_company(models.Model):
 
         return meli_ids
 
+    def _meli_require_credentials_admin(self):
+        """Frontera RPC de las operaciones sobre credenciales.
+
+        meli_login y meli_logout son metodos PUBLICOS de res.company, con lo
+        cual cualquier usuario logueado los alcanza por RPC. Que el boton este
+        oculto no defiende nada: el boton es un camino al metodo, no el unico.
+
+        Se verifica aca, antes de leer una credencial, construir un cliente,
+        generar una URL o escribir en mercadolibre.auth.
+        """
+        self.ensure_one()
+        if self.env.su:
+            return
+        if not self.env.user.has_group('base.group_system'):
+            raise AccessError(_(
+                "Only a System Administrator can manage the MercadoLibre "
+                "connection."))
+        # Ser administrador no es una licencia sobre cualquier compania: tiene
+        # que ser una de las habilitadas para el usuario.
+        #
+        # Se valida contra las companias PERMITIDAS (user.company_ids), no
+        # contra la seleccion activa: un administrador con A activa puede
+        # actuar sobre B mediante una llamada explicita, que es legitimo. Lo
+        # que no puede es actuar sobre una compania que nunca le dieron.
+        if self not in self.env.user.company_ids:
+            raise AccessError(_(
+                "You are not allowed to manage the MercadoLibre connection "
+                "of this company."))
+
     def	meli_logout(self):
         """Desconexion LOCAL de MercadoLibre. Destructiva y a proposito.
 
@@ -907,7 +936,7 @@ class res_company(models.Model):
         de una compania puede no ser la que muestra el formulario: el cartel
         describia una cuenta y se desconectaba otra.
         """
-        self.ensure_one()
+        self._meli_require_credentials_admin()
         self.write({'mercadolibre_access_token': '', 'mercadolibre_refresh_token': '', 'mercadolibre_code': '' } )
         url_logout_meli = '/web?debug=#'
         #_logger.info( url_logout_meli )
@@ -919,11 +948,20 @@ class res_company(models.Model):
 
 
     def meli_login(self):
-        #_logger.info('company.meli_login() ')
-        self.ensure_one()
-        company = self.env.user.company_id
+        """Inicia el flujo OAuth para ESTA compania.
 
-        meli = self.env['meli.util'].get_new_instance(company)
+        Antes hacia ensure_one() sobre self y despues lo ignoraba, operando
+        sobre self.env.user.company_id -la compania ACTIVA-. Con mas de una
+        compania esas dos difieren, asi que el boton de la compania B iniciaba
+        el flujo de la compania A.
+
+        La autorizacion va primero: get_new_instance es la frontera
+        autenticada, hace un identity probe y puede gastar el refresh token
+        renovando. Nada de eso puede pasar por una llamada RPC no autorizada.
+        """
+        self._meli_require_credentials_admin()
+
+        meli = self.env['meli.util'].get_new_instance(self)
 
         return meli.redirect_login()
 
