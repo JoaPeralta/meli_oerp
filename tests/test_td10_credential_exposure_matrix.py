@@ -314,8 +314,11 @@ class TestTd10CredentialExposureMatrix(TransactionCase):
             described = self.env["res.company"].with_user(
                 self.actors[actor]).fields_get()
             for field in _COMPANY_SECRETS:
-                self.assertNotIn(
-                    field, described,
+                # assertTrue y no assertNotIn: al fallar, assertNotIn formatea
+                # el contenedor entero, y fields_get() de res.company son
+                # cientos de campos con su help. Ese mensaje mata el proceso.
+                self.assertTrue(
+                    field not in described,
                     "%s sees %s in fields_get(), so the web client will ask "
                     "for it" % (actor, field))
 
@@ -419,8 +422,8 @@ class TestTd10CredentialExposureMatrix(TransactionCase):
             except AccessError:
                 continue
             for field in _AUTH_SECRETS:
-                self.assertNotIn(
-                    field, described,
+                self.assertTrue(
+                    field not in described,
                     "%s sees mercadolibre.auth.%s in fields_get()"
                     % (actor, field))
 
@@ -441,7 +444,7 @@ class TestTd10CredentialExposureMatrix(TransactionCase):
             except AccessError:
                 continue
             for field in mirrored:
-                self.assertNotIn(
-                    field, described,
+                self.assertTrue(
+                    field not in described,
                     "%s sees res.config.settings.%s, a related mirror of a "
                     "secret" % (actor, field))
