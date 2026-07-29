@@ -39,9 +39,13 @@ Every value here is obviously fake. No production credential is ever written,
 read or printed by this suite.
 """
 
-from odoo.exceptions import AccessError
+import logging
+
+from odoo.exceptions import AccessError, UserError
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
+
+_logger = logging.getLogger(__name__)
 
 _ACCESS_CANARY = "TD10_ACCESS_CANARY"
 _REFRESH_CANARY = "TD10_REFRESH_CANARY"
@@ -173,11 +177,73 @@ class TestTd10CredentialExposureMatrix(TransactionCase):
         """
         try:
             value = getter()
-        except AccessError:
+        except (AccessError, UserError):
+            # Rechazo explicito: resultado aceptable para esta superficie.
             return
         self.assertFalse(
             self._leaks(value),
             "%s obtained %s through %s" % (actor, field, surface))
+
+    # ==================================================================
+    # the matrix itself, reported rather than asserted
+    # ==================================================================
+    def _probe(self, getter):
+        """Classify one cell: what does this actor actually get here?
+
+        Distinguishing DENIED from ABSENT from LEAK matters. A test that only
+        asserts 'no canary came back' cannot tell protection from an unrelated
+        AccessError, and would report a surface as safe for the wrong reason.
+        """
+        try:
+            value = getter()
+        except AccessError:
+            return "DENIED(access)"
+        except UserError:
+            return "DENIED(user)"
+        except Exception as exc:
+            return "ERROR(%s)" % type(exc).__name__
+        if self._leaks(value):
+            return "*** LEAK ***"
+        if value is None:
+            return "ABSENT"
+        if value is False or value == "":
+            return "EMPTY"
+        return "value"
+
+    def test_report_the_exposure_matrix(self):
+        """Phase 0 instrument. Asserts nothing; prints what is true today."""
+        Company = self.env["res.company"]
+        rows = []
+        for actor in list(_UNAUTHORISED) + ["system"]:
+            if actor not in self.actors:
+                continue
+            user = self.actors[actor]
+            company = self.company_a.with_user(user)
+            model = Company.with_user(user)
+            for field in _COMPANY_SECRETS:
+                canary = _COMPANY_SECRETS[field]
+                cells = {
+                    "read": lambda f=field, c=company: c.read([f])[0].get(f),
+                    "search_read": lambda f=field, m=model: (
+                        m.search_read([("id", "=", self.company_a.id)], [f])
+                        or [{}])[0].get(f),
+                    "web_read": lambda f=field, c=company: (
+                        c.web_read({f: {}}) or [{}])[0].get(f),
+                    "export": lambda f=field, c=company: (
+                        (c.export_data([f]).get("datas") or [[None]])[0]
+                        or [None])[0],
+                    "fields_get": lambda f=field, m=model: (
+                        canary if f in m.fields_get() else None),
+                    "domain=": lambda f=field, m=model, k=canary: (
+                        canary if self.company_a in m.search([(f, "=", k)])
+                        else None),
+                    "srch_count": lambda f=field, m=model, k=canary: (
+                        canary if m.search_count([(f, "=", k)]) else None),
+                }
+                for surface, getter in cells.items():
+                    rows.append("  %-14s %-32s %-12s %s"
+                                % (actor, field, surface, self._probe(getter)))
+        _logger.info("TD10 MATRIX BEGIN\n%s\nTD10 MATRIX END", "\n".join(rows))
 
     def test_read_does_not_expose_the_secrets(self):
         for actor in _UNAUTHORISED:
