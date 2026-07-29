@@ -111,6 +111,29 @@ class _FakeMeli:
         return None
 
 
+class _NoUidEnv(object):
+    """Un entorno real, pero sin uid resoluble.
+
+    Delega todo en el env verdadero -las traducciones lo necesitan- y sólo
+    responde None a `uid`. Romper el env entero probaría otra cosa: que el
+    request está roto, no que la identidad no se puede resolver.
+    """
+
+    uid = None
+
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def __call__(self, *args, **kwargs):
+        return self._real(*args, **kwargs)
+
+    def __getitem__(self, name):
+        return self._real[name]
+
+
 @tagged("post_install", "-at_install")
 class TestTd10OauthAttemptBinding(HttpCase):
 
@@ -583,15 +606,11 @@ class TestTd10OauthAttemptBinding(HttpCase):
         """
         from odoo.addons.meli_oerp.models import meli_util
 
-        class _Req(object):
-            def __init__(self):
-                self.session = {}
-
-            @property
-            def env(self):
-                raise RuntimeError("no environment on this request")
-
-        req = _Req()
+        # El env tiene que seguir siendo utilizable: UserError pasa su mensaje
+        # por _(), que resuelve el idioma contra request.env. Lo que se simula
+        # es un uid no resoluble, no un request roto.
+        req = self._fake_request(self.admin.id)
+        req.env = _NoUidEnv(req.env)
         with patch("odoo.http.request", req):
             with self.assertRaises(UserError):
                 meli_util.meli_oauth_attempt_issue(self.company_b)
@@ -607,15 +626,9 @@ class TestTd10OauthAttemptBinding(HttpCase):
                    self._fake_request(self.admin.id, session)):
             nonce = meli_util.meli_oauth_attempt_issue(self.company_b)
 
-        class _Req(object):
-            def __init__(self, store):
-                self.session = store
-
-            @property
-            def env(self):
-                raise RuntimeError("no environment on this request")
-
-        with patch("odoo.http.request", _Req(session)):
+        req = self._fake_request(self.admin.id, session)
+        req.env = _NoUidEnv(req.env)
+        with patch("odoo.http.request", req):
             ok, reason, company_id = meli_util.meli_oauth_attempt_consume(nonce)
 
         self.assertFalse(ok, "an attempt was consumed with no current user")

@@ -247,7 +247,13 @@ class MercadoLibreLogin(http.Controller):
             # Only a neutral success confirmation is returned.
             return 'MercadoLibre authorization completed successfully. You can close this window.<br>MercadoLibre Publisher for Odoo - Copyright Moldeo Interactive <br><a href="javascript:window.history.go(-2);">Volver a Odoo</a> <script>window.history.go(-2)</script>'
         else:
-            company = request.env.user.company_id
+            # Re-browse en request.env A PROPOSITO. env.user devuelve el
+            # registro del usuario en un entorno con su=True, y todo lo que se
+            # alcanza desde ahi -company_id incluido- hereda ese superusuario.
+            # Un recordset asi pasa de largo cualquier control que mire env.su,
+            # que es exactamente lo que hace la frontera de abajo.
+            company = request.env['res.company'].browse(
+                request.env.user.company_id.id)
             # auth="user" es autenticacion, no autorizacion. Sin esto cualquier
             # usuario logueado cruzaba _build_client -una capacidad privada con
             # sudo() angosto sobre el client secret y la fila auth- y se llevaba
