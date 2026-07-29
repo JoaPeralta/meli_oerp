@@ -116,8 +116,6 @@ class MercadolibreNotification(models.Model):
             _logger.info("seller user: "+str(company.mercadolibre_seller_user.name))
         meli_util_model = self.env['meli.util']
         meli = meli_util_model.get_new_instance(company)
-        ACCESS_TOKEN = company.mercadolibre_access_token
-        REFRESH_TOKEN = company.mercadolibre_refresh_token
 
         messages = []
 
@@ -204,8 +202,6 @@ class MercadolibreNotification(models.Model):
         company = self.env.user.company_id
         meli_util_model = self.env['meli.util']
         meli = meli_util_model.get_new_instance(company)
-        ACCESS_TOKEN = company.mercadolibre_access_token
-        REFRESH_TOKEN = company.mercadolibre_refresh_token
 
         for noti in self:
 
@@ -250,8 +246,6 @@ class MercadolibreNotification(models.Model):
         company = self.env.user.company_id
         meli_util_model = self.env['meli.util']
         meli = meli_util_model.get_new_instance(company)
-        ACCESS_TOKEN = company.mercadolibre_access_token
-        REFRESH_TOKEN = company.mercadolibre_refresh_token
 
         for noti in self:
 
@@ -386,8 +380,6 @@ class MercadolibreNotification(models.Model):
         company = self.env.user.company_id
         meli_util_model = self.env['meli.util']
         meli = meli_util_model.get_new_instance(company)
-        ACCESS_TOKEN = company.mercadolibre_access_token
-        REFRESH_TOKEN = company.mercadolibre_refresh_token
 
         for noti in self:
 
