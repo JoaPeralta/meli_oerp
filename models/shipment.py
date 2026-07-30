@@ -116,7 +116,7 @@ class mercadolibre_shipment_print(models.TransientModel):
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
             if meli.need_login():
-                return meli.redirect_login()
+                self.env['meli.util']._meli_require_reconnect()
 
         #_logger.info("shipment_print")
         #_logger.info(shipment_ids)
@@ -138,7 +138,7 @@ class mercadolibre_shipment_print(models.TransientModel):
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
             if meli.need_login():
-                return meli.redirect_login()
+                self.env['meli.util']._meli_require_reconnect()
 
         sep = ""
         shipment_ids= []
@@ -287,7 +287,7 @@ class mercadolibre_shipment_print(models.TransientModel):
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
             if meli.need_login():
-                return meli.redirect_login()
+                self.env['meli.util']._meli_require_reconnect()
 
         sep = ""
         shipment_ids= []
@@ -1210,7 +1210,7 @@ class mercadolibre_shipment(models.Model):
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
             if meli.need_login():
-                return meli.redirect_login()
+                self.env['meli.util']._meli_require_reconnect()
 
         ship_id = False
         shipment = None
@@ -1942,7 +1942,7 @@ class mercadolibre_shipment(models.Model):
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
             if meli.need_login():
-                return meli.redirect_login()
+                self.env['meli.util']._meli_require_reconnect()
 
         orders_obj = self.env['mercadolibre.orders']
         shipment_obj = self.env['mercadolibre.shipment']

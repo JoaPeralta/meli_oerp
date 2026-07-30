@@ -921,14 +921,10 @@ class MeliApiNoSDK:
         url = self.AUTH_URL + '?' + urlencode(params)
         return url
 
-    def redirect_login(self):
-        """Retorna acción de redirección para login en Odoo"""
-        url_login_meli = str(self.auth_url())
-        return {
-            "type": "ir.actions.act_url",
-            "url": url_login_meli,
-            "target": "self",
-        }
+    # redirect_login se elimino en PR G. Era la unica via por la que una
+    # accion comercial podia construir una URL de autorizacion, y con eso
+    # convertirse en un iniciador de OAuth fuera del flujo protegido.
+    # Reconectar se hace desde res.company.meli_login o /meli_login.
 
     def authorize(self, code, redirect_uri=None):
         """
@@ -1307,8 +1303,10 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
                       'state': state or str(datetime.now())}
             return self.AUTH_URL + '?' + urlencode(params)
 
-        def redirect_login(self):
-            return {"type": "ir.actions.act_url", "url": str(self.auth_url()), "target": "self"}
+        # redirect_login se elimino en PR G. Era la unica via por la que una
+        # accion comercial podia construir una URL de autorizacion, y con eso
+        # convertirse en un iniciador de OAuth fuera del flujo protegido.
+        # Reconectar se hace desde res.company.meli_login o /meli_login.
 
         def authorize(self, code, redirect_uri=None):
             api_client = _ApiClient()
@@ -1723,6 +1721,26 @@ class MeliUtil(models.AbstractModel):
             'AUTH_CRITICAL', new_access, new_refresh, posted=True,
             reason='rotated credentials could not be persisted')
 
+    def _meli_require_reconnect(self):
+        """Corta la operacion: la conexion necesita intervencion administrativa.
+
+        Existe para que ninguna accion comercial tenga que decidir por su
+        cuenta que hacer cuando need_login() es verdadero. Antes cada una
+        devolvia meli.redirect_login(), o sea que publicar, pausar, cerrar,
+        subir una imagen, importar una categoria o imprimir un envio ERAN
+        iniciadores de OAuth, alcanzables por quien pudiera correr esa accion y
+        por fuera del flujo protegido.
+
+        Reconectar es un acto administrativo y vive en la configuracion de la
+        compania, no en el formulario de un producto.
+
+        El mensaje es deliberadamente neutro: no nombra URL, state, vendedor,
+        compania, token, client secret ni code.
+        """
+        raise UserError(_(
+            "MercadoLibre requires a new authorization. A system administrator "
+            "must reconnect the account from the company settings."))
+
     def _build_client(self, company):
         """Arma el cliente y nada mas: sin red, sin refresh, sin escrituras.
 
@@ -2020,18 +2038,6 @@ class MeliUtil(models.AbstractModel):
             #    _logger.info("mercadolibre_state already set: "+str(api_rest_client.needlogin_state))
 
         return api_rest_client
-
-    @api.model
-    def get_url_meli_login(self, app_instance):
-        if not company:
-            company = self.env.user.company_id
-        REDIRECT_URI = company.mercadolibre_redirect_uri
-        url_login_meli = app_instance.auth_url(redirect_URI=REDIRECT_URI)
-        return {
-            "type": "ir.actions.act_url",
-            "url": url_login_meli,
-            "target": "self",
-        }
 
     def convert_to_datetime(self, date_str):
         if not date_str:

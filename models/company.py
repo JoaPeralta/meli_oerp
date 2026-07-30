@@ -860,7 +860,7 @@ class res_company(models.Model):
 
         meli = self.env['meli.util'].get_new_instance( company )
         if meli.need_login():
-            return meli.redirect_login()
+            self.env['meli.util']._meli_require_reconnect()
 
         official_store_id = store_id
         if not official_store_id:
@@ -1111,7 +1111,7 @@ class res_company(models.Model):
 
         meli = self.env['meli.util'].get_new_instance(company)
         if meli.need_login():
-            return meli.redirect_login()
+            self.env['meli.util']._meli_require_reconnect()
 
         results = []
 
@@ -1464,7 +1464,7 @@ class res_company(models.Model):
         search_limit = batch_processing_unit or 100
         search_offset = batch_processing_unit_offset or 0
         if meli.need_login():
-            return meli.redirect_login()
+            self.env['meli.util']._meli_require_reconnect()
         url_get = "/users/"+str(company.mercadolibre_seller_id)+"/items/search?logistic_type=fulfillment"
         response = meli.get(url_get, {'access_token':meli.access_token,
                                     'offset': ((search_offset+search_limit)<1000 and search_offset) or 0,
@@ -1530,10 +1530,7 @@ class res_company(models.Model):
                         # y se devuelve la accion de login; las credenciales quedan
                         # intactas.
                         condition = True
-                        return {
-                        "type": "ir.actions.act_url",
-                        "url": meli.auth_url(),
-                        "target": "new",}
+                        self.env['meli.util']._meli_require_reconnect()
                     condition_last_off = True
                 else:
                     if (offset>0):
@@ -1582,10 +1579,7 @@ class res_company(models.Model):
                         # url_login_meli solo se asignaba en la otra rama, asi
                         # que llegar aca levantaba UnboundLocalError encima de
                         # la perdida de datos. Se resuelve en el momento.
-                        return {
-                        "type": "ir.actions.act_url",
-                        "url": meli.auth_url(),
-                        "target": "new",}
+                        self.env['meli.util']._meli_require_reconnect()
                     condition_last_off = True
                 else:
                     results += rjson2['results']
@@ -1747,7 +1741,6 @@ class res_company(models.Model):
         product_obj = self.env['product.product']
 
         meli = self.env['meli.util'].get_new_instance(company)
-        url_login_meli = meli.auth_url()
 
         product_ids = self.env['product.product'].search([('meli_id','!=',False)]
                                                 + company_domain)
@@ -1782,7 +1775,6 @@ class res_company(models.Model):
         product_obj = self.env['product.product']
 
         meli = self.env['meli.util'].get_new_instance(company)
-        url_login_meli = meli.auth_url()
 
         #product_ids = self.env['product.product'].search([('meli_pub','=',True),('meli_id','!=',False)])
         product_ids = self.env['product.template'].search([('meli_pub','=',True)]
@@ -2541,7 +2533,6 @@ class res_company(models.Model):
         product_obj = self.env['product.product']
 
         meli = self.env['meli.util'].get_new_instance(company)
-        url_login_meli = meli.auth_url()
 
         results = []
         offset = 0
@@ -2556,10 +2547,7 @@ class res_company(models.Model):
             self._meli_pause_all_auth_stop("the initial item search")
 
         if 'error' in rjson:
-            return {
-            "type": "ir.actions.act_url",
-            "url": url_login_meli,
-            "target": "new",}
+            self.env['meli.util']._meli_require_reconnect()
 
 
         if 'results' in rjson:

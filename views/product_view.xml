@@ -445,12 +445,6 @@
                               title="Subir imagen a ML"
                               invisible="meli_state == True"
                               class="oe_stat_button" icon="fa-cloud-upload"/>
-                            <button name='product_meli_login' type="object"
-                              class="oe_stat_button"
-                              icon="fa-user-circle"
-                              string="Iniciar Sesión"
-                              title="Se requiere Iniciar Sesión en ML"
-                              invisible="meli_state == False"/>
                           </div>
                           <group name="ML actions"></group>
                           <group name="ML Info" string="Informacion de ML">

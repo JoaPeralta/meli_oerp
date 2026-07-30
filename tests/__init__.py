@@ -38,3 +38,4 @@ from . import test_td10_rpc_authorization
 from . import test_td10_oauth_attempt_binding
 from . import test_td10_public_root_no_auth_boundary
 from . import test_td10_auth_url_pure_and_company_bound
+from . import test_td10_no_implicit_oauth_initiators

@@ -187,7 +187,7 @@ class product_template(models.Model):
 
         meli = self.env['meli.util'].get_new_instance(company)
         if meli.need_login():
-            return meli.redirect_login()
+            self.env['meli.util']._meli_require_reconnect()
 
         _logger.info("Product Template Post")
         _logger.info(self.env.context)
@@ -265,7 +265,7 @@ class product_template(models.Model):
 
         meli = self.env['meli.util'].get_new_instance(company)
         if meli.need_login():
-            return meli.redirect_login()
+            self.env['meli.util']._meli_require_reconnect()
 
         _logger.info("Product Template Update")
 
@@ -1489,7 +1489,7 @@ class product_product(models.Model):
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
             if meli.need_login():
-                return meli.redirect_login()
+                self.env['meli.util']._meli_require_reconnect()
 
         mlcatid = False
         www_cat_id = False
@@ -3056,13 +3056,18 @@ class product_product(models.Model):
                     _logger.info("SE no existe?")
 
 
-    def product_meli_login(self ):
+    def product_meli_login(self):
+        """Ya NO inicia OAuth. Se conserva solo por compatibilidad RPC.
 
-        company = self.env.user.company_id
+        Era un metodo publico de product.product, alcanzable por RPC, con un
+        boton en el formulario sin ningun groups: cualquiera que viera la pagina
+        de MercadoLibre del producto podia arrancar una autorizacion.
 
-        meli = self.env['meli.util'].get_new_instance(company)
-        if meli.need_login():
-            return meli.redirect_login()
+        No delega en company.meli_login() a proposito: eso conservaria una
+        tercera superficie OAuth, aunque estuviera protegida. Reconectar se hace
+        desde la configuracion de la compania y en ningun otro lado.
+        """
+        self.env['meli.util']._meli_require_reconnect()
 
     def product_meli_status_close( self ):
         company = self.env.user.company_id
@@ -3071,7 +3076,7 @@ class product_product(models.Model):
 
         meli = self.env['meli.util'].get_new_instance(company)
         if meli.need_login():
-            return meli.redirect_login()
+            self.env['meli.util']._meli_require_reconnect()
 
         response = product.meli_id and meli.put_mini("/items/"+product.meli_id, { 'status': 'closed' }, {'access_token':meli.access_token})
 
@@ -3096,7 +3101,7 @@ class product_product(models.Model):
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
             if meli.need_login():
-                return meli.redirect_login()
+                self.env['meli.util']._meli_require_reconnect()
 
         for product in self:
             product_tmpl = product.product_tmpl_id
@@ -3111,7 +3116,7 @@ class product_product(models.Model):
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
             if meli.need_login():
-                return meli.redirect_login()
+                self.env['meli.util']._meli_require_reconnect()
 
         if (meli):
             pass;
@@ -3144,7 +3149,7 @@ class product_product(models.Model):
 
         meli = self.env['meli.util'].get_new_instance(company)
         if meli.need_login():
-            return meli.redirect_login()
+            self.env['meli.util']._meli_require_reconnect()
 
         response = product.meli_id and meli.put_mini("/items/"+product.meli_id, { 'deleted': 'true' }, {'access_token':meli.access_token})
 
@@ -3170,7 +3175,7 @@ class product_product(models.Model):
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
             if meli.need_login():
-                return meli.redirect_login()
+                self.env['meli.util']._meli_require_reconnect()
 
         first_image_to_publish = get_first_image_to_publish( product )
 
@@ -3291,7 +3296,7 @@ class product_product(models.Model):
             meli = self.env['meli.util'].get_new_instance(company)
 
         if meli and meli.need_login():
-            return meli.redirect_login()
+            self.env['meli.util']._meli_require_reconnect()
 
         image_ids = []
         field_image = get_image_full(product_image)
@@ -3872,7 +3877,7 @@ class product_product(models.Model):
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
             if meli.need_login():
-                return meli.redirect_login()
+                self.env['meli.util']._meli_require_reconnect()
         #return {}
         description_sale =  product_tmpl.description_sale
         #translation = self.env['ir.translation'].search([('res_id','=',product_tmpl.id),
@@ -4498,7 +4503,6 @@ class product_product(models.Model):
                             error_msg = 'MELI RESP.: <h6>Mensaje de error</h6><br/><h6>Mensaje</h6> %s<br/><h6>Status</h6> %s<br/><h6>Cause</h6> %s<br/><h7>Error completo:</h7><span>%s</span><br/>' % (rjsonv["message"], rjsonv["status"], rjsonv["cause"], rjsonv["error"])
                             _logger.error(error_msg)
                             if (rjsonv["error"]=="forbidden"):
-                                url_login_meli = meli.auth_url()
                                 return warningobj.info( title='MELI WARNING', message="Debe iniciar sesión en MELI con el usuario correcto.", message_html="<br><br>"+error_msg, context={ "rjson": rjsonv })
                             else:
                                 return warningobj.info( title='MELI WARNING', message="Completar todos los campos y revise el mensaje siguiente.", message_html="<br><br>"+error_msg, context={ "rjson": rjsonv } )
@@ -4642,7 +4646,6 @@ class product_product(models.Model):
                 error_msg+= '<h3>'+str(rjson["cause"][0]["message"])+'</h3>'
             #expired token
             if "message" in rjson and (rjson["error"]=="forbidden" or rjson["message"]=='invalid_token' or rjson["message"]=="expired_token"):
-                url_login_meli = meli.auth_url()
                 return warningobj.info( title='MELI WARNING', message="Debe iniciar sesión en MELI:  "+str(rjson["message"]), message_html="<br><br>"+error_msg, context= { "rjson": rjson })
             else:
                  #Any other errors
@@ -4733,7 +4736,7 @@ class product_product(models.Model):
         if not meli or not hasattr(meli, 'client_id'):
             meli = self.env['meli.util'].get_new_instance(company)
             if meli.need_login():
-                return meli.redirect_login()
+                self.env['meli.util']._meli_require_reconnect()
 
         product.meli_stock_update = ml_datetime(datetime.now())
         product_tmpl.meli_stock_update = product.meli_stock_update
@@ -4980,7 +4983,7 @@ class product_product(models.Model):
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
             if meli.need_login():
-                return meli.redirect_login()
+                self.env['meli.util']._meli_require_reconnect()
 
         product.set_meli_price()
 
@@ -5094,7 +5097,7 @@ class product_product(models.Model):
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
             if meli.need_login():
-                return meli.redirect_login()
+                self.env['meli.util']._meli_require_reconnect()
 
         meli_id = product.meli_id
         # Fuente del título: meli_title del producto -> nombre -> meli_title de la plantilla
