@@ -48,6 +48,8 @@ import ast
 import glob
 import json
 import os
+import tempfile
+import textwrap
 from unittest.mock import patch
 
 from odoo.exceptions import AccessError, UserError
@@ -485,3 +487,92 @@ class TestTd10NoImplicitOauthInitiators(HttpCase):
         self.assertIn("state=", response.text)
         self.assertEqual(counters["attempt"], 1)
         self.assertEqual(counters["auth_url"], 1)
+
+    # ==================================================================
+    # the scanner has to say WHICH index
+    # ==================================================================
+    def test_the_scanner_distinguishes_methods_with_the_same_name(self):
+        """Four classes in controllers/main.py define a method called `index`.
+
+        Allowing them by bare function name allows all four, and only
+        MercadoLibreLogin.index is canonical. The scanner has to qualify the
+        name with its class or the allowlist means nothing.
+        """
+        source = textwrap.dedent("""
+            class Public:
+                def index(self):
+                    client.auth_url()
+
+            class Login:
+                def index(self):
+                    client.auth_url()
+        """)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "synthetic.py")
+            with io.open(path, "w", encoding="utf-8") as handle:
+                handle.write(source)
+
+            with patch("odoo.addons.meli_oerp.tests."
+                       "test_td10_no_implicit_oauth_initiators."
+                       "_productive_files",
+                       return_value=[("synthetic.py", path)]):
+                found = _calls_of("auth_url")
+
+        names = sorted(name for _f, name, _l in found)
+        self.assertEqual(
+            names, ["Login.index", "Public.index"],
+            "the scanner cannot tell two methods called `index` apart, so the "
+            "allowlist cannot single out the canonical one: %s" % names)
+
+    def test_every_index_in_the_controller_is_named_apart(self):
+        """The real file, not a synthetic one."""
+        root = _addon_root()
+        tree = ast.parse(open(os.path.join(root, "controllers", "main.py"),
+                              encoding="utf-8").read())
+        indexes = sorted(
+            "%s.index" % cls.name
+            for cls in tree.body if isinstance(cls, ast.ClassDef)
+            for fn in cls.body
+            if isinstance(fn, ast.FunctionDef) and fn.name == "index")
+
+        self.assertEqual(
+            indexes,
+            ["MercadoLibre.index", "MercadoLibreAuthorize.index",
+             "MercadoLibreLogin.index", "MercadoLibreLogout.index"],
+            "the controller's index methods are not what the allowlist "
+            "assumes: %s" % indexes)
+        canonical = {name for _f, name in _CANONICAL}
+        self.assertIn("MercadoLibreLogin.index", canonical)
+        for other in ("MercadoLibre.index", "MercadoLibreAuthorize.index",
+                      "MercadoLibreLogout.index"):
+            self.assertNotIn(
+                other, canonical,
+                "%s is allowed to start an authorization, and it must not be"
+                % other)
+
+    # ==================================================================
+    # nothing inherited a decorator from a removed method
+    # ==================================================================
+    def test_convert_to_datetime_kept_its_own_decorators(self):
+        """Deleting the method above it must not hand over its decorator.
+
+        get_url_meli_login carried @api.model. Removing the method without its
+        decorator line would leave that decorator applied to whatever came
+        next, silently changing an unrelated API.
+        """
+        root = _addon_root()
+        tree = ast.parse(open(os.path.join(root, "models", "meli_util.py"),
+                              encoding="utf-8").read())
+        found = [fn for fn in ast.walk(tree)
+                 if isinstance(fn, ast.FunctionDef)
+                 and fn.name == "convert_to_datetime"]
+
+        self.assertTrue(found, "convert_to_datetime disappeared")
+        for fn in found:
+            names = [d.attr if isinstance(d, ast.Attribute)
+                     else getattr(d, "id", str(d))
+                     for d in fn.decorator_list]
+            self.assertEqual(
+                names, [],
+                "convert_to_datetime inherited a decorator from a removed "
+                "method: %s" % names)
