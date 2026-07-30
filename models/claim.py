@@ -137,7 +137,7 @@ class mercadolibre_claim(models.Model):
         if not meli:
             meli = self.env['meli.util'].get_new_instance(config)
         if meli.need_login():
-            return meli.redirect_login()
+            self.env['meli.util']._meli_require_reconnect()
         response = meli.get("/post-purchase/v1/claims/" + str(claim_id),
                             {'access_token': meli.access_token})
         if response:

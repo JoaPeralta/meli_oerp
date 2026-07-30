@@ -76,7 +76,7 @@ class product_template_post(models.TransientModel):
 
         meli = self.env['meli.util'].get_new_instance(company)
         if meli.need_login():
-            return meli.redirect_login()
+            self.env['meli.util']._meli_require_reconnect()
 
         res = {}
         _logger.info("context in product_template_post:")
@@ -155,7 +155,7 @@ class product_template_update(models.TransientModel):
 
         meli = self.env['meli.util'].get_new_instance(company)
         if meli.need_login():
-            return meli.redirect_login()
+            self.env['meli.util']._meli_require_reconnect()
 
         meli_id = False
         if self.meli_id:
@@ -206,7 +206,7 @@ class product_post(models.TransientModel):
 
         meli = self.env['meli.util'].get_new_instance(company)
         if meli.need_login():
-            return meli.redirect_login()
+            self.env['meli.util']._meli_require_reconnect()
 
         res = {}
         for product_id in product_ids:
@@ -265,7 +265,7 @@ class product_product_update(models.TransientModel):
 
         meli = self.env['meli.util'].get_new_instance(company)
         if meli.need_login():
-            return meli.redirect_login()
+            self.env['meli.util']._meli_require_reconnect()
 
         res = {}
         for product_id in product_ids:
@@ -341,7 +341,7 @@ class product_template_import(models.TransientModel):
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
             if meli.need_login():
-                return meli.redirect_login()
+                self.env['meli.util']._meli_require_reconnect()
 
         results = []
         post_state_filter = {}
@@ -447,7 +447,7 @@ class product_template_import(models.TransientModel):
 
         meli = self.env['meli.util'].get_new_instance(company)
         if meli.need_login():
-            return meli.redirect_login()
+            self.env['meli.util']._meli_require_reconnect()
 
         custom_context = {
             "post_state": self.post_state,

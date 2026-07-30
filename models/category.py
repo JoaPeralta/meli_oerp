@@ -88,7 +88,7 @@ class mercadolibre_category_import(models.TransientModel):
 
         meli = self.env["mercadolibre.category"].get_meli()
         if meli and meli.need_login():
-            return meli.redirect_login()
+            self.env['meli.util']._meli_require_reconnect()
 
         #_logger.info("Meli Category Import Wizard")
         #_logger.info(context)
