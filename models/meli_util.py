@@ -2039,7 +2039,6 @@ class MeliUtil(models.AbstractModel):
 
         return api_rest_client
 
-    @api.model
     def convert_to_datetime(self, date_str):
         if not date_str:
             return False

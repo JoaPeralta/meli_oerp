@@ -65,9 +65,14 @@ _B_REFRESH = "TD10_G_B_REFRESH_CANARY"
 _SECRET_CANARY = "TD10_G_CLIENT_SECRET_CANARY"
 
 # Las DOS unicas superficies productivas autorizadas a arrancar OAuth.
+#
+# Calificadas con su clase a proposito. controllers/main.py define CUATRO
+# metodos llamados `index` -MercadoLibre, MercadoLibreLogin,
+# MercadoLibreAuthorize y MercadoLibreLogout- y permitir "index" a secas
+# permitia los cuatro. Solo MercadoLibreLogin.index es canonico.
 _CANONICAL = {
-    ("models/company.py", "meli_login"),
-    ("controllers/main.py", "index"),
+    ("models/company.py", "res_company.meli_login"),
+    ("controllers/main.py", "MercadoLibreLogin.index"),
 }
 
 # melisdk/ es una copia vendorizada cuyos imports estan todos comentados: no
@@ -93,29 +98,35 @@ def _productive_files():
 
 
 def _calls_of(attr_name):
-    """Every productive call to `.<attr_name>(...)`, as (file, method, line)."""
+    """Every productive call to `.<attr_name>(...)`.
+
+    Returns (file, qualified_name, line). The name is qualified with its class
+    and any enclosing functions -- `MercadoLibreLogin.index`, not `index`.
+    Without that the allowlist cannot single out one of four methods that share
+    a name, and allowing the bare name allows all of them.
+    """
     hits = []
     for rel, path in _productive_files():
         tree = ast.parse(open(path, encoding="utf-8").read())
 
-        def visit(node, enclosing):
+        def visit(node, prefix):
             for child in ast.iter_child_nodes(node):
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    visit(child, child.name)
-                elif isinstance(child, ast.ClassDef):
-                    visit(child, enclosing)
-                else:
-                    if isinstance(child, ast.Call):
-                        func = child.func
-                        if (isinstance(func, ast.Attribute)
-                                and func.attr == attr_name):
-                            hits.append((rel, enclosing, child.lineno))
-                        elif (isinstance(func, ast.Name)
-                              and func.id == attr_name):
-                            hits.append((rel, enclosing, child.lineno))
-                    visit(child, enclosing)
+                if isinstance(child, (ast.ClassDef, ast.FunctionDef,
+                                      ast.AsyncFunctionDef)):
+                    visit(child, prefix + [child.name])
+                    continue
+                if isinstance(child, ast.Call):
+                    func = child.func
+                    named = ((isinstance(func, ast.Attribute)
+                              and func.attr == attr_name)
+                             or (isinstance(func, ast.Name)
+                                 and func.id == attr_name))
+                    if named:
+                        hits.append((rel, ".".join(prefix) or "<module>",
+                                     child.lineno))
+                visit(child, prefix)
 
-        visit(tree, "<module>")
+        visit(tree, [])
     return hits
 
 
@@ -509,7 +520,7 @@ class TestTd10NoImplicitOauthInitiators(HttpCase):
         """)
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "synthetic.py")
-            with io.open(path, "w", encoding="utf-8") as handle:
+            with open(path, "w", encoding="utf-8") as handle:
                 handle.write(source)
 
             with patch("odoo.addons.meli_oerp.tests."
