@@ -249,12 +249,31 @@ class TestFulfillmentPreservesCredentials(TransactionCase):
 
         self._assert_credentials_survived("a local exception", raised)
 
-    def test_need_login_returns_without_touching_the_credentials(self):
+    def test_need_login_stops_without_touching_the_credentials(self):
+        """Cuando la conexion necesita autorizacion, la accion CORTA.
+
+        Antes devolvia meli.redirect_login(), o sea que traer items de
+        fulfillment construia una URL de autorizacion y se volvia un iniciador
+        de OAuth. Ahora corta con el error neutro compartido.
+
+        Lo que este test siempre vino a verificar -que las credenciales
+        sobrevivan- se sigue verificando igual; lo unico que cambio es que la
+        parada es explicita en vez de un retorno silencioso con una URL
+        adentro.
+        """
+        from odoo.exceptions import UserError
+
         fake = _FakeMeli([], need_login=True)
 
         _result, raised = self._run(fake)
 
-        self.assertIsNone(raised)
+        self.assertIsInstance(
+            raised, UserError,
+            "the action did not stop explicitly when the connection needs "
+            "authorization (got %r)" % raised)
+        self.assertNotIn(
+            "auth", str(raised).lower().replace("authorization", ""),
+            "the stop message leaks an authorization URL")
         self._assert_credentials_survived("a client that needs login")
 
     # ------------------------------------------------------------------
