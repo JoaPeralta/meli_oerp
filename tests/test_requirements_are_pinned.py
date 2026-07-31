@@ -5,9 +5,9 @@ one exact version.
 Why this matters here
 ---------------------
 This module is installed into a container image that is rebuilt from source on
-every deploy. The image's base layer is pinned by digest and the connector
-itself is pinned by commit, so those two are reproducible. The Python layer was
-not: three of the four requirements resolved to "whatever PyPI serves today".
+every deploy. This connector is pinned by commit, so which code goes in is
+decided. The Python layer was not: three of the four requirements resolved to
+"whatever PyPI serves today".
 
 That is not a theoretical concern. A production rebuild on 2026-07-31 replaced
 the base image's ``pillow 10.2.0`` with ``Pillow 12.3.0`` and pulled
@@ -34,10 +34,20 @@ image ships a different one.
 
 What this does NOT make reproducible
 ------------------------------------
+The base image is **not** pinned yet. The deployment repository's Dockerfile
+still reads ``FROM odoo:19.0``, a floating tag. The last observed build happened
+to resolve it to ``odoo:19.0-20260723``, digest
+``sha256:e415f9924395e7521245813135112f264b9222bcde3b1d3c2ee9ff073081540a`` --
+but that is what one build resolved, not what the source declares, and the tag
+can move at any time. Pinning it is a separate change in that repository.
+
 ``apt-get update`` and the ``git`` and ``poppler-utils`` packages installed
-alongside this module still float with the distribution's archives, and those
-archives are themselves mutable. This file is about the Python layer only;
-claiming more would be untrue.
+alongside this module also still float with the distribution's archives, and
+those archives are themselves mutable.
+
+So the state after this change is: connector pinned by commit, Python layer
+pinned here, base image and apt still floating. This file is about the Python
+layer only; claiming more would be untrue.
 """
 
 import os
@@ -68,6 +78,10 @@ _SDK_REQUIREMENT = (
 # Any comparison operator that leaves more than one version acceptable.
 _LOOSE_OPERATOR = re.compile(r"(>=|<=|~=|!=|>|<|\*)")
 
+# A full 40-character commit at the end of a VCS requirement. A branch, a tag
+# or an abbreviated sha all name something that can move or become ambiguous.
+_COMMIT_PIN = re.compile(r"@[0-9a-f]{40}$")
+
 
 def _requirement_lines():
     """The non-empty, non-comment lines of requirements.txt."""
@@ -86,6 +100,22 @@ def _find(lines, distribution):
         if _distribution_name(line) == distribution:
             return line
     return None
+
+
+def _vcs_requirement_problem(line):
+    """Why a ``git+`` requirement is unacceptable, or ``None`` if it is fine.
+
+    Exactly one VCS dependency is expected in this file, at exactly one commit.
+    Skipping every ``git+`` line -- which is what the loop below used to do --
+    would let a second one be added later with no commit at all, or with a
+    branch that moves, and this file would stay green while claiming to have
+    checked every line.
+    """
+    if line == _SDK_REQUIREMENT:
+        return None
+    if not _COMMIT_PIN.search(line):
+        return "VCS requirement is not pinned to a commit: %r" % line
+    return "unexpected VCS requirement: %r" % line
 
 
 @tagged("post_install", "-at_install")
@@ -126,7 +156,10 @@ class TestRequirementsArePinned(TransactionCase):
         than only for the three known ones."""
         for line in _requirement_lines():
             if line.startswith("git+"):
-                # Pinned by commit; asserted separately below.
+                # Pinned by commit rather than by version, so the version rules
+                # below do not apply -- but it still gets checked, not skipped.
+                problem = _vcs_requirement_problem(line)
+                self.assertIsNone(problem, problem or "")
                 continue
             self.assertIn(
                 "==",
@@ -137,6 +170,34 @@ class TestRequirementsArePinned(TransactionCase):
                 _LOOSE_OPERATOR.search(line.split("==", 1)[1]),
                 "requirement with a loose specifier: %r" % line,
             )
+
+    def test_an_unpinned_or_unexpected_vcs_requirement_is_rejected(self):
+        """The rule above is exercised directly, on lines that are not in the
+        file, so the guard is shown to work before anyone needs it to."""
+        self.assertIsNone(
+            _vcs_requirement_problem(_SDK_REQUIREMENT),
+            "the SDK's own pin must be accepted",
+        )
+
+        unpinned = (
+            ("git+https://github.com/ctmil/python-sdk-2025.git", "no ref"),
+            ("git+https://github.com/ctmil/python-sdk-2025.git@main", "a branch"),
+            ("git+https://github.com/ctmil/python-sdk-2025.git@v1.2.3", "a tag"),
+            ("git+https://github.com/ctmil/python-sdk-2025.git@70fc5c0", "a short sha"),
+        )
+        for line, description in unpinned:
+            self.assertIsNotNone(
+                _vcs_requirement_problem(line),
+                "a VCS requirement with %s must be rejected: %r"
+                % (description, line),
+            )
+
+        # Pinned to a commit, but not to the dependency this module declares.
+        elsewhere = "git+https://github.com/someone/else.git@" + "0" * 40
+        self.assertIsNotNone(
+            _vcs_requirement_problem(elsewhere),
+            "an unexpected VCS dependency must be rejected: %r" % elsewhere,
+        )
 
     def test_the_sdk_stays_pinned_to_its_commit(self):
         """Unchanged by this pinning work, and asserted so it stays that way.
