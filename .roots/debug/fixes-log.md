@@ -4,6 +4,135 @@
 
 ---
 
+### 21 ago 2026 — port a 19.0 del guard de venta facturada [#493 Shoppy] — reemplaza el guard ad-hoc de 19.0.26.93 (v19.0.26.94)
+
+**Por qué:** el fix de 19.0.26.93 (Elvimarta #508) resolvía el caso con un chequeo propio de `qty_invoiced`
+en `shipment.py`. Al portarlo a 16.0 apareció que **esa versión ya tenía resuelto el mecanismo entero**
+desde el #493 (Shoppy, jul-2026) — y que **nunca se forward-porteó a 17/18/19**. El guard del #493 es
+estrictamente mejor: cubre **los tres caminos** que escriben la línea de envío (`set_delivery_line`, el
+`price_unit = 0` directo y `_remove_delivery_line()`), es **configurable** por compañía/configuración
+(`mercadolibre_protect_invoiced_orders`, default **activado**) y **avisa en el chatter de la venta, una
+sola vez**, que MercadoLibre quiso modificar un pedido ya facturado y no se aplicó.
+
+**Qué entra:** `res.company.mercadolibre_protect_invoiced_orders`; en `sale.order`
+`_meli_posted_invoices()`, `_meli_protect_invoiced_enabled()`, `_meli_guard_invoiced()` y el flag
+`meli_invoiced_guard_notified`; en `versions.py` el helper `_meli_guard_delivery_write()` y su uso en
+`set_delivery_line`; en `shipment.py` los dos call sites restantes.
+**El código del guard queda byte a byte igual al de 16.0.**
+
+**Qué sale:** el chequeo ad-hoc de `qty_invoiced` que había agregado 19.0.26.93, ya redundante.
+
+**Requiere `-u meli_oerp`** (campos nuevos).
+
+---
+
+### 21 ago 2026 — fix(shipment): el conector ponía en CERO la línea de envío de órdenes YA FACTURADAS (v19.0.26.93) [Elvimarta 158, ticket #508]
+
+**Reportado por:** Facundo Ambroa (InternationalHome / Elvimarta, cuenta 158, AR, Odoo 17.0), por
+WhatsApp el 19-ago 16:39 CEST: *"La orden entra con el envío correcto, la facturamos, y luego se sigue
+actualizando desde ML, y en algunos casos le saca el monto del envío y lo deja en 0, esto genera que
+haya diferencia entre la orden y la factura anteriormente creada."*
+
+**Causa raíz:** `models/shipment.py`, bloque `if 1==1 and delivery_price<=0.0:` — escribía
+`delivery_line.price_unit = 0.0` / `qty_to_invoice = 0` **directo sobre la línea**, sin mirar si ya
+estaba facturada. `delivery_price` llega en 0 desde `shipment_amount_cond_fix`
+(`amount_total - received_amount > 1`). Ese write **no pasa por `set_delivery_line`**, así que no tenía
+ni la guarda del core (`_remove_delivery_line()` levanta `UserError` si `qty_invoiced != 0`) ni el
+savepoint del fix de #508 (26.48, 28-jul) — que **sí funciona**: en producción se lo ve disparando cada
+20 min. Este es un camino distinto: no borra la línea, la deja en cero.
+
+**Medición (Elvimarta, facturas ML `posted` desde el 1-jul):** 61 de 347 descuadradas,
+**$1.673.959,97**, 48 de órdenes creadas **después** del fix de #508. Caso vivo:
+`ML 2000018025413294`, línea `ME1 - zip`, `is_delivery=t`, `qty_invoiced=2`, `price_unit=0,00`.
+
+**Fix:** si la línea de envío tiene `qty_invoiced`, **no se toca** y se loguea un warning. En órdenes no
+facturadas el comportamiento queda igual. **No repara** las órdenes ya dañadas.
+
+**Port desde 17.0** (17.0.26.93), sin cambios de comportamiento respecto de aquella.
+
+---
+
+### 30 jul 2026 - fix(orders): Odoo 16/17 nunca ejecutaban el guard de devolucion -> bucle infinito en ventas ML canceladas (v19.0.26.90) [Just 148]
+
+**Sintoma** (prod Just, cuenta 148, Odoo 16.0): desde que una orden ML se cancela DESPUES de facturada
+y despachada, cada ciclo del cron (~5 min, 2 veces por ciclo) loguea
+`ERROR ... Error creating return for picking MELI/OUT/00548: Por favor, especifique al menos una
+cantidad que no sea cero` + `WARNING meli_cancel_with_detail: orden ML ... NO cancelada - factura
+publicada sin resolver`. Medido: **1 picking el 28-jul -> 2 el 29-jul**, **199 -> 514 ERROR/dia**,
+**407 -> 2047 mensajes** de spam en el chatter de 2 sale.order. Crece con cada cancelacion nueva.
+
+**Causa raiz** (contrastada contra `addons/stock/wizard/stock_picking_return.py` de los 4 cores):
+`_meli_return_done_pickings` bifurca por `hasattr` sobre `stock.return.picking`:
+
+| Core | `action_create_returns_all` | `action_create_returns` | `create_returns` | Rama real | Guard 0-qty |
+|------|------|------|------|------|------|
+| 16.0 | no | no | si (184) | **3a** | **NO** |
+| 17.0 | no | no | si (183) | **3a** | **NO** |
+| 18.0 | si (186) | si (174) | no | 1a | si |
+| 19.0 | si (221) | si (209) | no | 1a | si |
+
+- La 2a rama (`action_create_returns` sin `_all`) es **codigo muerto en las 4 versiones**, y es
+  justo donde vivia el guard de cantidad-cero del 13-jun-2026. **16.0/17.0 nunca lo ejecutaban.**
+- Ademas, en el core **16.0** `product_return_moves` se llena en `@api.onchange('picking_id')`, y los
+  onchange **no corren en `create()`** -> `ReturnWiz.create({})` deja el wizard VACIO -> `_create_returns()`
+  tira UserError siempre. En **17.0** el mismo campo es `compute=..., store=True` (depends `picking_id`),
+  o sea si se puebla. => **en 16.0 la devolucion automatica nunca funciono**; en 17.0 funcionaba pero sin guard.
+- El `except` posteaba al chatter en CADA reintento, y `meli_cancel_with_detail` volvia a postear el aviso
+  de "factura publicada sin resolver" en cada pasada. Como la orden nunca llega a cancelarse (la factura
+  posted corta el flujo con un `return`), el cron reentra por siempre: 2 mensajes por ciclo.
+
+**Fixes:**
+- **F1** poblar las lineas cuando el wizard nace vacio y existe el onchange (`wiz._onchange_picking_id()`).
+  No-op en 17.0+ (ya vienen por compute).
+- **F2** mismo guard de cantidad-cero en la rama `create_returns` (la que toman 16.0/17.0). La rama muerta
+  queda documentada como tal, sin cambiarle el comportamiento.
+- **F3** avisos idempotentes: `meli_message_post(..., once_key=...)` nuevo en `models/versions.py`. Marca el
+  body con un comentario HTML invisible `<!-- meli-once:<key> -->` y no repostea si ya esta en el chatter.
+  Ojo con el escape por version: 16.0 **no** escapa el body en `message_post`; 17.0/18.0/19.0 hacen
+  `escape(body)` salvo `Markup` -> el helper devuelve `markup_escape(body) + Markup(marker)`, asi el texto se
+  ve igual en las 4 y la marca queda invisible. `html_sanitize` **conserva** los comentarios
+  (`'comments': False` en el Cleaner, verificado en los 4 cores).
+
+**Alcance:** bug del source, no del cliente — pega a **todo cliente 16.0/17.0** con una venta ML cancelada
+despues del despacho. Caso de prueba real: picking `MELI/OUT/00548` (id 46749) y `MELI/OUT/00553` (id 47038),
+SOs `ML 2000014232660469` / `ML 2000014243455389`.
+
+### 28 jul 2026 - fix(stock): el sello de movimientos se congelaba, drift permanente e invisible (v19.0.26.88) [OrgVit 475]
+
+**Causa raiz** (analisis completo en `.roots/debug/2026-07-28-stock-queue-invariant-y-kits.md`):
+`_meli_stock_moves_update()` calculaba el campo con `MAX(stock_move.create_date)`. `create_date` es
+cuando se creo la FILA, no cuando cambio el stock, y el maximo **se congela** en cuanto deja de crearse
+movimientos nuevos. Como `stock_update` se sella en cada push, la condicion de cola
+(`meli_stock_moves_update > stock_update`, en `mercadolibre.product._meli_stock_status`) deja de
+cumplirse **para siempre**: el binding queda `updated`, fuera de la cola, sin error y sin log. Quedaban
+invisibles todos los cambios que no crean fila nueva: validar un move creado dias antes (**209 en 60
+dias** en una sola cuenta), reservar/desreservar, cancelar, editar cantidad.
+
+**Fixes (F1 + F3 + H1):**
+- **F1a** el sello ahora es `GREATEST(date si state='done', write_date, create_date)`. `date` solo en
+  los `done` porque en los demas es una fecha PREVISTA (futura) y adelantaria el sello a un evento que
+  no ocurrio. `write_date` es lo que capta validar/reservar/cancelar sobre movimientos ya existentes.
+- **F1b** el campo es **monotono** (`_meli_write_moves_stamp`): nunca retrocede. Sin esto, un recomputo
+  pisaba hacia atras el `NOW()` que escriben por SQL los hooks de cancel/unreserve
+  (`meli_oerp_multiple/models/stock_move.py`) y **anulaba una entrada de cola pendiente**.
+- **F1c** mismo criterio en los caminos batch (`_process_stock_update_orm_batch`) y
+  `GREATEST(actual, NOW())` en `_process_stock_update_sql_only`. Nuevo helper
+  `_meli_move_stamps_by_product()`: una sola query agregada en vez de iterar `stock_move_ids` en Python
+  (en productos con miles de movimientos era carisimo).
+- **F3** `meli_stock_diagnostic` **persiste** el `status` que ML acaba de devolver
+  (`_meli_diag_persist_ml_status`). Antes lo leia, lo logueaba y lo tiraba: `meli_last_status` solo se
+  refrescaba en el push, y las publicaciones que nunca entran a la cola nunca se pushean, con lo cual el
+  campo quedaba congelado meses (**994 marcadas `paused` que en ML estaban activas** en una cuenta real),
+  ensuciando el propio diagnostico con falsos "pausada con stock = perdida de ventas" y quemando ~100
+  llamadas API cada 30 min. Costo: **0 llamadas extra**, la respuesta ya estaba en la mano.
+- **H1** `product_post_stock` devolvia un dict vacio (= exito) **despues de tragarse la excepcion**: el
+  llamador marcaba el binding como publicado. Ahora el error viaja en el `return`.
+
+**Archivos:** `models/product.py`, `models/company.py`, `__manifest__.py`.
+**Verificacion:** `ast.parse` OK en las 4 versiones. Convergencia 16=17=18=19 (16.0 conserva su
+`_sql_constraints` propio; el resto byte-identico). Branch `claude/stock-queue-invariant-2687-<ver>`.
+**Merge a la rama de deploy y deploy a clientes: NO - lo confirma FCA aparte.**
+
 ### 19 jul 2026 — feat(promoción cliente→source): comprador + zona del receiver buscables en sale.order (v19.0.26.83) [#404 Deco]
 
 Promoción cliente→source (grove meli) del feature implementado en Deco/KPI (cuenta 526, commit cliente
