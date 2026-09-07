@@ -9,7 +9,14 @@
 {
     'name': 'MercadoLibre Publisher / Mercado Libre Odoo Connector',
     'summary': 'MercadoLibre Publisher / Mercado Libre Odoo Connector',
-    'version': '19.0.26.97',
+    # El salto a .200 es deliberado, no un error. Este fork y ctmil/meli_oerp
+    # divergieron en 8f175a74 (2026-07-23) con la version 19.0.26.85, y desde
+    # entonces los dos linajes numeraron por su cuenta: upstream llego a
+    # 19.0.26.108 y nosotros a 19.0.26.97 con codigo distinto. Cualquier numero
+    # en la banda .98-.108 seria ambiguo sobre de que linaje viene. .200 deja un
+    # hueco que nadie va a alcanzar por accidente y ordena por encima de todo lo
+    # que upstream publico, que es lo que Odoo necesita para correr migraciones.
+    'version': '19.0.26.200',
     'author': 'Moldeo Interactive',
     'website': 'https://www.moldeointeractive.com',
     "category": "Sales",

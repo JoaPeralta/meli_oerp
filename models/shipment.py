@@ -43,6 +43,11 @@ except:
 
 import mimetypes
 from . import orders
+from .meli_shipment_format import (
+    SHIPMENTS_NEW_FORMAT_HEADERS,
+    SHIPMENTS_ORDERS_HEADERS,
+    normalize_shipment,
+)
 from . import product
 from . import product_post
 from . import posting
@@ -1189,6 +1194,75 @@ class mercadolibre_shipment(models.Model):
         #_logger.info("Processing partner_delivery_id partner_shipping_id:"+str(partner_shipping_id and partner_shipping_id.name) )
         return partner_shipping_id
 
+    def _shipment_items_with_order_id( self, items_json, meli=None, ship_id=None ):
+        """Completar el order_id de los items de un envío cuando la API no lo manda.
+
+        Desde el 2025-10-12 order_id salió del cuerpo del envío, y el reemplazo
+        documentado es GET /shipments/{id}/orders (header X-New-Domain: true),
+        que devuelve un array de {order_id, pack_id, item_id, variation_id, ...}
+        y puede contestar 204 sin cuerpo.
+
+        Se usa como fuente preferida sólo para el order_id: /items sigue siendo
+        la fuente de los items porque es el único que trae `description`, que
+        update_item necesita para el nombre. Si no se puede aparear un item con
+        una orden, el item queda SIN order_id: el for de fetch_shipment lo
+        saltea y update_item lo descarta, que es preferible a colgarle el
+        order_id equivocado a una línea de un carrito.
+        """
+        if not isinstance(items_json, list) or not items_json:
+            return items_json
+
+        # Si /items ya trae todos los order_id no hace falta una llamada más:
+        # este es el camino viejo y no se toca.
+        if all(item.get("order_id") for item in items_json if isinstance(item, dict)):
+            return items_json
+
+        orders_json = None
+        try:
+            resporders = meli.get("/shipments/"+ str(ship_id)+"/orders", {'access_token':meli.access_token},
+                                  extra_headers=SHIPMENTS_ORDERS_HEADERS)
+            if resporders:
+                orders_json = resporders.json()
+        except Exception as e:
+            _logger.warning("fetch_shipment: /shipments/%s/orders falló: %s", str(ship_id), str(e))
+            return items_json
+
+        # 204 No Content devuelve texto vacío, no una lista. Cualquier cosa que
+        # no sea un array es "no hay dato", no un error a propagar.
+        if not isinstance(orders_json, list) or not orders_json:
+            return items_json
+
+        # Mapa item_id -> order_id, descartando los item_id ambiguos: si el
+        # mismo item_id aparece en dos órdenes del pack no hay forma de saber
+        # cuál corresponde, y adivinar sería peor que dejarlo vacío.
+        by_item = {}
+        ambiguous = set()
+        for entry in orders_json:
+            if not isinstance(entry, dict):
+                continue
+            item_id = entry.get("item_id")
+            order_id = entry.get("order_id")
+            if not item_id or not order_id:
+                continue
+            if item_id in by_item and by_item[item_id] != order_id:
+                ambiguous.add(item_id)
+            by_item[item_id] = order_id
+        for item_id in ambiguous:
+            del by_item[item_id]
+
+        completed = []
+        for item in items_json:
+            if not isinstance(item, dict):
+                completed.append(item)
+                continue
+            if item.get("order_id") or item.get("item_id") not in by_item:
+                completed.append(item)
+                continue
+            enriched = dict(item)
+            enriched["order_id"] = str(by_item[item["item_id"]])
+            completed.append(enriched)
+        return completed
+
     #Return shipment object based on mercadolibre.orders "order"
     def fetch_shipment( self, order, meli=None, config=None ):
         #_logger.info("ship fetch")
@@ -1263,9 +1337,14 @@ class mercadolibre_shipment(models.Model):
             }
             response = True
         else:
-            response = meli.get("/shipments/"+ str(ship_id),  {'access_token':meli.access_token})
+            response = meli.get("/shipments/"+ str(ship_id),  {'access_token':meli.access_token},
+                                extra_headers=SHIPMENTS_NEW_FORMAT_HEADERS)
         if (response):
             ship_json = ship_json or response.json()
+            # Aplanar acá y no más abajo: a partir de este punto todo el resto
+            # de fetch_shipment sigue leyendo la forma vieja sin enterarse de
+            # cuál de los dos cuerpos contestó la API.
+            ship_json = normalize_shipment(ship_json)
             #_logger.info( ship_json )
 
             if "error" in ship_json:
@@ -1280,7 +1359,8 @@ class mercadolibre_shipment(models.Model):
                     }
                     rescosts = True
                 else:
-                    rescosts = meli.get("/shipments/"+ str(ship_id)+str('/costs'),  {'access_token':meli.access_token})
+                    rescosts = meli.get("/shipments/"+ str(ship_id)+str('/costs'),  {'access_token':meli.access_token},
+                                        extra_headers=SHIPMENTS_NEW_FORMAT_HEADERS)
                 if rescosts:
                     rcosts = rcosts or rescosts.json()
                     ship_json['costs'] = rcosts
@@ -1299,34 +1379,55 @@ class mercadolibre_shipment(models.Model):
                 if config.mercadolibre_seller_user:
                     seller_id = config.mercadolibre_seller_user.id
                 ship_fields = {
-                    "name": "MSO ["+str(ship_id)+"] "+str("")+str(ship_json["status"])+"/"+str(ship_json["substatus"])+str(""),
+                    "name": "MSO ["+str(ship_id)+"] "+str("")+str(ship_json.get("status"))+"/"+str(ship_json.get("substatus"))+str(""),
                     'company_id': company.id,
                     'seller_id': seller_id,
                     "order": order.id,
-                    "shipping_id": ship_json["id"],
-                    "site_id": ship_json["site_id"],
-                    "order_id": ship_json["order_id"],
-                    "mode": ship_json["mode"],
-                    "shipping_mode": ship_json["shipping_option"]["name"],
-                    "date_created": ml_datetime(ship_json["date_created"]),
-                    "last_updated": ml_datetime(ship_json["last_updated"]),
-                    "order_cost": ship_json["order_cost"],
-                    "shipping_cost": ("cost" in ship_json["shipping_option"] and ship_json["shipping_option"]["cost"]) or 0.0,
-                    "shipping_list_cost": ("list_cost" in ship_json["shipping_option"] and ship_json["shipping_option"]["list_cost"]) or 0.0,
+                    # El id del envío ya lo tenemos; no hace falta que la API lo repita.
+                    "shipping_id": ship_json.get("id") or ship_id,
+                    "site_id": ship_json.get("site_id"),
+                    # order_id ya no viene en el cuerpo del envío desde el
+                    # 2025-10-12. El vínculo autoritativo es la orden que ya
+                    # tenemos en la mano, así que se usa como respaldo en vez
+                    # de exigirle el dato a la API.
+                    "order_id": ship_json.get("order_id") or order.order_id,
+                    "mode": ship_json.get("mode"),
+                    "date_created": ml_datetime(ship_json.get("date_created")),
+                    "last_updated": ml_datetime(ship_json.get("last_updated")),
                     "shipping_receiver_cost": ('receiver_cost' in ship_json and ship_json['receiver_cost']) or 0.0,
-                    "base_cost": ship_json["base_cost"],
                     'promoted_amount': ('promoted_amount' in ship_json and ship_json['promoted_amount']) or 0.0,
-                    "status": ship_json["status"],
-                    "substatus": ship_json["substatus"],
-                    #"status_history": ship_json["status_history"],
-                    "tracking_number": ship_json["tracking_number"],
-                    "tracking_method": ship_json["tracking_method"],
-                    "comments": ship_json["comments"] or '',
-                    "date_first_printed": ml_datetime(ship_json["date_first_printed"]),
-                    "receiver_id": ship_json["receiver_id"],
-                    "sender_id": ship_json["sender_id"],
+                    "status": ship_json.get("status"),
+                    "substatus": ship_json.get("substatus"),
+                    "tracking_number": ship_json.get("tracking_number"),
+                    "tracking_method": ship_json.get("tracking_method"),
+                    "receiver_id": ship_json.get("receiver_id"),
                     "logistic_type": ("logistic_type" in ship_json and ship_json["logistic_type"]) or ""
                 }
+
+                # Campos que el formato nuevo dejó de mandar. Se escriben sólo
+                # si vinieron: pisar con 0.0 o con '' un valor importado antes
+                # sería inventar un dato que MercadoLibre ya no manda, y en
+                # order_cost/base_cost además sería plata mal escrita.
+                if "comments" in ship_json:
+                    ship_fields["comments"] = ship_json.get("comments") or ''
+                if "date_first_printed" in ship_json:
+                    ship_fields["date_first_printed"] = ml_datetime(ship_json.get("date_first_printed"))
+                if "sender_id" in ship_json:
+                    ship_fields["sender_id"] = ship_json.get("sender_id")
+                if "order_cost" in ship_json:
+                    ship_fields["order_cost"] = ship_json.get("order_cost")
+                if "base_cost" in ship_json:
+                    ship_fields["base_cost"] = ship_json.get("base_cost")
+
+                # shipping_option desapareció del cuerpo nuevo y con él los
+                # tres campos que se leían adentro.
+                _shipping_option = ship_json.get("shipping_option")
+                if isinstance(_shipping_option, dict):
+                    ship_fields.update({
+                        "shipping_mode": _shipping_option.get("name"),
+                        "shipping_cost": _shipping_option.get("cost") or 0.0,
+                        "shipping_list_cost": _shipping_option.get("list_cost") or 0.0,
+                    })
 
                 # Parse status_history
                 if "status_history" in ship_json and ship_json["status_history"]:
@@ -1424,44 +1525,51 @@ class mercadolibre_shipment(models.Model):
                     if delays:
                         ship_fields["delay"] = ",".join(str(d) for d in delays)
 
-                if "receiver_address" in ship_json and ship_json["receiver_address"]:
+                # Acceso con .get(): en el cuerpo nuevo esta dirección viene de
+                # destination.shipping_address, que no garantiza las mismas
+                # claves que traía receiver_address. Un KeyError acá voltea la
+                # importación entera del envío.
+                receiver_address = ship_json.get("receiver_address")
+                if isinstance(receiver_address, dict) and receiver_address:
                     ship_fields.update({
-                        "receiver_address_id": ship_json["receiver_address"]["id"],
-                        "receiver_address_phone": ship_json["receiver_address"]["receiver_phone"],
-                        "receiver_address_name": ship_json["receiver_address"]["receiver_name"],
-                        "receiver_address_line": ship_json["receiver_address"]["address_line"],
-                        "receiver_address_comment": ship_json["receiver_address"]["comment"],
-                        "receiver_street_name": ship_json["receiver_address"]["street_name"],
-                        "receiver_street_number": ship_json["receiver_address"]["street_number"],
-                        "receiver_city": ship_json["receiver_address"]["city"]["name"],
-                        "receiver_city_code": ship_json["receiver_address"]["city"]["id"],
-                        "receiver_state": ship_json["receiver_address"]["state"]["name"],
-                        "receiver_state_code": ship_json["receiver_address"]["state"]["id"],
-                        "receiver_country": ship_json["receiver_address"]["country"]["name"],
-                        "receiver_country_code": ship_json["receiver_address"]["country"]["id"],
-                        "receiver_latitude": ship_json["receiver_address"]["latitude"],
-                        "receiver_longitude": ship_json["receiver_address"]["longitude"],
-                        "receiver_zip_code": (("zip_code" in ship_json["receiver_address"]) and ship_json["receiver_address"]["zip_code"]) or False,
+                        "receiver_address_id": receiver_address.get("id"),
+                        "receiver_address_phone": receiver_address.get("receiver_phone"),
+                        "receiver_address_name": receiver_address.get("receiver_name"),
+                        "receiver_address_line": receiver_address.get("address_line"),
+                        "receiver_address_comment": receiver_address.get("comment"),
+                        "receiver_street_name": receiver_address.get("street_name"),
+                        "receiver_street_number": receiver_address.get("street_number"),
+                        "receiver_city": (receiver_address.get("city") or {}).get("name"),
+                        "receiver_city_code": (receiver_address.get("city") or {}).get("id"),
+                        "receiver_state": (receiver_address.get("state") or {}).get("name"),
+                        "receiver_state_code": (receiver_address.get("state") or {}).get("id"),
+                        "receiver_country": (receiver_address.get("country") or {}).get("name"),
+                        "receiver_country_code": (receiver_address.get("country") or {}).get("id"),
+                        "receiver_latitude": receiver_address.get("latitude"),
+                        "receiver_longitude": receiver_address.get("longitude"),
+                        "receiver_zip_code": receiver_address.get("zip_code") or False,
                         # Barrio / municipio del receiver (pueden venir como dict {id,name} o ausentes)
-                        "receiver_neighborhood": ((ship_json["receiver_address"].get("neighborhood") or {}).get("name")) or False,
-                        "receiver_municipality": ((ship_json["receiver_address"].get("municipality") or {}).get("name")) or False
+                        "receiver_neighborhood": ((receiver_address.get("neighborhood") or {}).get("name")) or False,
+                        "receiver_municipality": ((receiver_address.get("municipality") or {}).get("name")) or False
                     })
-                    receiver_phone = ("receiver_phone" in ship_json["receiver_address"] and ship_json["receiver_address"]["receiver_phone"] and not "XXXX" in ship_json["receiver_address"]["receiver_phone"] and ship_json["receiver_address"]["receiver_phone"])
+                    _rphone = receiver_address.get("receiver_phone") or ""
+                    receiver_phone = (_rphone and not "XXXX" in _rphone and _rphone)
                     if receiver_phone:
                         ship_fields.update({"receiver_address_phone": receiver_phone })
 
-                if "sender_address" in ship_json and ship_json["sender_address"]:
+                sender_address = ship_json.get("sender_address")
+                if isinstance(sender_address, dict) and sender_address:
                     ship_fields.update({
-                        "sender_address_id": ship_json["sender_address"]["id"],
-                        "sender_address_line": ship_json["sender_address"]["address_line"],
-                        "sender_address_comment": ship_json["sender_address"]["comment"],
-                        "sender_street_name": ship_json["sender_address"]["street_name"],
-                        "sender_street_number": ship_json["sender_address"]["street_number"],
-                        "sender_city": ship_json["sender_address"]["city"]["name"],
-                        "sender_state": ship_json["sender_address"]["state"]["name"],
-                        "sender_country": ship_json["sender_address"]["country"]["name"],
-                        "sender_latitude": ship_json["sender_address"]["latitude"],
-                        "sender_longitude": ship_json["sender_address"]["longitude"],
+                        "sender_address_id": sender_address.get("id"),
+                        "sender_address_line": sender_address.get("address_line"),
+                        "sender_address_comment": sender_address.get("comment"),
+                        "sender_street_name": sender_address.get("street_name"),
+                        "sender_street_number": sender_address.get("street_number"),
+                        "sender_city": (sender_address.get("city") or {}).get("name"),
+                        "sender_state": (sender_address.get("state") or {}).get("name"),
+                        "sender_country": (sender_address.get("country") or {}).get("name"),
+                        "sender_latitude": sender_address.get("latitude"),
+                        "sender_longitude": sender_address.get("longitude"),
                     });
 
                 items_json = []
@@ -1483,7 +1591,8 @@ class mercadolibre_shipment(models.Model):
                         }
                         items_json.append(itemjson)
                 else:
-                    response2 = meli.get("/shipments/"+ str(ship_id)+"/items",  {'access_token':meli.access_token})
+                    response2 = meli.get("/shipments/"+ str(ship_id)+"/items",  {'access_token':meli.access_token},
+                                         extra_headers=SHIPMENTS_NEW_FORMAT_HEADERS)
 
                 all_orders = []
                 all_orders_ids = []
@@ -1494,6 +1603,9 @@ class mercadolibre_shipment(models.Model):
                         _logger.error( items_json["error"] )
                         _logger.error( items_json["message"] )
                     else:
+                        if meli.access_token != "PASIVA":
+                            items_json = self._shipment_items_with_order_id(items_json, meli=meli, ship_id=ship_id)
+
                         if (len(items_json)>1 or ( len(items_json)==1 and order.pack_order==True ) ):
                             #_logger.info("Es carrito")
                             ship_fields["pack_order"] = True
@@ -1504,11 +1616,18 @@ class mercadolibre_shipment(models.Model):
                         
                         coma = ""
                         packed_order_ids =""
-                        items_json_sorted = sorted(items_json, key=lambda x: x["order_id"], reverse=False)
+                        # Ordenar sin exigir order_id: el formato nuevo puede no
+                        # traerlo en los items y un KeyError acá cortaba el pack
+                        # entero. Los que no lo tienen quedan primeros y el for
+                        # de abajo ya los saltea.
+                        items_json_sorted = sorted(items_json, key=lambda x: str(x.get("order_id") or ""), reverse=False)
                         #_logger.info("items_json_sorted:"+str(items_json_sorted))
                         for item in items_json_sorted:
                             #check mercadolibre_orders for full pack
-                            if "order_id" in item:
+                            # Truthy y no sólo presencia: un order_id nulo
+                            # buscaría ("order_id","=",None) y matchearía
+                            # cualquier orden sin order_id.
+                            if item.get("order_id"):
                                 #search order, if not present search orders...
                                 #search by meli_order_id in mercadolibre.orders
                                 #_logger.info(item)

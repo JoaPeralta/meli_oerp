@@ -74,6 +74,9 @@ from odoo.exceptions import ValidationError
 from . import posting
 from . import product
 from . import shipment
+# Módulo puro (sin Odoo): se importa directo y no vía shipment para no depender
+# del orden de carga del paquete.
+from .meli_shipment_format import SHIPMENTS_NEW_FORMAT_HEADERS, normalize_shipment
 from dateutil.parser import *
 from datetime import *
 from urllib.request import urlopen
@@ -2508,10 +2511,14 @@ class mercadolibre_orders(models.Model):
                             }
                         }
                     else:
-                        shipres = meli.get("/shipments/"+ str(order_json['shipping']['id']),  {'access_token':meli.access_token })
+                        # x-format-new es obligatorio en /shipments/* desde el
+                        # 2025-10-12; normalize_shipment vuelve receiver_address
+                        # al lugar donde este código lo espera.
+                        shipres = meli.get("/shipments/"+ str(order_json['shipping']['id']),  {'access_token':meli.access_token },
+                                           extra_headers=SHIPMENTS_NEW_FORMAT_HEADERS)
                         if shipres:
-                            shpjson = shipres.json()
-                            if "receiver_address" in shpjson:
+                            shpjson = normalize_shipment(shipres.json())
+                            if isinstance(shpjson, dict) and shpjson.get("receiver_address"):
                                 Receiver = shpjson["receiver_address"]
             #_logger.info("Buyer:"+str(Buyer) )
             #_logger.info(order_json)
@@ -3828,7 +3835,10 @@ class mercadolibre_orders(models.Model):
             if ("logistic_type" in order_json["shipping"]):
                 order_fields['shipment_logistic_type'] = order_json["shipping"]["logistic_type"]
                 meli_order_fields["meli_shipment_logistic_type"] = order_json["shipping"]["logistic_type"]
-                meli_order_fields["meli_shipment_free"] = order_json["shipping"]["free_shipping"]
+                # meli_shipment_free no está declarado en ningún modelo ni lo
+                # consume nada, y además leía free_shipping sin guarda dentro de
+                # un if que sólo comprueba logistic_type. Se elimina la
+                # escritura; no se declara el campo.
 
             if ("cost" in order_json["shipping"]):
                 order_fields["shipping_cost"] = float(order_json["shipping"]["cost"])
@@ -3881,7 +3891,9 @@ class mercadolibre_orders(models.Model):
             if (config.mercadolibre_seller_team):
                 meli_order_fields["team_id"] = config.mercadolibre_seller_team.id
 
-            if 'pack_order' in order_json["tags"] and order and order.shipping_id:
+            # tags puede no venir: sin guarda un KeyError acá aborta la creación
+            # de la sale.order y deja la transacción del batch rota.
+            if 'pack_order' in (order_json.get("tags") or []) and order and order.shipping_id:
                 #_logger.info("Pack Order, dont create sale.order, leave it to mercadolibre.shipment")
                 if not order.sale_order:
                     meli_message_post(order, "Pack Order, dont create sale.order, leave it to mercadolibre.shipment", config=config)
