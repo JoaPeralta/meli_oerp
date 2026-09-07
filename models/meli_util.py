@@ -515,11 +515,33 @@ class MeliApiNoSDK:
         return self.base_url.rstrip("/") + "/" + path.lstrip("/")
 
     def _parse_response(self, resp):
-        """Parsea la respuesta HTTP a JSON o texto"""
+        """Parsea la respuesta HTTP a JSON o texto.
+
+        Una respuesta vacia con error HTTP ya no se lee como EXITO. ML devuelve
+        429 (y a veces 5xx) con **body vacio**. Aca se devolvia `resp.text` ==
+        '', y todos los llamadores hacen `if rjson and "error" in rjson`: con ''
+        eso es False, asi que el push reportaba *updated/Ok* **sin haber escrito
+        nada en ML**, y sin dejar un solo log. Ahora un status >= 400 con body
+        vacio se convierte en un dict de error explicito.
+
+        Portado de ctmil/meli_oerp a24b8179 (RPM 532, 4-ago-2026). De ese commit
+        se toma solo esta mitad: la otra arregla que `post_mini`/`put_mini` de la
+        rama SDK descarten el proxy de la empresa, y esa rama toca el armado del
+        cliente, donde vive nuestro `_build_client`.
+        """
         try:
             return resp.json()
         except Exception:
-            return resp.text
+            texto = resp.text
+            status = getattr(resp, "status_code", 200) or 200
+            if not texto and status >= 400:
+                _logger.warning("respuesta VACIA con status %s (%s) -- se reporta como error, "
+                                "antes se interpretaba como exito",
+                                status, getattr(resp, "url", "?"))
+                return {"error": "http_%s" % status,
+                        "status": status,
+                        "message": "respuesta vacia con status %s" % status}
+            return texto
 
     def need_login(self):
         return self.needlogin_state

@@ -546,6 +546,29 @@ class res_company(models.Model):
     )
 
     mercadolibre_cron_refresh = fields.Boolean(string='Keep alive',help='Cron Automatic Token Refresh for keeping ML connection alive.')
+
+    # Politica de facturacion de los productos que CREA el conector.
+    # Hasta ahora el conector no definia este campo, asi que el producto nacia con el
+    # default del sistema (Ajustes > Ventas > Facturacion). Si ese default no es el que
+    # el cliente quiere, TODOS los productos que crea el conector nacen mal y no habia
+    # forma de decidirlo desde la configuracion del conector.
+    # Vacio = comportamiento de siempre (no se toca el campo, manda el default de Odoo).
+    mercadolibre_product_invoice_policy = fields.Selection(
+        [('order', 'Cantidad pedida'), ('delivery', 'Cantidad entregada')],
+        string='Politica de facturacion de productos nuevos',
+        help='Politica de facturacion con la que nacen los productos que crea el '
+             'conector de MercadoLibre. Vacio = usar el valor por defecto de Odoo.')
+
+    def meli_product_invoice_policy_fields(self):
+        """Campos extra de invoice_policy para el create() de productos del conector.
+
+        Devuelve {} cuando no hay politica elegida, para que prod_fields quede
+        EXACTAMENTE igual que antes (cero regresion en instalaciones existentes).
+        """
+        self.ensure_one()
+        policy = self.mercadolibre_product_invoice_policy
+        return {'invoice_policy': policy} if policy else {}
+
     mercadolibre_cron_mail = fields.Many2one(
         comodel_name="mail.template",
         string="Error E-mail Template",
@@ -719,6 +742,17 @@ class res_company(models.Model):
              "posición fiscal) directamente al contacto principal del comprador y corrige su "
              "nombre al legal, aunque el nickname de MercadoLibre no coincida con la razón social. "
              "Evita el contacto fiscal separado. Recomendado para personas físicas (AR/CL).",
+    )
+
+    # [#493 Shoppy] Ver la nota gemela en meli_oerp_multiple/models/connection_configuration.py:
+    # este campo se declara en los DOS modelos y el default DEBE ser el mismo en ambos.
+    mercadolibre_protect_invoiced_orders = fields.Boolean(
+        string="No modificar pedidos ya facturados",
+        default=True,
+        help="Si el pedido ya tiene una factura POSTEADA, el conector no reescribe sus líneas "
+             "ni sus montos (en particular la línea de envío): deja el pedido como está y avisa "
+             "en el chatter que encontró una diferencia. Evita que el pedido quede por debajo "
+             "de lo que se facturó. Desactivar solo si se necesita el comportamiento anterior.",
     )
 
     #mercadolibre_use_buyer_name = fields.Boolean(string="Use buyer name",default=True)
@@ -1370,6 +1404,8 @@ class res_company(models.Model):
                                 'meli_id': rjson3['id'],
                                 'meli_pub': False
                             }
+                            # Vacio devuelve {} => prod_fields queda igual que siempre.
+                            prod_fields.update(company.meli_product_invoice_policy_fields())
 
                             #prod_fields['default_code'] = rjson3['id']
                             productcreated = self.env['product.product'].create((prod_fields))
@@ -2046,6 +2082,32 @@ class res_company(models.Model):
 
         return {}
 
+    def _meli_diag_persist_ml_status(self, pid, meli_id, ml_status, ml_qty):
+        """26.87 (F3): guarda el estado/cantidad que ML acaba de devolver.
+
+        Se escribe por SQL (no ORM) a proposito: esto corre dentro del loop del
+        diagnostico, sobre hasta 100 items por corrida, y no queremos disparar
+        recomputos de campos calculados ni invalidaciones caras por item. Es
+        defensivo de punta a punta: si el modelo de bindings no esta instalado
+        (meli_oerp solo, sin meli_oerp_multiple) o la escritura falla, el
+        diagnostico sigue — nunca puede romper el cron por un dato de telemetria.
+        """
+        if ml_status not in ('active', 'paused', 'closed', 'under_review', 'inactive'):
+            return
+        try:
+            if 'mercadolibre.product' in self.env and meli_id:
+                self.env.cr.execute("""
+                    UPDATE mercadolibre_product
+                    SET meli_last_status = %s
+                    WHERE conn_id = %s
+                      AND (meli_last_status IS DISTINCT FROM %s)
+                """, (ml_status, meli_id, ml_status))
+                if self.env.cr.rowcount:
+                    self.env['mercadolibre.product'].invalidate_model(['meli_last_status'])
+        except Exception as _st_err:
+            _logger.debug("MELI_STOCK_DIAG: no se pudo persistir meli_last_status de %s: %s",
+                          meli_id, _st_err)
+
     def meli_stock_diagnostic(self, meli=False):
         """
         Diagnostic safety check: compare Odoo stock vs ML stock for all published products.
@@ -2211,6 +2273,17 @@ class res_company(models.Model):
                     ml_user_product_id = rjson.get('user_product_id')
                     # fulfillment_user_product_id: logistic_type='fulfillment' AND user_product_id set
                     is_fulfillment_user = bool(ml_user_product_id and ml_logistic == 'fulfillment')
+
+                    # 26.87 (F3): PERSISTIR el estado que acabamos de leer de ML.
+                    # Antes se leia, se logueaba y se tiraba. Como meli_last_status
+                    # solo se refresca en el push de stock, y las publicaciones que
+                    # nunca entran a la cola nunca se pushean, el campo se quedaba
+                    # congelado por meses: en una cuenta real habia 994 marcadas
+                    # 'paused' que en ML estaban ACTIVAS. Eso ensucia este mismo
+                    # diagnostico (falsos "pausadas con stock = perdida de ventas")
+                    # y quema ~100 llamadas API cada 30 min sobre items sanos.
+                    # Costo: 0 llamadas extra — la respuesta ya la tenemos en la mano.
+                    self._meli_diag_persist_ml_status(pid, meli_id, ml_status, ml_qty)
 
                     if ml_status == 'paused' and odoo_qty > 0:
                         # Skip only pure ML-managed fulfillment (no user_product_id — ML controls stock)

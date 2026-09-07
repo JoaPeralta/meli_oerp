@@ -41,3 +41,4 @@ from . import test_td10_auth_url_pure_and_company_bound
 from . import test_td10_no_implicit_oauth_initiators
 from . import test_requirements_are_pinned
 from . import test_shipment_format
+from . import test_meli_parse_response

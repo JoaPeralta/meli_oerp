@@ -367,50 +367,114 @@ def SaleOrderLineUomField(self):
     return 'product_uom_id'
 
 
-def UpdateProductType( product ):
+def MeliInvoicePolicy( prod, config=None ):
+    """Politica de facturacion a mandar JUNTO con un write de 'type'.
+
+    ERROR-012 -- POR QUE ESTA FUNCION EXISTE.
+    En Odoo 17/18/19 `product.template.invoice_policy` es un compute
+    `store=True, readonly=False` que **depende de `type`**
+    (`addons/sale/models/product_template.py`): cualquier write sobre `type` lo
+    recalcula y lo fuerza a `'order'`. Como el conector escribia `type='consu'` en
+    cada importacion de orden, le pisaba al cliente la politica que habia elegido,
+    en silencio y varias veces por dia.
+
+    Un valor EXPLICITO en el mismo write le gana al compute. Orden de precedencia:
+      1. la politica configurada en la CUENTA (`mercadolibre.configuration`),
+      2. si no, la configurada en la COMPANIA (`res.company`),
+      3. si no, **la que el producto ya tenia** -> se preserva y nada cambia,
+      4. si el campo no existe (sin modulo `sale`), no se manda nada.
+
+    El punto 3 es lo que implementa "dejarla vacia = accion predeterminada": sobre
+    un producto que ya existe, lo predeterminado es **no cambiarle nada**.
+    """
+    if not prod or "invoice_policy" not in prod._fields:
+        return {}
+
+    politica = False
+    for origen in (config, getattr(prod, "company_id", False)):
+        if not origen:
+            continue
+        if "mercadolibre_product_invoice_policy" in origen._fields:
+            politica = origen.mercadolibre_product_invoice_policy
+            if politica:
+                break
+
+    politica = politica or prod.invoice_policy
+    return {"invoice_policy": politica} if politica else {}
+
+
+def UpdateProductType( product, config=None ):
+    """Deja el producto como almacenable, SIN pisar la politica de facturacion.
+
+    ERROR-012: antes esta funcion escribia `type='consu'` **siempre**, porque su
+    guard (`prod.type not in ['product']`) era de Odoo <=16 -- en 17/18/19 el valor
+    `'product'` ya no existe, asi que la condicion daba verdadero incluso cuando
+    el producto YA era `consu`. Ese write inutil disparaba el recalculo de
+    `invoice_policy`. Ahora solo se escribe **si hay algo que cambiar**, y cuando
+    se escribe va la politica explicita para que el compute no gane.
+    """
     if not product:
         return
     for prod in product:
-        if (prod and "detailed_type" in prod._fields and prod.detailed_type not in ['product']):
-            failed = False
-            try:
-                prod.write( { 'detailed_type': 'consu' } )
-            except Exception as e:
-                _logger.info("Set detailed_type almacenable ('consu') not possible:")
-                _logger.error(e, exc_info=True)
-                failed = True
-                pass;
+        vals = {}
 
-        if (prod and "type" in prod._fields and prod.type not in ['product']):
-            failed = False
-            try:
-                prod.write( { 'type': 'consu' } )
-            except Exception as e:
-                _logger.info("Set type almacenable ('consu') not possible:")
-                _logger.error(e, exc_info=True)
-                failed = True
-                pass;
+        # Odoo <=16: detailed_type. Se mantiene por compatibilidad hacia atras.
+        if "detailed_type" in prod._fields and prod.detailed_type != 'consu':
+            vals['detailed_type'] = 'consu'
 
-        if (prod and "is_storable" in prod._fields and prod.is_storable):
-            failed = False
-            try:
-                prod.write( { 'is_storable': True } )
-            except Exception as e:
-                _logger.info("Set type is_storable ('is_storable') not possible:")
-                _logger.error(e, exc_info=True)
-                failed = True
-                pass;
+        if "type" in prod._fields and prod.type != 'consu':
+            vals['type'] = 'consu'
 
-            query = """UPDATE product_template SET type='consu', is_storable=True WHERE id=%i""" % (prod.id)
-            cr = prod.env.cr
-            respquery = cr.execute(query)
+        # Guard invertido (defecto historico): decia `if prod.is_storable`, o sea
+        # solo escribia cuando YA era True -- un no-op -- y nunca cumplia su objetivo.
+        if "is_storable" in prod._fields and not prod.is_storable:
+            vals['is_storable'] = True
+
+        # Nada que cambiar => NO se escribe. Este early-continue es el que elimina
+        # la enorme mayoria de los reverts de politica.
+        if not vals:
+            continue
+
+        vals.update( MeliInvoicePolicy( prod, config=config ) )
+
+        try:
+            prod.write( vals )
+        except Exception as e:
+            _logger.info("UpdateProductType: no se pudo actualizar el producto %s: %s",
+                         getattr(prod, 'id', '?'), vals)
+            _logger.error(e, exc_info=True)
+
 
 def ProductType():
+    """Valores de tipo para el ALTA de un producto creado por el conector.
+
+    Para escrituras sobre productos que YA existen no usar esto directamente:
+    usar `ProductTypeWrite(prod, config)`, que ademas preserva la politica.
+    """
     return {
         "type": "consu",
         "is_storable": True
         #"detailed_type": "consu"
     }
+
+
+def ProductTypeWrite( prod, config=None ):
+    """`ProductType()` + la politica de facturacion, para writes sobre productos existentes.
+
+    Devuelve **{}** si el producto ya esta como corresponde, para no disparar el
+    recalculo de `invoice_policy` con un write que no cambia nada (ERROR-012).
+    """
+    vals = {}
+    if not prod:
+        return vals
+    if "type" in prod._fields and prod.type != 'consu':
+        vals["type"] = "consu"
+    if "is_storable" in prod._fields and not prod.is_storable:
+        vals["is_storable"] = True
+    if not vals:
+        return {}
+    vals.update( MeliInvoicePolicy( prod, config=config ) )
+    return vals
 
 # Odoo 12.0 -> Odoo 13.0
 prod_att_line = "product.template.attribute.line"
@@ -736,28 +800,101 @@ def get_delivery_line(sorder):
     return delivery_line
 
 
+def _meli_guard_delivery_write(sorder, delivery_line, delivery_price):
+    """True -> NO se debe escribir la linea de envio (la venta ya tiene factura posteada).
+
+    [#493 Shoppy] El guard estaba SOLO dentro de set_delivery_line, con un comentario que
+    afirmaba que ese era "el unico lugar por el que pasan TODAS las reescrituras de la
+    linea de envio". No era cierto: shipment.py escribe `price_unit`/`qty_to_invoice`
+    DIRECTO sobre la linea, y `_remove_delivery_line()` la borra entera. Por esos caminos
+    la venta quedaba igual por debajo de su propia factura, y encima el chatter posteaba
+    "Cambio no aplicado" — un aviso falso, que es lo que el cliente nos marco el 5/8.
+
+    Extraido a helper para que TODO camino que toque la linea consulte lo mismo. No
+    levanta: ante cualquier error deja pasar la escritura (comportamiento previo) y avisa.
+    """
+    try:
+        if not hasattr(sorder, '_meli_guard_invoiced'):
+            return False
+        _current = (delivery_line and delivery_line.price_unit) or 0.0
+        # sin cambio real de precio no hay nada que proteger
+        if abs(float(_current) - float(delivery_price or 0.0)) <= 0.01:
+            return False
+        _detail = "envío %s -> %s" % (_current, delivery_price)
+        return bool(sorder._meli_guard_invoiced("la línea de envío", _detail))
+    except Exception as e:
+        _logger.warning("MELI guard de venta facturada: fallo en %s: %s",
+                        getattr(sorder, 'name', '?'), e)
+    return False
+
 
 def set_delivery_line( sorder, delivery_price, delivery_message ):
+    """Setea el precio de la linea de envio SIN riesgo de perderla.
+
+    El core (delivery/models/sale_order.py::set_delivery_line) ejecuta, EN ESTE ORDEN:
+        _remove_delivery_line()  ->  carrier_id = carrier.id  ->  _create_delivery_line(...)
+    Si el carrier viene VACIO, o si la escritura/creacion posterior falla (compania
+    incompatible, orden facturada, impuestos), el BORRADO ya ocurrio: la venta queda sin
+    linea de envio y sin transportista, y el flete no se factura nunca mas. Antes esa
+    excepcion se tragaba con un 'except:' pelado ("order invoiced") y el borrado quedaba
+    consumado.
+
+    Por eso:
+      1) sin carrier valido NO se llama al core -> se actualiza el precio de la linea existente;
+      2) la llamada al core va dentro de un savepoint -> si falla despues del borrado, se
+         deshace el borrado en vez de dejar la venta pelada;
+      3) los fallos se loguean con la venta y el error reales.
+
+    Caso que lo destapo (Elvimarta, jul-2026): 47 ordenes quedaron sin flete en 7 semanas y
+    20 se facturaron por debajo de lo cobrado al comprador.
+    """
     #check version
     delivery_line = get_delivery_line(sorder)
-    if not delivery_line:
-        sorder.set_delivery_line(sorder.carrier_id, delivery_price)
+
+    # [#493 Shoppy] No tocar ventas YA FACTURADAS. Este es el punto por el que el
+    # conector dejaba el flete en 0 sobre ventas con factura posteada, y la venta
+    # quedaba por debajo de su propia factura.
+    if _meli_guard_delivery_write(sorder, delivery_line, delivery_price):
+        return delivery_line
+
+    carrier = sorder.carrier_id
+
+    if not carrier:
+        # Sin transportista el core borraria la linea y no podria recrearla.
+        if delivery_line and abs(delivery_line.price_unit - float(delivery_price)) > 0.01:
+            delivery_line.price_unit = delivery_price
+        _logger.warning("MELI set_delivery_line: venta %s sin transportista; se conserva la "
+                        "linea de envio (precio %s) en vez de recrearla.",
+                        sorder.name, delivery_price)
+        _meli_write_delivery_message(sorder, False, delivery_message)
+        return delivery_line
+
+    recompute_delivery_price = False
+    if not delivery_line or abs(delivery_line.price_unit - float(delivery_price)) > 1.1:
+        recompute_delivery_price = bool(delivery_line)
+        try:
+            with sorder.env.cr.savepoint():
+                sorder.set_delivery_line(carrier, delivery_price)
+        except Exception as e:
+            # El savepoint deshizo el borrado: la linea previa sigue viva.
+            _logger.warning("MELI set_delivery_line: no se pudo reescribir la linea de envio "
+                            "de %s (%s); se conserva la existente.", sorder.name, e)
         delivery_line = get_delivery_line(sorder)
+
+    _meli_write_delivery_message(sorder, recompute_delivery_price, delivery_message)
+
+    return delivery_line
+
+
+def _meli_write_delivery_message( sorder, recompute_delivery_price, delivery_message ):
     try:
-        recompute_delivery_price = False
-
-        if (delivery_line and abs(delivery_line.price_unit - float(delivery_price)) > 1.1 ):
-            recompute_delivery_price = True
-            sorder.set_delivery_line(sorder.carrier_id, delivery_price)
-
         sorder.write({
         	'recompute_delivery_price': recompute_delivery_price,
         	'delivery_message': delivery_message,
         })
-    except:
-            _logger.info("Error set_delivery_line failed (order invoiced)")
-
-    return delivery_line
+    except Exception as e:
+        _logger.warning("MELI set_delivery_line: no se pudo escribir delivery_message en %s: %s",
+                        sorder.name, e)
 
 def remove_delivery_line( sorder, delivery_price=0):
     sorder._remove_delivery_line()

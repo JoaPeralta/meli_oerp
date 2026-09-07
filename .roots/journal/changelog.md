@@ -4,6 +4,71 @@
 
 ---
 
+## Versión 19.0.26.94 — Los pedidos ya facturados quedan protegidos de punta a punta (y ahora avisan)
+21 ago 2026
+
+**Cambios:**
+
+1. **Se completa lo de la versión anterior.** Además de no poner el envío en cero, el conector **no
+   reescribe ninguna línea ni monto** de un pedido que ya tiene factura emitida — por **ninguno** de los
+   caminos posibles, incluido el borrado de la línea de envío. Cuando MercadoLibre informa un cambio
+   sobre un pedido ya facturado, el pedido **se deja como está** y queda **un aviso en su historial**
+   (una sola vez, no en cada reintento) explicando qué cambio no se aplicó y con qué factura choca, para
+   que se resuelva desde la factura (nota de crédito o ajuste) y no por debajo de ella.
+2. **Es configurable:** *No modificar pedidos ya facturados*, en la configuración de MercadoLibre de la
+   compañía. Viene **activado**; desactivarlo restaura el comportamiento anterior.
+
+*Esta protección ya existía en la versión 16 desde julio (caso Shoppy); esta versión la trae a Odoo 19.*
+
+Requiere actualizar el módulo (`-u meli_oerp`).
+
+## Versión 19.0.26.93 — El envío ya facturado deja de quedar en cero en la orden
+21 ago 2026
+
+**Cambios:**
+
+1. **El problema:** una venta de MercadoLibre entraba con su costo de envío, se facturaba con el envío
+   incluido, y una actualización posterior de MercadoLibre **dejaba el envío en 0 en la orden**. La
+   factura ya emitida quedaba con el flete y la orden sin él: orden y factura descuadradas, y el flete
+   había que rehacerlo a mano. Ahora, si la línea de envío ya fue facturada, el conector **no la toca** y
+   deja constancia en el registro del servidor. En órdenes todavía no facturadas nada cambia.
+   *Medido en un cliente AR: 61 de 347 facturas de MercadoLibre con flete quedaron descuadradas en siete
+   semanas, por $1.673.959,97.*
+
+Requiere actualizar el módulo (`-u meli_oerp`).
+
+## Versión 19.0.26.90 — La devolución automática de ventas canceladas por ML vuelve a funcionar (y deja de llenar el historial de avisos repetidos)
+30 jul 2026
+
+**Cambios:**
+
+1. **El problema principal:** cuando MercadoLibre cancelaba una venta que ya se había facturado y despachado, el conector intentaba generar la devolución del remito y **fallaba siempre** con *"Especifique al menos una cantidad diferente a cero"*. En Odoo 16 la ventana de devolución se abría **sin líneas** (el conector la creaba por código y las líneas sólo se completan al abrirla a mano), así que no había nada que devolver. Es decir: **en Odoo 16 la devolución automática nunca funcionó**. Ahora las líneas se completan también por código y la devolución se crea sola.
+2. **El proceso automático dejaba de reintentar nunca:** como la devolución fallaba, el proceso volvía a intentarlo **cada 5 minutos, para siempre**, por cada venta cancelada en esa situación. Se agregó el mismo control de "no hay nada que devolver" que ya existía en las otras variantes, así que las entregas sin cantidades reales (típico de las ventas FULL, cuyo stock vive en el depósito de ML) se saltean limpio en vez de reintentarse eternamente.
+3. **Se terminó el historial inundado de avisos repetidos:** los avisos *"No se pudo devolver el albarán…"* y *"Cancelación de ML pendiente: factura publicada sin resolver"* se volvían a escribir en el historial de la venta en **cada** reintento. Ahora se escriben **una sola vez**; si la situación cambia (otra factura, otro remito), se vuelve a avisar. *Medido en un cliente AR: 2.047 mensajes repetidos en el historial de dos ventas y 514 errores por día en el registro del servidor.*
+
+Requiere actualizar el módulo (`-u meli_oerp`).
+
+## Versión 19.0.26.88 — El stock vuelve a sincronizarse solo (se arregló una cola que se congelaba)
+28 jul 2026
+
+**Cambios:**
+
+1. **El problema:** una publicación podía quedar con el stock de MercadoLibre desactualizado **para siempre**, sin ningún aviso. El conector decide qué publicaciones re-enviar mirando la fecha del último movimiento de stock del producto; esa fecha se tomaba de *cuándo se creó* el movimiento y no de *cuándo cambió el stock*. Resultado: si el stock cambiaba sin crear un movimiento nuevo — validar un remito creado días antes, reservar o liberar mercadería, cancelar una entrega —, el conector no se enteraba. Peor: una vez enviado ese stock una primera vez, la publicación salía de la cola y **ningún proceso automático la volvía a mirar nunca**. Ahora la fecha considera la validación y las modificaciones posteriores del movimiento, y nunca puede "retroceder".
+2. **Red de seguridad nueva:** toda publicación cuyo último envío de stock a MercadoLibre supere los **7 días** vuelve a la cola por sí sola, haya habido movimientos o no. Es configurable en la cuenta (*Resincronización de stock*); poner 0 la desactiva. Así, si alguna vez se pierde un aviso, el desfase dura días y no meses.
+3. **Los kits (listas de materiales) entran en la cuenta:** un producto tipo kit no tiene movimientos propios — su stock sale de los componentes. Ahora los movimientos de los componentes también reactivan la publicación del kit.
+4. **Se detecta cuando MercadoLibre acepta el envío pero no aplica el stock.** Hasta ahora, si ML respondía "OK" y dejaba la cantidad vieja, el conector lo daba por publicado y la publicación quedaba desactualizada en silencio. Ahora se compara la cantidad enviada contra la que responde ML y, si no coinciden, la publicación queda marcada como **"ML aceptó el envío pero NO aplicó el stock"** y se reintenta.
+5. **Errores que se perdían:** si fallaba algo al publicar el stock, el error quedaba anotado pero la operación se informaba como exitosa. Ahora el fallo se propaga y la publicación no se marca como actualizada.
+6. El diagnóstico de stock ahora **guarda el estado real** que le responde MercadoLibre (activa/pausada). Antes lo consultaba y lo descartaba, así que el estado guardado quedaba viejo por meses y generaba avisos falsos de "publicación pausada con stock" sobre publicaciones que en realidad estaban activas.
+
+*Detectado en una cuenta MX con 3.700 publicaciones: 209 movimientos validados con demora en 60 días quedaban fuera de la sincronización, y publicaciones con la fecha congelada desde hacía semanas.*
+
+Requiere actualizar el módulo (`-u meli_oerp`).
+
+## Versión 19.0.26.87 — El costo de envío ya no se pierde de la orden [Elvimarta #508]
+27 jul 2026
+
+**Cambios:** al recalcular el flete, el conector reescribía la línea de envío con el mecanismo de Odoo, que primero **borra** la línea y recién después la vuelve a crear. Si en ese momento la venta no tenía transportista asignado, o la recreación fallaba (compañía incompatible, orden ya facturada, impuestos), el borrado quedaba hecho y la venta se quedaba **sin flete y sin transportista**: el costo de envío no llegaba nunca a la factura, y el error se descartaba en silencio. Ahora, sin transportista válido no se toca la línea (solo se actualiza su precio) y la reescritura va dentro de un punto de guardado, de modo que si algo falla se deshace el borrado y la línea original sobrevive; los fallos quedan registrados en el log con la venta involucrada. *Detectado en un cliente AR: 47 órdenes sin flete en 7 semanas, 20 de ellas facturadas por debajo de lo cobrado al comprador.*
+
 ## Versión 19.0.26.85 — Aviso de mensajes del comprador sin leer en las órdenes de ML [#499 Deco/KPI]
 22 jul 2026
 
