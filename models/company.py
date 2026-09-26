@@ -1897,11 +1897,12 @@ class res_company(models.Model):
         # OPTIMIZED: Single SQL query with NULLS FIRST ordering instead of two separate ORM searches
         # This is more efficient and reduces database round trips
         self.env.cr.execute("""
-            SELECT id FROM product_product
-            WHERE meli_pub IS TRUE
-            AND meli_id LIKE 'M%%'
-            AND (company_id IS NULL OR company_id = %s)
-            ORDER BY meli_stock_update ASC NULLS FIRST
+            SELECT pp.id FROM product_product pp
+            JOIN product_template pt ON pt.id = pp.product_tmpl_id
+            WHERE pp.meli_pub IS TRUE
+            AND pp.meli_id LIKE 'M%%'
+            AND (pt.company_id IS NULL OR pt.company_id = %s)
+            ORDER BY pp.meli_stock_update ASC NULLS FIRST
         """, (company.id,))
         product_ids = self.env['product.product'].browse([r[0] for r in self.env.cr.fetchall()])
 
@@ -2000,11 +2001,12 @@ class res_company(models.Model):
 
         # OPTIMIZED: Single SQL query with NULLS FIRST ordering instead of two separate ORM searches
         self.env.cr.execute("""
-            SELECT id FROM product_product
-            WHERE meli_pub IS TRUE
-            AND meli_id LIKE 'M%%'
-            AND (company_id IS NULL OR company_id = %s)
-            ORDER BY meli_stock_update ASC NULLS FIRST
+            SELECT pp.id FROM product_product pp
+            JOIN product_template pt ON pt.id = pp.product_tmpl_id
+            WHERE pp.meli_pub IS TRUE
+            AND pp.meli_id LIKE 'M%%'
+            AND (pt.company_id IS NULL OR pt.company_id = %s)
+            ORDER BY pp.meli_stock_update ASC NULLS FIRST
         """, (company.id,))
         product_ids = self.env['product.product'].browse([r[0] for r in self.env.cr.fetchall()])
 
