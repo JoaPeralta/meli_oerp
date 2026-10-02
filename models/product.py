@@ -239,7 +239,7 @@ class product_template(models.Model):
 
             else:
                 for variant in product.product_variant_ids:
-                    _logger.info("Variant:", variant, variant.meli_pub)
+                    _logger.info("Variant: %s %s", variant, variant.meli_pub)
                     if (force_meli_pub==True):
                         variant.meli_pub = True
                     if (variant.meli_pub):
