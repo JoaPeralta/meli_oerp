@@ -3757,6 +3757,8 @@ class mercadolibre_orders(models.Model):
 
             if order and buyer_id:
                 return_id = order.write({'buyer': buyer_id.id})
+            elif buyer_id:
+                order_fields['buyer'] = buyer_id.id
         else:
             _logger.error("Buyer not fetched!")
 
