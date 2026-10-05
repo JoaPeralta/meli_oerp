@@ -1141,6 +1141,7 @@ class mercadolibre_shipment(models.Model):
         pdelivery_fields = {
             "type": "delivery",
             "parent_id": partner_id.id,
+            "company_id": partner_id.company_id.id,
             'name': receiver_name,
             'street': Receiver['address_line'],
             #'street2': meli_buyer_fields['name'],
