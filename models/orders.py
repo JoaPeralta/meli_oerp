@@ -1835,6 +1835,22 @@ class mercadolibre_orders(models.Model):
         case an order does not have billing_info.id yet (transitional), but
         it will disappear as MercadoLibre completes the migration.
         """
+        from copy import deepcopy
+
+        def billing_response(path, **kwargs):
+            # Both backends return a mutable client. Snapshot this call before
+            # another GET, and do not replay payload left by a swallowed error.
+            previous_payload = getattr(meli, 'rjson', None)
+            response = meli.get(path, {'access_token': meli.access_token}, **kwargs)
+            status = getattr(response, 'last_status_code', None)
+            if status is None:
+                status = getattr(response, 'status_code', None)
+            payload = response.json() if response is not None else None
+            snapshot = deepcopy(payload)
+            if response is meli and payload is previous_payload:
+                snapshot = None
+            return status, snapshot
+
         order_id = order_id or (data and 'id' in data and data['id']) or (self and self.order_id)
         Buyer = (data and 'buyer' in data and data['buyer']) or {}
         _billing_info = ('billing_info' in Buyer and Buyer['billing_info']) or {}
@@ -1875,27 +1891,26 @@ class mercadolibre_orders(models.Model):
         if site_id and billing_info_id:
             try:
                 url = "/orders/billing-info/%s/%s" % (str(site_id), str(billing_info_id))
-                response = meli.get(
+                status, biljson = billing_response(
                     url,
-                    {'access_token': meli.access_token},
                     extra_headers={'x-version': '2'},
                 )
-                if response is not None and getattr(response, 'status_code', 0) == 200:
-                    biljson = response.json() or {}
+                if status == 200 and isinstance(biljson, dict) and not biljson.get('error'):
                     # v2 wraps billing_info under buyer
-                    api_billing_info = (
-                        (biljson.get('buyer') or {}).get('billing_info')
+                    buyer = biljson.get('buyer')
+                    billing_info = (
+                        (buyer.get('billing_info') if isinstance(buyer, dict) else None)
                         or biljson.get('billing_info')
                     )
                     # Prefer site_id echoed back by the API for the normalizer
                     response_site_id = biljson.get('site_id') or site_id
-                    if api_billing_info:
-                        api_billing_info = self._normalize_billing_info_v2(api_billing_info, site_id=response_site_id)
+                    if isinstance(billing_info, dict) and billing_info:
+                        api_billing_info = self._normalize_billing_info_v2(billing_info, site_id=response_site_id)
                 else:
                     _logger.warning(
                         "get_billing_info: new endpoint %s returned status=%s for order_id=%s, "
                         "falling back to legacy endpoint",
-                        url, response and getattr(response, 'status_code', None), order_id,
+                        url, status, order_id,
                     )
             except Exception as e:
                 _logger.error(
@@ -1908,18 +1923,20 @@ class mercadolibre_orders(models.Model):
         #    billing_info.id in their payload. Will 404 once ML removes it.
         if not api_billing_info:
             try:
-                response = meli.get("/orders/"+str(order_id)+"/billing_info", {'access_token':meli.access_token})
-                if response:
-                    biljson = response.json()
+                status, biljson = billing_response("/orders/"+str(order_id)+"/billing_info")
+                # Some SDK versions do not expose a legacy HTTP status. Keep
+                # fresh valid payloads compatible, without inferring HTTP 200.
+                if status in (None, 200) and isinstance(biljson, dict) and not biljson.get('error'):
                     #_logger.info("get_billing_info: "+str(biljson))
-                    api_billing_info = (biljson and 'billing_info' in biljson and biljson['billing_info']) or None
-                    if api_billing_info:
-                        if "additional_info" in api_billing_info:
-                            adds = api_billing_info["additional_info"]
+                    billing_info = biljson.get('billing_info')
+                    if isinstance(billing_info, dict) and billing_info:
+                        if "additional_info" in billing_info:
+                            adds = billing_info["additional_info"]
                             for add in adds:
-                                api_billing_info[add["type"]] = add["value"]
+                                billing_info[add["type"]] = add["value"]
                                 # Also add lowercase version for compatibility
-                                api_billing_info[add["type"].lower()] = add["value"]
+                                billing_info[add["type"].lower()] = add["value"]
+                        api_billing_info = billing_info
                     else:
                         _logger.debug(
                             "get_billing_info: legacy response sin billing_info, "
