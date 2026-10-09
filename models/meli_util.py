@@ -326,6 +326,30 @@ from .versions import *
 from . import versions as _versions
 
 
+def _meli_upload_error(error, token):
+    """Keep upload diagnostics useful without raw or URL-encoded credentials."""
+    from urllib.parse import quote, quote_plus
+
+    message = str(error)
+    if token:
+        token = str(token)
+        variants = {token, quote(token), quote(token, safe=""), quote_plus(token)}
+        for secret in sorted(variants, key=len, reverse=True):
+            message = message.replace(secret, "***")
+    return message
+
+
+def _meli_upload_payload(payload, token):
+    """Redact reflected credentials without changing upload JSON/text shapes."""
+    if isinstance(payload, dict):
+        return {key: _meli_upload_payload(value, token) for key, value in payload.items()}
+    if isinstance(payload, list):
+        return [_meli_upload_payload(value, token) for value in payload]
+    if isinstance(payload, str):
+        return _meli_upload_error(payload, token)
+    return payload
+
+
 class LoggingRetry(Retry):
     def increment(self, *args, **kwargs):
         retry_number = kwargs.get('total', self.total)
@@ -867,35 +891,8 @@ class MeliApiNoSDK:
         return self
 
     def upload(self, path, files, params={}):
-        """
-        Upload de archivos usando multipart/form-data (sin SDK).
-        Los archivos se pasan en el parámetro files.
-        """
-        atok = params.get("access_token", "") or ""
-        timeout = params.get("timeout", 60)
-
-        url = self._abs_url(path)
-
-        # Para upload legacy, usamos query param access_token
-        if atok:
-            sep = "&" if ("?" in url) else "?"
-            url = f"{url}{sep}access_token={atok}"
-
-        try:
-            resp = self._session.post(
-                url,
-                files=files,
-                timeout=timeout
-            )
-            self.response = self._parse_response(resp)
-            self.rjson = self.response
-
-        except requests.RequestException as e:
-            _logger.warning("UPLOAD %s error: %s", path, str(e))
-            self.rjson = {"error": str(e)}
-            self.response = self.rjson
-
-        return self
+        """Upload multipart files through the existing Bearer-authenticated path."""
+        return self.uploadfiles(path, files, params)
 
     def uploadfiles(self, path, files, params={}):
         """
@@ -917,12 +914,13 @@ class MeliApiNoSDK:
                 headers=headers,
                 timeout=timeout
             )
-            self.response = self._parse_response(resp)
+            self.response = _meli_upload_payload(self._parse_response(resp), atok)
             self.rjson = self.response
 
         except requests.RequestException as e:
-            _logger.warning("UPLOADFILES %s error: %s", path, str(e))
-            self.rjson = {"error": str(e)}
+            safe_error = _meli_upload_error(e, atok)
+            _logger.warning("UPLOADFILES %s error: %s", path, safe_error)
+            self.rjson = {"error": safe_error}
             self.response = self.rjson
 
         return self
@@ -1295,24 +1293,19 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
             return self
 
         def upload(self, path, files, params={}):
-            try:
-                atok = ("access_token" in params and params["access_token"]) or ""
-                uri = configuration_sdk.host + str(path)
-                self.response = requests.post(uri, files=files, params=urlencode({"access_token": atok}), headers={})
-                self.rjson = self.response.json()
-            except Exception as e:
-                self.rjson = {"error": str(e)}
-            return self
+            """Upload multipart files through the existing Bearer-authenticated path."""
+            return self.uploadfiles(path, files, params)
 
         def uploadfiles(self, path, files, params={}):
+            atok = ""
             try:
                 atok = ("access_token" in params and params["access_token"]) or ""
                 uri = configuration_sdk.host + str(path)
                 headers = {'Authorization': 'Bearer ' + atok}
                 self.response = requests.post(uri, files=files, params={}, headers=headers)
-                self.rjson = self.response.json()
+                self.rjson = _meli_upload_payload(self.response.json(), atok)
             except Exception as e:
-                self.rjson = {"error": str(e)}
+                self.rjson = {"error": _meli_upload_error(e, atok)}
             return self
 
         def auth_url(self, redirect_URI=None, state=None):
