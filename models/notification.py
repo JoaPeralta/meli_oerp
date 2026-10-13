@@ -30,10 +30,17 @@ from datetime import datetime
 from odoo import fields, models, api
 from odoo.tools.translate import _
 from odoo import tools
+from odoo.exceptions import AccessError, ValidationError
+from psycopg2.errors import UniqueViolation
 
 from . import versions
 from .versions import *
 from .meli_webhook_security import safe_meli_resource_path
+from .meli_webhook_inbox import (
+    WebhookIntakeError, canonical_remote_id, is_inbox_receipt,
+    parse_webhook_body, same_webhook_binding, webhook_receipt_id,
+    webhook_timestamp_value,
+)
 
 import hashlib
 import random
@@ -85,6 +92,147 @@ class MercadolibreNotification(models.Model):
 
     _unique_notification_id = versions.UniqueIndex('notification_id', message='Notification Id must be unique!')
 
+    @api.model
+    def _webhook_binding(self):
+        """A bridge must supply a server-selected identity; never public defaults."""
+        raise WebhookIntakeError(503, "binding_unavailable")
+
+    @api.model
+    def _receive_webhook(self, raw):
+        """Intake only: no client, business dispatcher, session or manual commit.
+
+        Elevation is limited to canonical inbox lookup/create after the bridge
+        has checked the ordinary technical actor and configured account.
+        The normal writable HTTP transaction owns durability and the ACK.
+        """
+        data = parse_webhook_body(raw)
+        try:
+            binding = self._webhook_binding()
+            configured_app = canonical_remote_id(binding["application_id"])
+            configured_seller = canonical_remote_id(binding["user_id"])
+        except (AccessError, ValidationError, KeyError):
+            raise WebhookIntakeError(503, "binding_unavailable") from None
+        except WebhookIntakeError:
+            raise WebhookIntakeError(503, "binding_unavailable") from None
+        if data["application_id"] != configured_app or data["user_id"] != configured_seller:
+            raise WebhookIntakeError(403, "foreign_identity")
+        inbox = self.with_context({}).sudo()
+        identity = webhook_receipt_id(data)
+        if "_id" not in data:
+            return inbox._create_webhook_receipt(data, binding, identity)
+        duplicates = inbox._webhook_duplicates(data, identity)
+        if duplicates:
+            return inbox._resolve_webhook_duplicate(duplicates, data, binding)
+        try:
+            return inbox._create_webhook_receipt(data, binding, identity)
+        except UniqueViolation as error:
+            if not inbox._is_webhook_id_collision(error):
+                raise
+            # A RR snapshot may not see the committed concurrent winner. Never
+            # turn that uncertainty into ACK; redelivery/fresh TX must retry.
+            duplicates = inbox._webhook_duplicates(data, identity)
+            if not duplicates:
+                raise WebhookIntakeError(503, "receipt_retry_required") from None
+            return inbox._resolve_webhook_duplicate(duplicates, data, binding)
+
+    @api.model
+    def _webhook_duplicates(self, data, identity):
+        return self.search([("notification_id", "in", [identity, data["_id"]])], limit=2)
+
+    @api.model
+    def _resolve_webhook_duplicate(self, duplicates, data, binding):
+        if all(same_webhook_binding(row, data, binding) for row in duplicates):
+            # Read-only for all four states, including locked/failed rows.
+            return duplicates[0]
+        local_data = dict(data)
+        local_data.pop("_id", None)
+        return self._create_webhook_receipt(data, binding, webhook_receipt_id(local_data),
+                                            reason="provider_id_conflict")
+
+    @api.model
+    def _is_webhook_id_collision(self, error):
+        # Odoo 19 TableObject.full_name(model) is authoritative. Do not catch
+        # other 23505s, or guess a name when the descriptor is unavailable.
+        descriptor = self._unique_notification_id
+        return bool(descriptor and error.diag.constraint_name == descriptor.full_name(self))
+
+    @api.model
+    def _create_webhook_receipt(self, data, binding, identity, reason=None):
+        parameters = dict(data)
+        # Server-generated provenance only denies legacy dispatch. It is not
+        # authentication; stripped-marker replays must also check stored rows.
+        parameters["_inbox_receipt"] = identity
+        if reason:
+            parameters.update(quarantine_reason=reason, original_provider_id=data["_id"])
+        values = {
+            "notification_id": identity, "application_id": data["application_id"],
+            "user_id": data["user_id"], "topic": data["topic"], "resource": data["resource"],
+            "company_id": binding["company_id"], "seller_id": binding["actor_id"],
+            "state": "FAILED" if reason else "RECEIVED", "processing_errors": reason or False,
+            "attempts": data.get("attempts", 0),
+            "sent": webhook_timestamp_value(data.get("sent")),
+            "received": webhook_timestamp_value(data.get("received")),
+            "parameters": json.dumps(parameters, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+        }
+        local_identity = identity.startswith("receipt:")
+        for attempt in range(3):
+            try:
+                with self.env.cr.savepoint():
+                    receipt = self.create(values)
+                    receipt.flush_recordset(["notification_id"])
+                    return receipt
+            except UniqueViolation as error:
+                if not local_identity or not self._is_webhook_id_collision(error):
+                    raise
+                local_data = dict(data)
+                local_data.pop("_id", None)
+                values["notification_id"] = webhook_receipt_id(local_data)
+                parameters["_inbox_receipt"] = values["notification_id"]
+                values["parameters"] = json.dumps(parameters, ensure_ascii=True, sort_keys=True,
+                                                 separators=(",", ":"))
+        raise WebhookIntakeError(503, "receipt_retry_required")
+
+    @api.model
+    def _assert_legacy_webhook_data(self, data, company):
+        """Deny replay of known new receipts before any legacy client exists.
+
+        A caller marker can only deny, never authorize. Without it, query only
+        server-stored inbox namespaces and canonical routing metadata. For a
+        missing provider ID this is a conservative replay denial, not event
+        deduplication: no UUID/clock identity is inferred. Selected genuinely
+        legacy rows remain processable; ambiguous new/old envelope matches do
+        not establish permission to bypass the inbox commercial barrier.
+        """
+        if not isinstance(data, dict):
+            return
+        if data.get("_inbox_receipt") or is_inbox_receipt(data.get("_id")):
+            raise AccessError("Inbox commercial processing is not authorized")
+        selected = {key: data[key] for key in ("application_id", "user_id", "topic", "resource", "_id")
+                    if key in data}
+        try:
+            canonical = parse_webhook_body(json.dumps(selected, ensure_ascii=True).encode("utf-8"))
+        except (WebhookIntakeError, TypeError, ValueError):
+            # Do not redefine malformed/unsupported legacy intake here. Such
+            # data cannot match the strict canonical inbox routing identity.
+            return
+        domain = ["|", ("notification_id", "=like", "ml:%"),
+                  ("notification_id", "=like", "receipt:%"),
+                  ("company_id", "=", company.id),
+                  ("application_id", "=", canonical["application_id"]),
+                  ("user_id", "=", canonical["user_id"])]
+        if "_id" in canonical:
+            domain += ["|", ("notification_id", "=", webhook_receipt_id(canonical)), "&"]
+        domain += [("topic", "=", canonical["topic"]), ("resource", "=", canonical["resource"])]
+        # This is a fixed-domain existence/denial check, not a generic public
+        # ACL or ownership authorization. Actor drift cannot make it permissive.
+        if self.with_context({"prefetch_fields": False}).sudo().search(domain, limit=1):
+            raise AccessError("Inbox commercial processing is not authorized")
+
+    def _assert_legacy_notifications(self):
+        """New intake rows are not authorized for any legacy business path."""
+        if any(is_inbox_receipt(row.notification_id) for row in self):
+            raise AccessError("Inbox commercial processing is not authorized")
+
     def _prepare_values(self, values):
         company = self.env.user.company_id
         seller_id = None
@@ -108,8 +256,10 @@ class MercadolibreNotification(models.Model):
         return vals
 
     def fetch_lasts(self, data=False, company=None):
+        self._assert_legacy_notifications()
         if not company:
             company = self.env.user.company_id
+        self._assert_legacy_webhook_data(data, company)
         _logger.info("fetch_lasts: "+str(company.name))
         _logger.info("user: "+str(self.env.user.name))
         if company.mercadolibre_seller_user:
@@ -197,6 +347,7 @@ class MercadolibreNotification(models.Model):
         return ""
 
     def _process_notification_question(self):
+        self._assert_legacy_notifications()
         #_logger.info("_process_notification_question")
 
         company = self.env.user.company_id
@@ -241,6 +392,7 @@ class MercadolibreNotification(models.Model):
                 noti.processing_ended = ml_datetime(str(datetime.now()))
 
     def _process_notification_order(self):
+        self._assert_legacy_notifications()
         #_logger.info("_process_notification_order")
 
         company = self.env.user.company_id
@@ -300,6 +452,7 @@ class MercadolibreNotification(models.Model):
 
     def _process_notification_item(self):
         """Process item notification to update publication status."""
+        self._assert_legacy_notifications()
         #_logger.info("_process_notification_item")
 
         company = self.env.user.company_id
@@ -375,6 +528,7 @@ class MercadolibreNotification(models.Model):
                 noti.processing_ended = ml_datetime(str(datetime.now()))
 
     def process_notification(self):
+        self._assert_legacy_notifications()
         #_logger.info("_process_notification")
 
         company = self.env.user.company_id
@@ -395,13 +549,14 @@ class MercadolibreNotification(models.Model):
                     noti._process_notification_item()
 
     def process_notifications(self, limit=None):
+        self._assert_legacy_notifications()
         #process all
         _logger.info("Processing received notifications #")
         received = None
-        if (limit==None):
-            received = self.search([('topic','like','orders_v2'),('state','=','RECEIVED')], order='id desc', limit=10)
-        else:
-            received = self.search([('topic','like','orders_v2'),('state','=','RECEIVED')], order='id desc', limit=1)
+        domain = ["!", ("notification_id", "=like", "ml:%"),
+                  "!", ("notification_id", "=like", "receipt:%"),
+                  ('topic','like','orders_v2'), ('state','=','RECEIVED')]
+        received = self.search(domain, order='id desc', limit=10 if limit is None else 1)
 
         if (received and len(received)):
             _logger.info( "#" + str(len(received)) )
@@ -431,6 +586,7 @@ class MercadolibreNotification(models.Model):
         return  noti
 
     def stop_internal_notification(self, errors="", logs=""):
+        self._assert_legacy_notifications()
         self.processing_ended = ml_datetime( str( datetime.now() ) )
         self.processing_errors = str(errors)
         self.processing_logs = str(logs)

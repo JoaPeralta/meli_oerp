@@ -8,6 +8,7 @@ from odoo import http, api
 from odoo import fields, http
 from odoo.http import Controller, Response, request, route
 from odoo.exceptions import AccessError
+from werkzeug.exceptions import ClientDisconnected, RequestEntityTooLarge
 try:
     from odoo.http import content_disposition
 except ImportError:
@@ -37,6 +38,7 @@ _logger = logging.getLogger(__name__)
 
 
 from ..models.versions import *
+from ..models.meli_webhook_inbox import WEBHOOK_MAX_BYTES, WebhookIntakeError
 from ..models.meli_util import (
     meli_oauth_attempt_consume,
     meli_oauth_attempt_issue,
@@ -78,32 +80,51 @@ class MercadoLibre(http.Controller):
 
     # csrf=False is required because this endpoint is a webhook called
     # from MercadoLibre servers — they cannot provide an Odoo CSRF token.
-    # Authentication is done inside the handler by validating the
-    # notification payload (user_id/app_id).
+    # App/seller agreement is routing validation, NOT origin authentication.
     #
     # The /odoo/meli_notify aliases exist so the webhook works no matter
     # whether the ML app was configured with https://<host>/meli_notify
     # or https://<host>/odoo/meli_notify (Odoo 17+ backend prefix).
     @http.route(
         ['/meli_notify', '/odoo/meli_notify'],
-        type=route_typejson, auth='public', methods=["POST"], csrf=False,
+        type='http', auth='public', methods=["POST"], csrf=False,
+        readonly=False, save_session=False,
+        max_content_length=WEBHOOK_MAX_BYTES + 1,
     )
     def meli_notify(self,**kw):
-        _logger.info("meli_notify")
-        #_logger.info(kw)
-        company = request.env.user.company_id
-        _logger.info(request.env.user)
-        _logger.info(company)
-        #_logger.info(company.display_name)
-        #_logger.info(kw)
-        #_logger.info(request)
-        data = json.loads(request.httprequest.data)
-        _logger.info(data)
-        result = company.meli_notifications(data)
-        if (result and "error" in result):
-            return Response(result["error"],content_type='text/html;charset=utf-8',status=result["status"])
-        else:
-            return ""
+        """Prepare an ACK only; Odoo's normal request commit precedes emission."""
+        incoming = request.httprequest
+        if incoming.mimetype != 'application/json':
+            return Response("unsupported_media_type", status=415, content_type='text/plain')
+        length = incoming.content_length
+        if type(length) is not int or length < 0 or incoming.environ.get('HTTP_TRANSFER_ENCODING'):
+            # The Odoo facade intentionally hides raw WSGI input/termination
+            # flags. Do not guess whether an unknown/chunked stream is bounded.
+            return Response("content_length_required", status=411, content_type='text/plain')
+        if length > WEBHOOK_MAX_BYTES:
+            return Response("body_too_large", status=413, content_type='text/plain')
+        # Native pre_dispatch applies MAX+1 before form/parameter extraction,
+        # bounding even a previously cached stream. A request-local framing probe
+        # catches server-terminated input longer than its declared length.
+        # Werkzeug's LimitedStream bounds this read to <=MAX+1, never raw input.
+        incoming.max_content_length = min(length + 1, WEBHOOK_MAX_BYTES + 1)
+        try:
+            raw = incoming.get_data(cache=False, as_text=False, parse_form_data=False)
+        except RequestEntityTooLarge:
+            return Response("body_too_large", status=413, content_type='text/plain')
+        except (ClientDisconnected, OSError):
+            return Response("invalid_body", status=400, content_type='text/plain')
+        if len(raw) > WEBHOOK_MAX_BYTES:
+            return Response("body_too_large", status=413, content_type='text/plain')
+        if len(raw) != length:
+            return Response("invalid_body", status=400, content_type='text/plain')
+        try:
+            request.env['mercadolibre.notification']._receive_webhook(raw)
+        except WebhookIntakeError as error:
+            return Response(error.code, status=error.status, content_type='text/plain')
+        # Non-lazy, non-streaming. DB/transaction errors deliberately propagate
+        # to the framework; never convert a failed persistence into HTTP 200.
+        return Response("", status=200, content_type='text/plain')
 
     @http.route(['/meli_notify', '/odoo/meli_notify'], type='http', auth='public', methods=["GET"])
     def meli_notify_http(self,**kw):
