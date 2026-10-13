@@ -74,6 +74,14 @@ class MercadolibreNotification(models.Model):
     received = fields.Datetime(string='Received', index=True)
     resource = fields.Char(string="Resource", index=True)
     attempts = fields.Integer(string='Attempts')
+    local_attempts = fields.Integer(
+        string='Local Attempts', default=0, readonly=True, copy=False,
+        help='Completed, committed local processing attempts; not sender delivery attempts.',
+    )
+    next_attempt_at = fields.Datetime(
+        string='Next Attempt At', index=True, readonly=True, copy=False,
+        help='Optional due time for a future authorized inbox worker. No automatic requeue.',
+    )
     parameters = fields.Text(string="Parameters")
 
     state = fields.Selection([

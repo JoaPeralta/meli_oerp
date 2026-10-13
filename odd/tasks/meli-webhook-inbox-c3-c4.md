@@ -21,8 +21,8 @@ Delivery strategy: `ask-on-risk` for any future PR. No PR is being prepared or a
 
 ## Implementation checklist
 
-- [x] T1 — Original HTTP POST routes, bounded canonical intake, safe duplicate/conflict handling, UUID missing-ID receipts, explicit fail-closed bridge identity binding and pre-client commercial barrier for new receipts. Focused tests, corrected independent source review and real disposable HTTP/PG checks passed; paired local commit identities follow after creation.
-- [ ] T2 — Only `local_attempts` and indexed `next_attempt_at`, four states and historical metadata unchanged, versioned non-requeue upgrade preparation and tests.
+- [x] T1 — Original HTTP POST routes, bounded canonical intake, safe duplicate/conflict handling, UUID missing-ID receipts, explicit fail-closed bridge identity binding and pre-client commercial barrier for new receipts. Focused tests, corrected independent source review and real disposable HTTP/PG checks passed; paired local commits recorded below.
+- [x] T2 — Only `local_attempts` and indexed `next_attempt_at`, four states and historical metadata unchanged, versioned non-requeue upgrade preparation and tests.
 - [ ] T3 — Bridge-owned inactive cron/private non-sudo A entrypoint, minimum notification permissions/company boundary, due-row `SKIP LOCKED` selection and rollback-only claim demonstration. Unconditional commercial not-ready barrier, no GET/import/commit progress.
 
 ## Acceptance and verification
@@ -39,13 +39,13 @@ Delivery strategy: `ask-on-risk` for any future PR. No PR is being prepared or a
 
 Preparation verified: gh-only transient helper fetched exact main SHA with no refs/FETCH_HEAD/worktree/config changes; complete bridge tree equals local81d; new worktrees start clean. Main's 18 modified/four untracked entries remain preserved. Initial survey found native PG18.4; a pinned synthetic Odoo19 runtime was subsequently prepared only in the owned lab.
 
-- T1: corrected source independent PASS; focus35/binding5/pinned facade6/edge9 and C1+C5 92 pass. Real Odoo/PG HTTP22 and ORM replay8 pass on exact reviewed bytes; native commit precedes ACK and native23503 yields500/no durable loser. Original source FAIL and facade HTTP500 preserved. Ordinary sampled maximum445.265ms, injected800ms commit-delay cases1029.133/926.962ms exceed500ms; no worst-case SLA claim. Unknown/chunked framing411 needs later provider TEST compatibility proof. Paired commits pending creation.
-- T2: pending. No migration executed.
+- T1: corrected source independent PASS; focus35/binding5/pinned facade6/edge9 and C1+C5 92 pass. Real Odoo/PG HTTP22 and ORM replay8 pass on exact reviewed bytes; native commit precedes ACK and native23503 yields500/no durable loser. Original source FAIL and facade HTTP500 preserved. Ordinary sampled maximum445.265ms, injected800ms commit-delay cases1029.133/926.962ms exceed500ms; no worst-case SLA claim. Unknown/chunked framing411 needs later provider TEST compatibility proof. Local paired commits: connector `37c4b335edf97f96e81f85c4c21ee4d92ed91211`; bridge `5b3229817171aab1cbcb8c7a0d8506d9e87f2e57`.
+- T2: independent SOURCE PASS156 (retry7/intake35/binding5/C1+C5+shipment92/resource17), parent retry7 spot check PASS and all five hashes match. Actual owned Odoo/PG upgrade .200->.201, same-version repeat, two direct hook repeats and separate fresh .201 install PASS93 phase assertions/34 distinct names/0 failures; history and eleven cron tuples exact, positive local counts/future dues preserved, effective readonly views/index/default0/dueNULL/copyFalse proved. No HOMO migration; technical actor notification ACL remains denied until T3. Runtime evidence: runtime-lab/T2-runtime-proof.md and .json. Local coherent commit follows these observed checks.
 - T3: pending. No cron activation authorized.
-- Disposable lab/prototype: owned PG18.4 loopback cluster and pinned Odoo19 synthetic lab prepared; SQL coordination experiments 7/7 pass, installed notification/parent indexes verified. HTTP/ACL/worker/business-effect proof pending corrected candidate. Same-value SQL tuple touch works; cached ORM empty writes are not guaranteed physical touches. Evidence directory: `C:/Users/peral/.codex/visualizations/2026/10/09/01a120e6-d01c-7f60-b6e3-3964776a16d2/c3-c4-implementation`.
+- Disposable lab/prototype: owned PG18.4 loopback cluster and pinned Odoo19 synthetic lab prepared; SQL coordination experiments 7/7 pass, installed notification/parent indexes verified. T1 HTTP/ORM replay proof passed on corrected bytes; T3 ACL/worker and commercial business-effect proof remain pending. Same-value SQL tuple touch works; cached ORM empty writes are not guaranteed physical touches. Evidence directory: `C:/Users/peral/.codex/visualizations/2026/10/09/01a120e6-d01c-7f60-b6e3-3964776a16d2/c3-c4-implementation`.
 
 ## Rollback and remaining approvals
 
 Each code unit removes only its new intake/metadata/private-worker behavior; preserve receipt/history data and never perform destructive downgrade. Keep worker inactive during rollback. Public API/security/runtime proof remains separate from source declarations. Unit4 commercial import coordination and units5–6 retries/operational acceptance remain incomplete until their gates pass.
 
-Next: test-first T1 in the new worktrees, safe disposable prototype in isolated evidence; independent review before local commits.
+Next: T3 structural private rollback-only worker, minimum queue ACL and new inactive bridge cron; focused tests, independent review and disposable effective permissions/locking/recovery proof before its local commit.

@@ -16,7 +16,7 @@
     # en la banda .98-.108 seria ambiguo sobre de que linaje viene. .200 deja un
     # hueco que nadie va a alcanzar por accidente y ordena por encima de todo lo
     # que upstream publico, que es lo que Odoo necesita para correr migraciones.
-    'version': '19.0.26.200',
+    'version': '19.0.26.201',
     'author': 'Moldeo Interactive',
     'website': 'https://www.moldeointeractive.com',
     "category": "Sales",
