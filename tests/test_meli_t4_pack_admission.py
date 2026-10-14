@@ -25,6 +25,33 @@ def order(oid=101, seller=42, pack=900, quantity=2, price=100, variation=7):
     }
 
 
+def association(oid=101, seller=42, requested=1, variation=7):
+    return {"order_id": str(oid), "seller_id": seller, "pack_id": "900",
+            "item_id": "MLA123", "variation_id": variation,
+            "requested_quantity": requested}
+
+
+class MutableClient:
+    """A single response object reused and mutated by every GET, like NoSDK."""
+    access_token = "synthetic-not-a-credential"
+
+    def __init__(self, responses):
+        self.responses = responses
+        self.calls = []
+        self.status_code = None
+        self.headers = {}
+        self.body = None
+
+    def get(self, path, params, extra_headers=None):
+        self.calls.append((path, deepcopy(extra_headers)))
+        status, body, headers = self.responses[path]
+        self.status_code, self.body, self.headers = status, deepcopy(body), headers
+        return self
+
+    def json(self):
+        return self.body
+
+
 class OrderAdmissionTests(unittest.TestCase):
     def test_order_without_shipping_is_valid(self):
         payload = order(pack=None)
@@ -169,6 +196,125 @@ class OrderAdmissionTests(unittest.TestCase):
         payload["tags"] = ["delivered"]
         with self.assertRaises(admission.AdmissionError):
             admission.verify_order(payload, 42)
+
+
+class MembershipTests(unittest.TestCase):
+    def test_actual_nosdk_status_attribute_is_snapshotted(self):
+        response = SimpleNamespace(last_status_code=206, json=lambda: order())
+        body, metadata = admission.snapshot_response(response)
+        self.assertEqual(metadata["status"], 206)
+        self.assertEqual(body["id"], 101)
+
+    def collect(self, entries, extra=None, status=200, headers=None):
+        responses = {"/shipments/800/orders": (status, entries, headers or {})}
+        responses.update(extra or {})
+        client = MutableClient(responses)
+        result = admission.collect_membership(
+            client, 800, order(), 42,
+            headers={"X-New-Domain": "true"},
+        )
+        return result, client
+
+    def test_repeated_publication_keeps_each_source_order(self):
+        result, client = self.collect(
+            [association(), association(102, requested=3)],
+            {"/orders/102": (200, order(102, quantity=5, price=250), {})},
+        )
+        self.assertEqual([entry["id"] for entry in result["orders"]], [101, 102])
+        self.assertEqual(result["orders"][1]["order_items"][0]["quantity"], 5)
+        self.assertEqual(result["orders"][1]["order_items"][0]["unit_price"], 250)
+        self.assertEqual(result["associations"][1]["requested_quantity"], 3)
+        self.assertEqual(client.calls[0][1], {"X-New-Domain": "true"})
+
+    def test_equal_economic_values_do_not_collapse_identity(self):
+        result, _ = self.collect([association(), association(102)],
+                                {"/orders/102": (200, order(102), {})})
+        self.assertEqual(len(result["orders"]), 2)
+
+    def test_foreign_member_is_never_requested_or_retained(self):
+        result, client = self.collect([association(), association(999, seller=43)])
+        self.assertEqual([row["id"] for row in result["orders"]], [101])
+        self.assertEqual(len(result["associations"]), 1)
+        self.assertTrue(result["complete"])
+        self.assertNotIn("/orders/999", [call[0] for call in client.calls])
+
+    def test_unknown_owner_is_not_invented_or_probed(self):
+        unknown = {"order_id": "999"}
+        result, client = self.collect([association(), unknown])
+        self.assertFalse(result["complete"])
+        self.assertEqual([row["id"] for row in result["orders"]], [101])
+        self.assertEqual(len(client.calls), 1)
+
+    def test_invisible_own_member_does_not_discard_verified_subset(self):
+        result, _ = self.collect([association(), association(102)],
+                                {"/orders/102": (403, {"error": "forbidden"}, {})})
+        self.assertEqual([row["id"] for row in result["orders"]], [101])
+        self.assertFalse(result["complete"])
+
+    def test_206_missing_seller_fails_closed(self):
+        payload = order(102)
+        del payload["seller"]
+        with self.assertRaises(admission.AdmissionError):
+            self.collect([association(), association(102)],
+                         {"/orders/102": (206, payload, {"X-Content-Missing": "seller"})})
+
+    def test_206_with_essential_data_is_verified(self):
+        result, _ = self.collect([association(), association(102)],
+                                {"/orders/102": (206, order(102),
+                                                 {"X-Content-Missing": "feedback"})})
+        self.assertEqual(len(result["orders"]), 2)
+
+    def test_204_is_pending_not_an_empty_successful_pack(self):
+        result, _ = self.collect(None, status=204)
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["orders"][0]["id"], 101)
+        self.assertEqual(result["associations"], [])
+
+    def test_snapshot_retains_response_status_before_next_get(self):
+        result, client = self.collect([association(), association(102)],
+                                     {"/orders/102": (206, order(102), {})})
+        self.assertEqual(result["responses"][0]["status"], 200)
+        self.assertEqual(result["responses"][1]["status"], 206)
+        self.assertEqual(client.status_code, 206)
+
+    def test_logistics_cannot_override_commercial_identity(self):
+        entry = association()
+        entry["item_id"] = "MLA999"
+        with self.assertRaises(admission.AdmissionError):
+            self.collect([entry])
+
+    def test_association_pack_mismatch_is_rejected(self):
+        entry = association()
+        entry["pack_id"] = "901"
+        with self.assertRaises(admission.AdmissionError):
+            self.collect([entry])
+
+    def test_member_order_pack_mismatch_is_rejected(self):
+        with self.assertRaises(admission.AdmissionError):
+            self.collect([association(), association(102)],
+                         {"/orders/102": (200, order(102, pack=901), {})})
+
+    def test_duplicate_logistics_identity_is_rejected(self):
+        with self.assertRaises(admission.AdmissionError):
+            self.collect([association(), association()])
+
+    def test_invalid_membership_body_is_not_silently_discarded(self):
+        with self.assertRaises(admission.AdmissionError):
+            self.collect({"orders": [association()]})
+
+    def test_member_order_shipping_contradiction_is_rejected(self):
+        other = order(102)
+        other["shipping"]["id"] = 801
+        with self.assertRaises(admission.AdmissionError):
+            self.collect([association(), association(102)],
+                         {"/orders/102": (200, other, {})})
+
+    def test_unclassifiable_seller_is_pending_not_permission_to_probe(self):
+        other = association(102)
+        other["seller_id"] = "unknown"
+        result, client = self.collect([association(), other])
+        self.assertFalse(result["complete"])
+        self.assertEqual(len(client.calls), 1)
 
 
 if __name__ == "__main__":

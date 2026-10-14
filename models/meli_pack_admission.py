@@ -97,3 +97,99 @@ def enrich_buyer(current, refreshed, seller_id):
         raise AdmissionError("Verified individual buyer enrichment is unavailable")
     current["buyer"] = refreshed["buyer"]
     return current
+
+
+def snapshot_response(response):
+    """NoSDK may return itself: capture status/headers/body before another GET."""
+    status = getattr(response, "status_code", None)
+    if status is None:
+        status = getattr(response, "last_status_code", None)
+    headers = deepcopy(dict(getattr(response, "headers", {}) or {}))
+    missing = next((value for key, value in headers.items()
+                    if key.lower() == "x-content-missing"), None)
+    body = None if status == 204 else deepcopy(response.json())
+    return body, {"status": status, "missing": missing,
+                  "headers_available": hasattr(response, "headers")}
+
+
+def collect_membership(meli, shipping_id, current_order, seller_id, headers):
+    """Admit only explicitly own flat associations and independently own orders.
+
+    Unknown ownership is pending, not foreign and not permission to probe an ID.
+    A forbidden/not-found sibling preserves the already verified own subset.
+    Returned snapshots contain no foreign order bodies or credential headers.
+    """
+    current = verify_order(current_order, seller_id)
+    current_id = remote_id(current["id"])
+    shipping_id = remote_id(shipping_id)
+    seller_id = remote_id(seller_id)
+    response = meli.get("/shipments/" + shipping_id + "/orders",
+                        {"access_token": meli.access_token}, extra_headers=headers)
+    rows, metadata = snapshot_response(response)
+    result = {"orders": [current], "associations": [], "complete": False,
+              "responses": [metadata], "pending": "logistics_membership_pending"}
+    if metadata["status"] == 204:
+        return result
+    if metadata["status"] != 200 or not isinstance(rows, list):
+        raise AdmissionError("Flat shipment membership response is unavailable or invalid")
+    own_rows = []
+    unknown = False
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get("seller_id") is None:
+            unknown = True
+            continue
+        try:
+            row_seller = remote_id(row["seller_id"])
+        except AdmissionError:
+            unknown = True
+            continue
+        if row_seller != seller_id:
+            continue  # Never request a member already identified as foreign.
+        oid = remote_id(row.get("order_id"))
+        key = item_key(row.get("item_id"), row.get("variation_id"))
+        identity = (oid, key)
+        if identity in seen:
+            raise AdmissionError("Duplicate logistic source identity is unsupported")
+        seen.add(identity)
+        requested = row.get("requested_quantity")
+        if isinstance(requested, bool) or not isinstance(requested, int) or requested <= 0:
+            raise AdmissionError("An explicit positive logistic quantity is required")
+        pack = current.get("pack_id")
+        if pack is not None and remote_id(row.get("pack_id")) != remote_id(pack):
+            raise AdmissionError("Shipment association contradicts the own pack identity")
+        own_rows.append(deepcopy(row))
+    verified = {current_id: current}
+    invisible = set()
+    for row in own_rows:
+        oid = remote_id(row["order_id"])
+        if oid in verified or oid in invisible:
+            continue
+        response = meli.get("/orders/" + oid, {"access_token": meli.access_token})
+        payload, metadata = snapshot_response(response)
+        result["responses"].append(metadata)
+        if metadata["status"] in (403, 404):
+            invisible.add(oid)
+            continue
+        if metadata["status"] not in (200, 206):
+            raise AdmissionError("Individual own order response is unavailable")
+        verified[oid] = verify_order(payload, seller_id, expected_id=oid,
+                                     expected_pack=current.get("pack_id"))
+    for row in own_rows:
+        oid = remote_id(row["order_id"])
+        if oid not in verified:
+            continue
+        source_shipping = (verified[oid].get("shipping") or {}).get("id")
+        if source_shipping is not None and remote_id(source_shipping) != shipping_id:
+            raise AdmissionError("Individual order shipping identity contradicts the association")
+        source_keys = {item_key(line["item"]["id"], line["item"].get("variation_id"))
+                       for line in verified[oid]["order_items"]}
+        if item_key(row["item_id"], row.get("variation_id")) not in source_keys:
+            raise AdmissionError("Logistics item does not belong to its individual source order")
+        result["associations"].append(row)
+    result["orders"] = list(verified.values())
+    result["complete"] = (not unknown and not invisible and
+                          any(remote_id(row["order_id"]) == current_id
+                              for row in result["associations"]))
+    result["pending"] = None if result["complete"] else "logistics_membership_pending"
+    return result

@@ -25,3 +25,17 @@ Buyer refresh cannot replace captured economics or change source membership.
 This contract is executable independently; importer activation is a later unit.
 Run the standalone `test_meli_t4_pack_admission.py` suite from the repository root.
 No ORM field, data/security record, migration or commercial pack support is added.
+
+## Shipment membership snapshots
+
+`snapshot_response(response)` copies body, status and available header metadata.
+Capture it before another GET: the transport may reuse one mutable response object.
+`collect_membership` handles only the flat shipment/order association subset.
+Every accessible own sibling is individually verified with the M1 order contract.
+Known foreign members are never requested; unknown ownership never permits probing.
+HTTP403/404 preserves the verified own subset with membership explicitly incomplete.
+HTTP204 remains pending, not an empty successful pack or permission to discard it.
+Malformed/unavailable essential responses raise; transport errors propagate unchanged.
+Logistic requested quantities never replace individual commercial quantities.
+This API depends on M1 and accepts an injected client; it constructs no SDK client.
+Production importer activation, durable line binding and pack commerce remain later units.
