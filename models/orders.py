@@ -20,10 +20,15 @@
 ##############################################################################
 
 from odoo import fields, models, api
+from odoo.exceptions import AccessError, ValidationError
 from odoo.tools import html_escape
 from markupsafe import Markup
 import logging
 import re
+import ast
+from .meli_pack_admission import (
+    AdmissionError, remote_id, verify_order, snapshot_response, enrich_buyer,
+)
 from .meli_oerp_config import *
 
 # Traducción de códigos de cancelación ML → español
@@ -2390,6 +2395,70 @@ class mercadolibre_orders(models.Model):
 
 
         return order_item_impuesto_interno
+
+    @api.model
+    def _meli_assert_order_admission_actor(self, config):
+        """Generic owner seam; an installed extension may add its own boundary."""
+        company = config.company_id if "company_id" in config._fields else config
+        actor = config.mercadolibre_seller_user
+        if (self.env.su or not actor or self.env.uid != actor.id
+                or not actor.active or actor.share or self.env.company != company
+                or self.env.companies != company or actor.company_id != company):
+            raise AccessError("Order admission requires its configured non-superuser company actor")
+        try:
+            return remote_id(config.mercadolibre_seller_id)
+        except AdmissionError as exc:
+            raise ValidationError(str(exc)) from exc
+
+    @api.model
+    def _meli_preflight_order_history(self, payload, config, local_id=None):
+        """No elevation or guessed adoption of historical/foreign commercial roots."""
+        company = config.company_id if "company_id" in config._fields else config
+        oid = remote_id(payload["id"])
+        records = self.search([("order_id", "=", oid)])
+        if local_id:
+            selected = self.browse(local_id).exists()
+            if not selected or selected.order_id != oid:
+                raise ValidationError("Local order identity contradicts the individual source order")
+            records |= selected
+        roots = self.env["sale.order"].search([("meli_order_id", "=", oid)])
+        shipping = payload.get("shipping") or {}
+        if shipping.get("id"):
+            shipments = self.env["mercadolibre.shipment"].search([
+                ("shipping_id", "=", remote_id(shipping["id"]))])
+            for shipment in shipments:
+                if (shipment.company_id != company
+                        or shipment.seller_id != config.mercadolibre_seller_user):
+                    raise AccessError("Existing shipment company/seller binding is incompatible")
+                parent = shipment.order
+                same_pack = (payload.get("pack_id") and parent.pack_id
+                             and str(payload["pack_id"]) == parent.pack_id)
+                if not parent or (parent.order_id != oid and not same_pack):
+                    raise ValidationError("Existing shipment source ownership is unknown or incompatible")
+                records |= parent
+                roots |= shipment.sale_order
+        for record in records:
+            if record.company_id != company or record.seller_id != config.mercadolibre_seller_user:
+                raise AccessError("Historical order company/seller binding is incompatible")
+            try:
+                seller = ast.literal_eval(record.seller or "")
+                if remote_id(seller.get("id")) != remote_id(payload["seller"]["id"]):
+                    raise ValueError("seller mismatch")
+            except (ValueError, SyntaxError, AttributeError, AdmissionError):
+                raise ValidationError("Historical seller identity is unknown or incompatible") from None
+            roots |= record.sale_order
+            if record.shipment:
+                if (record.shipment.company_id != company
+                        or record.shipment.seller_id != config.mercadolibre_seller_user):
+                    raise AccessError("Historical shipment company/seller is incompatible")
+                roots |= record.shipment.sale_order
+        for root in roots:
+            if root.company_id != company:
+                raise AccessError("Historical sale order company is incompatible")
+            if root.state not in ("draft", "sent") or root.picking_ids or root.invoice_ids:
+                raise ValidationError("Processed commercial history is outside T4-A admission")
+            if root.meli_update_forbidden:
+                raise ValidationError("Historical sale order forbids importer updates")
 
     def orders_update_order_json( self, data, context=None, config=None, meli=None ):
 

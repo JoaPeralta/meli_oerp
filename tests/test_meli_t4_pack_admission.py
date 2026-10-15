@@ -317,5 +317,163 @@ class MembershipTests(unittest.TestCase):
         self.assertEqual(len(client.calls), 1)
 
 
+class SourceBoundaryTests(unittest.TestCase):
+    def method(self, filename, name):
+        tree = ast.parse((ROOT / "models" / filename).read_text(encoding="utf-8"))
+        return next(node for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef) and node.name == name)
+
+    def test_generic_owner_hook_does_not_depend_on_bridge(self):
+        source = ast.unparse(self.method("orders.py", "_meli_assert_order_admission_actor"))
+        self.assertIn("env.su", source)
+        self.assertNotIn("viarengo", source)
+        self.assertNotIn("sudo", source)
+
+
+class ExecutedGuardAndIngressTests(unittest.TestCase):
+    """Run extracted real guard bodies; fake records cannot prove Odoo ACLs."""
+    method = SourceBoundaryTests.method
+
+    def guard(self, name):
+        tree = ast.parse((ROOT / "models/orders.py").read_text(encoding="utf-8"))
+        node = next(node for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef) and node.name == name)
+        node.decorator_list = []
+        scope = {"AccessError": PermissionError, "ValidationError": ValueError,
+                 "remote_id": admission.remote_id, "AdmissionError": admission.AdmissionError,
+                 "ast": ast}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "real-guard", "exec"), scope)
+        return scope[name]
+
+    def actor(self, **changes):
+        company = SimpleNamespace(id=1, _fields={}, mercadolibre_seller_id="42")
+        actor = SimpleNamespace(id=5, active=True, share=False, company_id=company)
+        company.mercadolibre_seller_user = actor
+        env = SimpleNamespace(su=False, uid=5, company=company, companies=company)
+        for key, value in changes.items():
+            setattr(env, key, value)
+        return SimpleNamespace(env=env), company
+
+    def test_configured_non_superuser_is_admitted(self):
+        probe, company = self.actor()
+        self.assertEqual(self.guard("_meli_assert_order_admission_actor")(probe, company), "42")
+
+    def test_superuser_and_other_actor_are_denied(self):
+        for changes in ({"su": True}, {"uid": 6}, {"companies": SimpleNamespace(id=2)}):
+            probe, company = self.actor(**changes)
+            with self.subTest(changes=changes), self.assertRaises(PermissionError):
+                self.guard("_meli_assert_order_admission_actor")(probe, company)
+
+    def test_missing_remote_seller_cannot_authorize_fetch(self):
+        probe, company = self.actor()
+        company.mercadolibre_seller_id = None
+        with self.assertRaises(ValueError):
+            self.guard("_meli_assert_order_admission_actor")(probe, company)
+
+    def history(self, root_changes=None, seller="{'id': 42}"):
+        class Records(list):
+            def __or__(self, other):
+                return Records([*self, *[row for row in other if row not in self]])
+
+        _, company = self.actor()
+        root = SimpleNamespace(company_id=company, state="draft", picking_ids=[],
+                               invoice_ids=[], meli_update_forbidden=False)
+        for key, value in (root_changes or {}).items():
+            setattr(root, key, value)
+        record = SimpleNamespace(company_id=company, seller_id=company.mercadolibre_seller_user,
+                                 seller=seller, sale_order=Records([root]), shipment=False)
+        model = SimpleNamespace(search=lambda domain: Records([root]))
+        shipments = SimpleNamespace(search=lambda domain: Records())
+        probe = SimpleNamespace(env={"sale.order": model, "mercadolibre.shipment": shipments},
+                                search=lambda domain: Records([record]))
+        return probe, company
+
+    def test_known_draft_history_is_admitted(self):
+        probe, company = self.history()
+        self.guard("_meli_preflight_order_history")(probe, order(), company)
+
+    def test_processed_history_is_denied_before_any_writes(self):
+        for changes in ({"state": "sale"}, {"picking_ids": [1]}, {"invoice_ids": [1]},
+                        {"meli_update_forbidden": True}):
+            probe, company = self.history(changes)
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.guard("_meli_preflight_order_history")(probe, order(), company)
+
+    def test_unknown_and_foreign_stored_seller_are_not_adopted(self):
+        for seller in ("", "{'id': 43}"):
+            probe, company = self.history(seller=seller)
+            with self.subTest(seller=seller), self.assertRaises(ValueError):
+                self.guard("_meli_preflight_order_history")(probe, order(), company)
+
+    def test_foreign_company_root_is_denied(self):
+        probe, company = self.history({"company_id": SimpleNamespace(id=2)})
+        with self.assertRaises(PermissionError):
+            self.guard("_meli_preflight_order_history")(probe, order(), company)
+
+    def test_history_checks_existing_shipping_root(self):
+        source = ast.unparse(self.method("orders.py", "_meli_preflight_order_history"))
+        self.assertTrue("mercadolibre.shipment" in source)
+        self.assertTrue("shipping_id" in source)
+        self.assertNotIn("sudo", source)
+
+
+class SamePackParentHistoryTests(unittest.TestCase):
+    """Source ownership is not implied by the shipment's configured actor."""
+    guard = ExecutedGuardAndIngressTests.guard
+    actor = ExecutedGuardAndIngressTests.actor
+
+    def history(self, seller="{'id': 42}", actor_id=None):
+        class Records(list):
+            def __or__(self, other):
+                return Records([*self, *[row for row in other if row not in self]])
+
+            def __getattr__(self, name):
+                if len(self) != 1:
+                    raise AttributeError(name)
+                return getattr(self[0], name)
+
+        _, company = self.actor()
+        parent_actor = (company.mercadolibre_seller_user if actor_id is None
+                        else SimpleNamespace(id=actor_id))
+        parent = Records([SimpleNamespace(
+            order_id="102", pack_id="900", company_id=company,
+            seller_id=parent_actor, seller=seller,
+            sale_order=Records(), shipment=False,
+        )])
+        shipment = SimpleNamespace(
+            order=parent, company_id=parent.company_id,
+            seller_id=company.mercadolibre_seller_user, sale_order=Records(),
+        )
+        probe = SimpleNamespace(
+            search=lambda domain: Records(),
+            env={
+                "sale.order": SimpleNamespace(search=lambda domain: Records()),
+                "mercadolibre.shipment": SimpleNamespace(
+                    search=lambda domain: Records([shipment])),
+            },
+        )
+        return probe, company
+
+    def test_same_pack_parent_requires_stored_seller(self):
+        probe, company = self.history(seller="")
+        with self.assertRaises(ValueError):
+            self.guard("_meli_preflight_order_history")(probe, order(), company)
+
+    def test_same_pack_parent_rejects_foreign_remote_seller(self):
+        probe, company = self.history(seller="{'id': 43}")
+        with self.assertRaises(ValueError):
+            self.guard("_meli_preflight_order_history")(probe, order(), company)
+
+    def test_same_pack_parent_rejects_different_odoo_actor(self):
+        probe, company = self.history(actor_id=6)
+        with self.assertRaises(PermissionError):
+            self.guard("_meli_preflight_order_history")(probe, order(), company)
+
+    def test_same_pack_parent_with_verified_ownership_is_admitted(self):
+        probe, company = self.history()
+        self.assertIsNone(
+            self.guard("_meli_preflight_order_history")(probe, order(), company))
+
+
 if __name__ == "__main__":
     unittest.main()

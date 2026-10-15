@@ -39,3 +39,20 @@ Malformed/unavailable essential responses raise; transport errors propagate unch
 Logistic requested quantities never replace individual commercial quantities.
 This API depends on M1 and accepts an injected client; it constructs no SDK client.
 Production importer activation, durable line binding and pack commerce remain later units.
+
+## Private actor and existing-history contract
+
+`_meli_assert_order_admission_actor(config)` requires the configured active internal actor.
+The actor must be non-superuser and restricted to the configured single company.
+The method returns a validated remote seller identity, not the Odoo actor identifier.
+`_meli_preflight_order_history(payload, config, local_id=None)` inspects visible roots.
+It does not elevate access, write records or guess missing stored seller ownership.
+Existing order/shipment/company/seller bindings and an optional local ID must agree.
+Existing sale roots must be draft/sent, without pickings, invoices or an update prohibition.
+Both private methods are complete callable contracts; production callers are unchanged.
+These generic checks alone do NOT enforce Circuit A/B or replace installed record rules.
+Circuit policy requires the later bridge override and guarded importer activation units.
+Extracted-body source tests are not native ORM/ACL or commercial-acceptance proof.
+
+Same-pack shipment parents must pass the full stored ownership/history checks.
+Their company, configured Odoo actor and serialized remote seller are checked together.
