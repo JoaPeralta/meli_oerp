@@ -56,3 +56,23 @@ Extracted-body source tests are not native ORM/ACL or commercial-acceptance proo
 
 Same-pack shipment parents must pass the full stored ownership/history checks.
 Their company, configured Odoo actor and serialized remote seller are checked together.
+
+## Guarded ingress integration
+
+This activation supersedes earlier later-unit notes for the selected entry points.
+It requires M1-M3 and the installed Circuit A bridge override B1; no reverse dependency.
+The bridge guard, configured seller and historical roots are checked before clients.
+Admission rejections propagate instead of entering the legacy effect fallback.
+Single verified own orders reuse the importer; buyer refresh preserves source economics.
+Shipment association uses explicit verified membership, never publication-only pairing.
+Pack, multi-source and multi-item projection returns `source_line_projection_pending_t4_bc`.
+Pending is not commercial success and cannot enter the anonymous pack mutation loop.
+Unknown logistics stays explicit; missing ownership and unsupported history reject.
+The M3 same-pack parent ownership correction remains in every history validation.
+No durable line field, full pack commerce, fiscal effects or coordination is added.
+Rollback this integration first, retaining M1-M3 and B1 until all callers are removed.
+Source tests do not replace fresh registered Odoo/PG and independent review evidence.
+
+Shipment resource identity must match the fresh own order and the stored source root.
+Missing or changed shipping identity rejects before membership or main-resource GETs.
+Even pre-admitted associations must belong to that exact verified shipment resource.

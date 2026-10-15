@@ -2460,6 +2460,26 @@ class mercadolibre_orders(models.Model):
             if root.meli_update_forbidden:
                 raise ValidationError("Historical sale order forbids importer updates")
 
+    @api.model
+    def _meli_order_admission(self, payload, config, meli):
+        """Own admission is distinct from the pending durable pack projection."""
+        seller_id = self._meli_assert_order_admission_actor(config)
+        current = verify_order(payload, seller_id)
+        result = {"orders": [current], "associations": [], "complete": True,
+                  "pending": None, "responses": []}
+        shipping = current.get("shipping") or {}
+        if shipping.get("id"):
+            result = self.env["mercadolibre.shipment"]._meli_admit_shipment_orders(
+                meli, shipping["id"], current, seller_id)
+        for source in result["orders"]:
+            self._meli_preflight_order_history(source, config)
+        is_pack = current.get("pack_id") or "pack_order" in (current.get("tags") or [])
+        if is_pack or len(result["orders"]) > 1 or len(current["order_items"]) > 1:
+            # T4-B/C owns durable source-line binding. Never enter the anonymous
+            # legacy pack loop merely because admission has verified identities.
+            result["pending"] = "source_line_projection_pending_t4_bc"
+        return result
+
     def orders_update_order_json( self, data, context=None, config=None, meli=None ):
 
         oid = data["id"]
@@ -2473,8 +2493,23 @@ class mercadolibre_orders(models.Model):
         company_none_domain = [('company_id','=',False)]        
         if not config:
             config = company
+        seller_identity = self._meli_assert_order_admission_actor(config)
+        try:
+            order_json = verify_order(order_json, seller_identity,
+                                      expected_id=data.get("remote_order_id"))
+            self._meli_preflight_order_history(order_json, config, local_id=oid)
+        except AdmissionError as exc:
+            raise ValidationError(str(exc)) from exc
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
+        try:
+            admission = self._meli_order_admission(order_json, config, meli)
+        except AdmissionError as exc:
+            raise ValidationError(str(exc)) from exc
+        if admission["pending"]:
+            return {"error": "Commercial import is pending verified source projection",
+                    "admission_pending": admission["pending"],
+                    "verified_order_ids": [str(row["id"]) for row in admission["orders"]]}
 
         saleorder_obj = self.env['sale.order']
         saleorderline_obj = self.env['sale.order.line']
@@ -2602,7 +2637,13 @@ class mercadolibre_orders(models.Model):
         if not 'buyer' in order_json or not 'name' in order_json['buyer'] or not 'first_name' in order_json['buyer']:
             #_logger.info("Buyer not present, fetch order")
             response = meli.get("/orders/"+str(order_json['id']), {'access_token':meli.access_token})
-            order_json = response.json()
+            refreshed, response_metadata = snapshot_response(response)
+            if response_metadata["status"] not in (200, 206):
+                raise ValidationError("Individual own order refresh is unavailable")
+            try:
+                order_json = enrich_buyer(order_json, refreshed, seller_identity)
+            except AdmissionError as exc:
+                raise ValidationError(str(exc)) from exc
             #_logger.info(order_json)
 
         if 'buyer' in order_json:
@@ -4760,7 +4801,8 @@ class mercadolibre_orders(models.Model):
         if (1==1 or config.mercadolibre_cron_get_orders_shipment):
             #_logger.info("Updating order: Shipment: "+str(order.shipping_id))
             if (order and order.shipping_id):
-                shipment = shipment_obj.fetch_shipment( order, meli=meli, config=config )
+                shipment = shipment_obj.fetch_shipment( order, meli=meli, config=config,
+                                                       verified_order=order_json )
                 if shipment and not isinstance(shipment, dict):
                     order.shipment = shipment
                     # NOTE: shipping_seller_cost copy is now also done inside fetch_shipment
@@ -4872,24 +4914,28 @@ class mercadolibre_orders(models.Model):
 
         order_obj = self.env['mercadolibre.orders']
 
-        if not meli:
-            meli = self.env['meli.util'].get_new_instance(company)
-
         if not config:
             config = company
+        self._meli_assert_order_admission_actor(config)
+        if not meli:
+            meli = self.env['meli.util'].get_new_instance(company)
 
         morder = order_obj.search( [('order_id','=',str(order_id))], limit=1 )
         if morder:
             return { "error": str(order_id)+" already in Odoo" }
 
         response = meli.get("/orders/"+str(order_id), {'access_token':meli.access_token})
-        order_json = response.json()
+        order_json, metadata = snapshot_response(response)
+        if metadata["status"] not in (200, 206):
+            return {"error": "Individual order response is unavailable"}
 
         if order_json:
             if "error" in order_json:
                 return { "error": order_json }
             else:
-                ret = self.orders_update_order_json( {"id": False, "order_json": order_json }, meli=meli, config=config )
+                ret = self.orders_update_order_json(
+                    {"id": False, "order_json": order_json, "remote_order_id": order_id},
+                    meli=meli, config=config )
                 if ret:
                     #_logger.info(ret)
                     return { "ret": ret }
@@ -4914,14 +4960,23 @@ class mercadolibre_orders(models.Model):
         log_msg = 'orders_update_order: %s' % (order.order_id)
         #_logger.info(log_msg)
 
+        if not config:
+            config = company
+        self._meli_assert_order_admission_actor(config)
+        try:
+            self._meli_preflight_order_history(
+                {"id": order.order_id, "seller": ast.literal_eval(order.seller or ""),
+                 "pack_id": order.pack_id or None, "shipping": {"id": order.shipping_id}},
+                config, local_id=order.id)
+        except (ValueError, SyntaxError) as exc:
+            raise ValidationError("Historical own order identity is required") from exc
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
 
-        if not config:
-            config = company
-
         response = meli.get("/orders/"+str(order.order_id), {'access_token':meli.access_token})
-        order_json = response.json()
+        order_json, metadata = snapshot_response(response)
+        if metadata["status"] not in (200, 206):
+            return [{"error": "Individual own order response is unavailable"}]
         #_logger.info( order_json )
         rets = []
 
@@ -4937,6 +4992,8 @@ class mercadolibre_orders(models.Model):
                 MeliCommit( self )
                 if ret and "error" in ret:
                     rets.append(ret)
+            except (AccessError, ValidationError):
+                raise  # Admission rejection must never enter the effect fallback.
             except Exception as e:
                 _logger.info("orders_update_order > Error actualizando ORDEN")
                 _logger.error(e, exc_info=True)
@@ -4974,10 +5031,11 @@ class mercadolibre_orders(models.Model):
 
         orders_obj = self.env['mercadolibre.orders']
 
+        seller_identity = self._meli_assert_order_admission_actor(config)
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
 
-        orders_query = "/orders/search?seller="+str(meli.seller_id)+"&sort=date_desc"
+        orders_query = "/orders/search?seller="+seller_identity+"&sort=date_desc"
 
         # Use orders limit from config if available (default API limit is 50)
         orders_limit = None
@@ -5110,12 +5168,30 @@ class mercadolibre_orders(models.Model):
             company = (config and "company_id" in config._fields and config.company_id) or self.env.user.company_id
             if not config:
                 config = company
+            seller_identity = self._meli_assert_order_admission_actor(config)
+            try:
+                self._meli_preflight_order_history(
+                    {"id": order.order_id, "seller": ast.literal_eval(order.seller or ""),
+                     "pack_id": order.pack_id or None, "shipping": {"id": order.shipping_id}},
+                    config, local_id=order.id)
+            except (ValueError, SyntaxError) as exc:
+                raise ValidationError("Historical own order identity is required") from exc
             if not meli:
                 meli = self.env['meli.util'].get_new_instance(company)
             if not meli:
                 return {}
             response = meli.get("/orders/"+str(order.order_id), {'access_token':meli.access_token})
-            order_json = response.json()
+            order_json, metadata = snapshot_response(response)
+            if metadata["status"] not in (200, 206):
+                return {"error": "Individual own order response is unavailable"}
+            try:
+                order_json = verify_order(order_json, seller_identity, expected_id=order.order_id)
+                admitted = self._meli_order_admission(order_json, config, meli)
+            except AdmissionError as exc:
+                raise ValidationError(str(exc)) from exc
+            if admitted["pending"]:
+                return {"error": "Status projection is pending T4-B/C",
+                        "admission_pending": admitted["pending"]}
             if "id" in order_json:
                 if (str(order.status)!=str(order_json["status"])):
                     #full update if status changed!
@@ -5171,6 +5247,7 @@ class mercadolibre_orders(models.Model):
         # la expone, se cae al company del usuario del cron (retrocompat total).
         if config is not None and "company_id" in config._fields and config.company_id:
             company = config.company_id
+        self._meli_assert_order_admission_actor(config)
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
         if not meli or meli.needlogin_state:

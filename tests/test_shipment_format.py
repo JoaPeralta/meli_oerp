@@ -456,8 +456,12 @@ class TestShipmentsCallSitesSendNewFormatHeader(_TestBase):
             )
 
     def test_shipment_py_call_sites(self):
-        # GET /shipments/{id}, /costs, /items and /orders.
-        self._assert_file(os.path.join("models", "shipment.py"), 4)
+        # GET /shipments/{id}, /costs and /items. Membership moved to the pure
+        # admission boundary so it can run before any commercial mutation.
+        self._assert_file(os.path.join("models", "shipment.py"), 3)
+
+    def test_pack_admission_call_site(self):
+        self._assert_file(os.path.join("models", "meli_pack_admission.py"), 1)
 
     def test_orders_py_call_site(self):
         # The receiver-address fallback.

@@ -20,6 +20,11 @@
 ##############################################################################
 
 from odoo import fields, models, api
+from odoo.exceptions import ValidationError
+import ast
+from .meli_pack_admission import (
+    AdmissionError, collect_membership, remote_id, verify_order, snapshot_response,
+)
 import logging
 from .meli_oerp_config import *
 
@@ -1206,77 +1211,47 @@ class mercadolibre_shipment(models.Model):
         #_logger.info("Processing partner_delivery_id partner_shipping_id:"+str(partner_shipping_id and partner_shipping_id.name) )
         return partner_shipping_id
 
-    def _shipment_items_with_order_id( self, items_json, meli=None, ship_id=None ):
-        """Completar el order_id de los items de un envío cuando la API no lo manda.
+    def _meli_admit_shipment_orders(self, meli, ship_id, verified_order, seller_id):
+        return collect_membership(meli, ship_id, verified_order, seller_id,
+                                  headers=SHIPMENTS_ORDERS_HEADERS)
 
-        Desde el 2025-10-12 order_id salió del cuerpo del envío, y el reemplazo
-        documentado es GET /shipments/{id}/orders (header X-New-Domain: true),
-        que devuelve un array de {order_id, pack_id, item_id, variation_id, ...}
-        y puede contestar 204 sin cuerpo.
+    def _shipment_items_with_order_id(self, items_json, meli=None, ship_id=None,
+                                      verified_order=None, seller_id=None, admitted=None):
+        """Build explicit logistic rows, never pair anonymous /items by publication.
 
-        Se usa como fuente preferida sólo para el order_id: /items sigue siendo
-        la fuente de los items porque es el único que trae `description`, que
-        update_item necesita para el nombre. Si no se puede aparear un item con
-        una orden, el item queda SIN order_id: el for de fetch_shipment lo
-        saltea y update_item lo descarta, que es preferible a colgarle el
-        order_id equivocado a una línea de un carrito.
+        /items descriptions are not source identity. A title from the verified
+        commercial item is display-only; requested_quantity stays logistic.
+        Multi-source projection deliberately remains pending until T4-B/C.
         """
-        if not isinstance(items_json, list) or not items_json:
-            return items_json
-
-        # Si /items ya trae todos los order_id no hace falta una llamada más:
-        # este es el camino viejo y no se toca.
-        if all(item.get("order_id") for item in items_json if isinstance(item, dict)):
-            return items_json
-
-        orders_json = None
+        if verified_order is None or seller_id is None:
+            raise ValidationError("Shipment item association requires a verified own order")
         try:
-            resporders = meli.get("/shipments/"+ str(ship_id)+"/orders", {'access_token':meli.access_token},
-                                  extra_headers=SHIPMENTS_ORDERS_HEADERS)
-            if resporders:
-                orders_json = resporders.json()
-        except Exception as e:
-            _logger.warning("fetch_shipment: /shipments/%s/orders falló: %s", str(ship_id), str(e))
-            return items_json
-
-        # 204 No Content devuelve texto vacío, no una lista. Cualquier cosa que
-        # no sea un array es "no hay dato", no un error a propagar.
-        if not isinstance(orders_json, list) or not orders_json:
-            return items_json
-
-        # Mapa item_id -> order_id, descartando los item_id ambiguos: si el
-        # mismo item_id aparece en dos órdenes del pack no hay forma de saber
-        # cuál corresponde, y adivinar sería peor que dejarlo vacío.
-        by_item = {}
-        ambiguous = set()
-        for entry in orders_json:
-            if not isinstance(entry, dict):
-                continue
-            item_id = entry.get("item_id")
-            order_id = entry.get("order_id")
-            if not item_id or not order_id:
-                continue
-            if item_id in by_item and by_item[item_id] != order_id:
-                ambiguous.add(item_id)
-            by_item[item_id] = order_id
-        for item_id in ambiguous:
-            del by_item[item_id]
-
-        completed = []
-        for item in items_json:
-            if not isinstance(item, dict):
-                completed.append(item)
-                continue
-            if item.get("order_id") or item.get("item_id") not in by_item:
-                completed.append(item)
-                continue
-            enriched = dict(item)
-            enriched["order_id"] = str(by_item[item["item_id"]])
-            completed.append(enriched)
-        return completed
+            verified_shipping = remote_id((verified_order.get("shipping") or {}).get("id"))
+            if remote_id(ship_id) != verified_shipping:
+                raise AdmissionError("Shipment resource does not match verified own order")
+        except AdmissionError as exc:
+            raise ValidationError(str(exc)) from exc
+        membership = admitted or self._meli_admit_shipment_orders(
+            meli, ship_id, verified_order, seller_id)
+        if (not membership["complete"] or len(membership["orders"]) != 1
+                or len(verified_order["order_items"]) != 1):
+            raise ValidationError("Shipment source-line projection is pending T4-B/C")
+        try:
+            admitted_shipping = remote_id(
+                (membership["orders"][0].get("shipping") or {}).get("id"))
+            if admitted_shipping != verified_shipping:
+                raise AdmissionError("Admitted membership belongs to another shipment resource")
+        except AdmissionError as exc:
+            raise ValidationError(str(exc)) from exc
+        source = verified_order["order_items"][0]["item"]
+        return [{"order_id": remote_id(row["order_id"]), "item_id": row["item_id"],
+                 "variation_id": row.get("variation_id"),
+                 "quantity": row["requested_quantity"],
+                 "description": source.get("title") or source["id"]}
+                for row in membership["associations"]]
 
     #Return shipment object based on mercadolibre.orders "order"
-    def fetch_shipment( self, order, meli=None, config=None ):
+    def fetch_shipment( self, order, meli=None, config=None, verified_order=None ):
         #_logger.info("ship fetch")
         company = (config and "company_id" in config._fields and config.company_id) or config or self.env.user.company_id
         if not config:
@@ -1293,10 +1268,40 @@ class mercadolibre_shipment(models.Model):
 
         orders_obj = self.env['mercadolibre.orders']
         shipment_obj = self.env['mercadolibre.shipment']
+        seller_identity = orders_obj._meli_assert_order_admission_actor(config)
+        if not order:
+            return None
+        try:
+            persisted_seller = ast.literal_eval(order.seller or "")
+            orders_obj._meli_preflight_order_history(
+                {"id": order.order_id, "seller": persisted_seller,
+                 "pack_id": order.pack_id or None, "shipping": {"id": order.shipping_id}},
+                config, local_id=order.id)
+        except (ValueError, SyntaxError, AttributeError) as exc:
+            raise ValidationError("Shipment requires a known own source order") from exc
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
             if meli.need_login():
                 self.env['meli.util']._meli_require_reconnect()
+        try:
+            if verified_order is None:
+                response = meli.get("/orders/" + remote_id(order.order_id),
+                                    {"access_token": meli.access_token})
+                verified_order, metadata = snapshot_response(response)
+                if metadata["status"] not in (200, 206):
+                    raise AdmissionError("Individual own shipment order is unavailable")
+            verified_order = verify_order(verified_order, seller_identity,
+                                          expected_id=order.order_id,
+                                          expected_pack=order.pack_id or None)
+            fresh_shipping = remote_id((verified_order.get("shipping") or {}).get("id"))
+            if fresh_shipping != remote_id(order.shipping_id):
+                raise AdmissionError("Shipment resource does not match stored own order")
+            admitted = orders_obj._meli_order_admission(verified_order, config, meli)
+        except AdmissionError as exc:
+            raise ValidationError(str(exc)) from exc
+        if admitted["pending"]:
+            return {"error": "Shipment projection is pending",
+                    "admission_pending": admitted["pending"]}
 
         ship_id = False
         shipment = None
@@ -1616,7 +1621,10 @@ class mercadolibre_shipment(models.Model):
                         _logger.error( items_json["message"] )
                     else:
                         if meli.access_token != "PASIVA":
-                            items_json = self._shipment_items_with_order_id(items_json, meli=meli, ship_id=ship_id)
+                            items_json = self._shipment_items_with_order_id(
+                                items_json, meli=meli, ship_id=ship_id,
+                                verified_order=verified_order, seller_id=seller_identity,
+                                admitted=admitted)
 
                         if (len(items_json)>1 or ( len(items_json)==1 and order.pack_order==True ) ):
                             #_logger.info("Es carrito")
@@ -1661,19 +1669,10 @@ class mercadolibre_shipment(models.Model):
                             #We can create order with all items now
                             ship_fields["orders"] = [(6, 0, all_orders_ids)]
 
-                #shipment = shipment_obj.search([('shipping_id','=', ship_id)],limit=1)
-                query = """SELECT id
-                FROM   mercadolibre_shipment
-                WHERE
-                shipping_id = '%s'
-                """ % (ship_id)
-                cr = MeliCr( self )
-                respquery = cr.execute(query)
-                results = cr.fetchall()
-                shipment_ids = results
-                shipment = False
-                #_logger.info("shipment_ids:"+str(shipment_ids)+" ship_id:"+str(ship_id))
-                if (not shipment_ids):
+                # Hidden historical roots must not be adopted through raw SQL
+                # and elevation. A hidden unique collision aborts, not rebinds.
+                shipment = shipment_obj.search([('shipping_id', '=', str(ship_id))])
+                if (not shipment):
                 #if ( or len(shipment)==0):
                     #_logger.info("Importing shipment: " + str(ship_id))
                     #_logger.info(str(ship_fields))
@@ -1682,8 +1681,6 @@ class mercadolibre_shipment(models.Model):
                         #_logger.info("Created shipment ok!")
                         pass;
                 else:
-                    #_logger.info("Updating shipment: " + str(ship_id))
-                    shipment = shipment_obj.sudo().browse(shipment_ids and shipment_ids[0])
                     if (shipment):
                         shipment.write((ship_fields))
 

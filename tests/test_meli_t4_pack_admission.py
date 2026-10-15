@@ -323,6 +323,20 @@ class SourceBoundaryTests(unittest.TestCase):
         return next(node for node in ast.walk(tree)
                     if isinstance(node, ast.FunctionDef) and node.name == name)
 
+    def test_actor_and_history_guard_precede_capable_client(self):
+        method = self.method("orders.py", "orders_update_order_json")
+        source = ast.unparse(method)
+        self.assertLess(source.index("_meli_assert_order_admission_actor"),
+                        source.index("get_new_instance"))
+        self.assertLess(source.index("_meli_preflight_order_history"),
+                        source.index("get_new_instance"))
+        self.assertLess(source.index("_meli_order_admission"), source.index("buyers_obj"))
+
+    def test_old_by_item_membership_map_is_removed(self):
+        source = ast.unparse(self.method("shipment.py", "_shipment_items_with_order_id"))
+        self.assertNotIn("by_item", source)
+        self.assertIn("verified_order", source)
+
     def test_generic_owner_hook_does_not_depend_on_bridge(self):
         source = ast.unparse(self.method("orders.py", "_meli_assert_order_admission_actor"))
         self.assertIn("env.su", source)
@@ -410,6 +424,36 @@ class ExecutedGuardAndIngressTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.guard("_meli_preflight_order_history")(probe, order(), company)
 
+    def test_pack_pending_precedes_any_legacy_commercial_mutation(self):
+        source = ast.unparse(self.method("orders.py", "orders_update_order_json"))
+        self.assertLess(source.index("admission_pending"), source.index("prepare_ml_order_vals"))
+
+    def test_outer_ingresses_guard_before_constructing_client(self):
+        for name in ("orders_import_order", "orders_update_order", "orders_query_iterate",
+                     "orders_resync_status", "update_order_status"):
+            with self.subTest(name=name):
+                source = ast.unparse(self.method("orders.py", name))
+                self.assertLess(source.index("_meli_assert_order_admission_actor"),
+                                source.index("get_new_instance"))
+
+    def test_direct_status_update_checks_pending_before_writing_status(self):
+        source = ast.unparse(self.method("orders.py", "update_order_status"))
+        self.assertLess(source.index("admission_pending"), source.index("order.status ="))
+
+    def test_admission_error_cannot_enter_legacy_effect_fallback(self):
+        node = self.method("orders.py", "orders_update_order")
+        handlers = [handler for child in ast.walk(node) if isinstance(child, ast.Try)
+                    for handler in child.handlers]
+        rejection = next(handler for handler in handlers
+                         if isinstance(handler.type, ast.Tuple)
+                         and "AccessError" in ast.unparse(handler.type))
+        self.assertIsInstance(rejection.body[0], ast.Raise)
+
+    def test_shipment_existing_identity_is_not_elevated(self):
+        source = ast.unparse(self.method("shipment.py", "fetch_shipment"))
+        self.assertFalse("shipment_obj.sudo()" in source)
+        self.assertFalse("SELECT id" in source)
+
     def test_history_checks_existing_shipping_root(self):
         source = ast.unparse(self.method("orders.py", "_meli_preflight_order_history"))
         self.assertTrue("mercadolibre.shipment" in source)
@@ -475,5 +519,121 @@ class SamePackParentHistoryTests(unittest.TestCase):
             self.guard("_meli_preflight_order_history")(probe, order(), company))
 
 
+
+
+class ShipmentResourceBindingTests(unittest.TestCase):
+    """Execute real shipment methods, stopping before main-resource effects."""
+
+    class MainResourceRead(RuntimeError):
+        pass
+
+    def body(self, filename, name):
+        node = SourceBoundaryTests.method(self, filename, name)
+        node.decorator_list = []
+        scope = {
+            "ast": ast, "ValidationError": ValueError,
+            "AdmissionError": admission.AdmissionError,
+            "remote_id": admission.remote_id, "verify_order": admission.verify_order,
+            "snapshot_response": admission.snapshot_response,
+            "_logger": SimpleNamespace(info=lambda *args: None),
+            "SHIPMENTS_NEW_FORMAT_HEADERS": {"x-format-new": "true"},
+        }
+        exec(compile(ast.Module(body=[node], type_ignores=[]),
+                     "real-shipment-binding", "exec"), scope)
+        return scope[name]
+
+    def membership(self, source):
+        return {"orders": [source], "associations": [association()],
+                "complete": True, "pending": None, "responses": []}
+
+    def fetch_fixture(self, source, stored_shipping="800"):
+        test = self
+
+        class Client(MutableClient):
+            def get(self, path, params, extra_headers=None):
+                if path in self.responses:
+                    return super().get(path, params, extra_headers)
+                self.calls.append((path, deepcopy(extra_headers)))
+                raise test.MainResourceRead(path)
+
+        row = association()
+        row["pack_id"] = None
+        client = Client({"/shipments/800/orders": (200, [row], {})})
+        company = SimpleNamespace(id=1, _fields={})
+        stored = SimpleNamespace(
+            id=1, order_id="101", seller="{'id': 42}", pack_id=False,
+            shipping_id=stored_shipping, _fields={"shipping_id": True},
+        )
+        shipment_model = SimpleNamespace(
+            _meli_admit_shipment_orders=lambda meli, sid, current, seller:
+                admission.collect_membership(
+                    meli, sid, current, seller, headers={"X-New-Domain": "true"}),
+        )
+        orders_model = SimpleNamespace(
+            env={"mercadolibre.shipment": shipment_model},
+            _meli_assert_order_admission_actor=lambda config: "42",
+            _meli_preflight_order_history=lambda *args, **kwargs: None,
+        )
+        orders_model._meli_order_admission = lambda current, config, meli: self.body(
+            "orders.py", "_meli_order_admission")(orders_model, current, config, meli)
+        env = {name: SimpleNamespace() for name in (
+            "sale.order", "sale.order.line", "product.product",
+            "product.pricelist", "res.partner",
+        )}
+        env.update({"mercadolibre.orders": orders_model,
+                    "mercadolibre.shipment": shipment_model})
+        return SimpleNamespace(env=env), stored, company, client
+
+    def test_fetch_rejects_changed_fresh_shipment_before_any_resource_get(self):
+        source = order(pack=None)
+        probe, stored, company, client = self.fetch_fixture(source, "900")
+        with self.assertRaises(ValueError):
+            self.body("shipment.py", "fetch_shipment")(
+                probe, stored, meli=client, config=company, verified_order=source)
+        self.assertEqual(client.calls, [])
+
+    def test_fetch_requires_fresh_and_stored_shipment_identity(self):
+        for fresh, stored_id in ((None, "900"), ({}, "900"), ({"id": 800}, None)):
+            source = order(pack=None)
+            source["shipping"] = fresh
+            probe, stored, company, client = self.fetch_fixture(source, stored_id)
+            with self.subTest(fresh=fresh, stored=stored_id):
+                with self.assertRaises(ValueError):
+                    self.body("shipment.py", "fetch_shipment")(
+                        probe, stored, meli=client, config=company, verified_order=source)
+                self.assertEqual(client.calls, [])
+
+    def test_admitted_shortcut_requires_the_same_fresh_resource(self):
+        source = order()
+        missing = deepcopy(source)
+        missing.pop("shipping")
+        other = deepcopy(source)
+        other["shipping"]["id"] = 900
+        cases = ((900, source, source), (800, missing, source), (800, source, other))
+        for requested, verified, admitted_source in cases:
+            with self.subTest(requested=requested, verified=verified.get("shipping"),
+                              admitted=admitted_source.get("shipping")):
+                with self.assertRaises(ValueError):
+                    self.body("shipment.py", "_shipment_items_with_order_id")(
+                        SimpleNamespace(), [], ship_id=requested, verified_order=verified,
+                        seller_id="42", admitted=self.membership(admitted_source))
+
+    def test_matching_fetch_reaches_only_the_verified_main_resource(self):
+        source = order(pack=None)
+        probe, stored, company, client = self.fetch_fixture(source)
+        with self.assertRaisesRegex(self.MainResourceRead, "/shipments/800$"):
+            self.body("shipment.py", "fetch_shipment")(
+                probe, stored, meli=client, config=company, verified_order=source)
+        self.assertEqual([path for path, _ in client.calls],
+                         ["/shipments/800/orders", "/shipments/800"])
+
+    def test_matching_admitted_resource_keeps_explicit_logistic_rows(self):
+        source = order()
+        rows = self.body("shipment.py", "_shipment_items_with_order_id")(
+            SimpleNamespace(), [], ship_id="800", verified_order=source,
+            seller_id="42", admitted=self.membership(source))
+        self.assertEqual(rows, [{"order_id": "101", "item_id": "MLA123",
+                                "variation_id": 7, "quantity": 1,
+                                "description": "MLA123"}])
 if __name__ == "__main__":
     unittest.main()
