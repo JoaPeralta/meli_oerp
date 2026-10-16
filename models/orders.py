@@ -107,7 +107,7 @@ except ImportError:
 from . import versions
 import time
 try:
-    from psycopg2 import errors as psycopg2_errors
+    from psycopg2 import errors as psycopg2_errors, sql
 except ImportError:
     psycopg2_errors = None
 from .versions import *
@@ -2536,6 +2536,115 @@ class mercadolibre_orders(models.Model):
             return items.create(incoming)
 
     @api.model
+    def _meli_assert_individual_sale_root(self, order, root):
+        """Keep the scalar importer out of shared commercial history until T4-C4.
+
+        Inspect references only, including rule-hidden links; never read a
+        sibling's data or elevate an ORM write. The source-line seam remains
+        independently capable of exact-source updates on a shared root.
+        """
+        root.ensure_one()
+        root.check_access("read")
+        root.check_access("write")
+        order_id = order.id if order else 0
+        if order and order.sale_order and order.sale_order != root:
+            raise ValidationError("The selected sale contradicts its individual source")
+        membership = root._fields["meli_orders"]
+        root.flush_recordset(["meli_orders"])
+        self.env["mercadolibre.orders"].flush_model(["sale_order"])
+        lines = self.env["sale.order.line"]
+        field = "meli_source_order_item_id"
+        if field not in lines._fields:
+            raise ValidationError("An installed durable-source bridge is required")
+        lines.flush_model([field, "order_id"])
+        self.env["mercadolibre.order_items"].flush_model(["order_id"])
+        self.env.cr.execute(sql.SQL(
+            "SELECT EXISTS (SELECT 1 FROM mercadolibre_orders "
+            "WHERE sale_order = %s AND id <> %s) OR "
+            "EXISTS (SELECT 1 FROM {relation} WHERE {root_column} = %s "
+            "AND {source_column} <> %s) OR "
+            "EXISTS (SELECT 1 FROM sale_order_line AS line "
+            "JOIN mercadolibre_order_items AS source ON source.id = line.meli_source_order_item_id "
+            "WHERE line.order_id = %s AND (source.order_id IS NULL OR source.order_id <> %s))"
+        ).format(relation=sql.Identifier(membership.relation),
+                 root_column=sql.Identifier(membership.column1),
+                 source_column=sql.Identifier(membership.column2)),
+            [root.id, order_id, root.id, order_id, root.id, order_id])
+        if self.env.cr.fetchone()[0]:
+            raise ValidationError("Shared sale roots require verified pack projection")
+
+    @api.model
+    def _meli_upsert_source_sale_line(self, source, root, values, config):
+        """Project one exact source without adopting anonymous commercial history.
+
+        Hidden matches are integrity failures, not permission to duplicate or
+        elevate. This bounded operation does not coordinate concurrent imports.
+        The installed bridge owns binding and economic validation through ORM.
+        """
+        seller = self._meli_assert_order_admission_actor(config)
+        company = config.company_id if "company_id" in config._fields else config
+        source.ensure_one()
+        source.check_access("read")
+        root.ensure_one()
+        root.check_access("read")
+        root.check_access("write")
+        order = source.order_id
+        order.check_access("read")
+        if (order.company_id != company or root.company_id != company
+                or order.seller_id != self.env.user or order.sale_order != root):
+            raise AccessError("Sale projection requires its configured own source/root")
+        self._meli_preflight_order_history(
+            {"id": order.order_id, "seller": {"id": seller}}, config, local_id=order.id)
+        field = "meli_source_order_item_id"
+        lines = self.env["sale.order.line"]
+        if field not in lines._fields:
+            raise ValidationError("An installed durable-source bridge is required")
+        incoming = dict(values)
+        expected = {"order_id": root.id, "company_id": company.id,
+                    "product_id": source.product_id.id,
+                    "meli_order_item_id": source.order_item_id,
+                    "meli_order_item_variation_id": source.order_item_variation_id or False}
+        for name, value in expected.items():
+            if (incoming.get(name) or False) != value:
+                raise ValidationError("Sale line identity contradicts its exact source")
+        if field in incoming and incoming[field] != source.id:
+            raise ValidationError("A different durable source cannot be adopted")
+        incoming[field] = source.id
+        exact = lines.search([(field, "=", source.id)])
+        related = lines.search([("order_id", "=", root.id),
+                                ("meli_order_item_id", "=", source.order_item_id)])
+        candidates = exact | related
+        candidates.check_access("read")
+        lines.flush_model([field, "order_id", "meli_order_item_id"])
+        # Existence only: no hidden record content or elevated write escapes.
+        self.env.cr.execute(
+            "SELECT EXISTS (SELECT 1 FROM sale_order_line "
+            "WHERE (meli_source_order_item_id = %s OR "
+            "(order_id = %s AND meli_order_item_id = %s)) AND NOT (id = ANY(%s)))",
+            [source.id, root.id, source.order_item_id, candidates.ids],
+        )
+        if self.env.cr.fetchone()[0]:
+            raise AccessError("Sale source identity is not completely accessible")
+        if len(exact) > 1 or any(not line[field] for line in related):
+            raise ValidationError("Sale source history is ambiguous or anonymous")
+        if exact:
+            exact.check_access("write")
+            for name, value in expected.items():
+                current = exact[name]
+                current = current.id if name in ("order_id", "company_id", "product_id") else current or False
+                if current != value:
+                    raise ValidationError("Bound sale line contradicts its exact source")
+        tax_field, uom_field = SaleOrderLineTaxField(self), SaleOrderLineUomField(self)
+        economics = {name: incoming[name] for name in ("product_uom_qty", "price_unit", uom_field)}
+        if tax_field in incoming:
+            economics[tax_field] = incoming[tax_field]
+        with self.env.cr.savepoint():
+            line = exact or lines.create(incoming)
+            # No generic identity/economic write or replay-time tax remapping.
+            line._meli_source_economic_update(source.id, economics)
+            return line
+
+    @api.model
     def _meli_order_admission(self, payload, config, meli):
         """Own admission is distinct from the pending durable pack projection."""
         seller_id = self._meli_assert_order_admission_actor(config)
@@ -2676,7 +2785,7 @@ class mercadolibre_orders(models.Model):
                 if (sorder_s):
                     #_logger.info(sorder_s)
                     if (len(sorder_s)>1):
-                        sorder = sorder_s[0]
+                        raise ValidationError("Individual sale root identity is ambiguous")
                     else:
                         sorder = sorder_s
         else:
@@ -2692,11 +2801,16 @@ class mercadolibre_orders(models.Model):
             sorder_s = saleorder_obj.search([ ('meli_order_id','=','%s' % (str(order_json["id"]))) ] )
             if (sorder_s):
                 if (len(sorder_s)>1):
-                    sorder = sorder_s[0]
+                    raise ValidationError("Individual sale root identity is ambiguous")
                 else:
                     sorder = sorder_s
             #if (sorder_s and len(sorder_s)>0):
             #    sorder = saleorder_obj.browse(sorder_s[0] )
+
+        if order and order.sale_order and (not sorder or order.sale_order != sorder):
+            raise ValidationError("Stored individual sale root contradicts importer selection")
+        if sorder:
+            self._meli_assert_individual_sale_root(order, sorder)
 
         if (sorder and sorder.meli_update_forbidden):
             _logger.error("Forbidden to upate by meli_oerp" )
@@ -4566,7 +4680,7 @@ class mercadolibre_orders(models.Model):
                         'order_id': sorder.id,
                         'meli_order_item_id': Item['item']['id'],
                         'meli_order_item_iva': order_item_iva,
-                        'meli_order_item_variation_id': Item['item']['variation_id'],
+                        'meli_order_item_variation_id': order_item_id.order_item_variation_id or False,
                         'product_id': product_related_obj.id,
                         'product_uom_qty': Item['quantity'],
                         'name': product_related_obj.display_name or Item['item']['title'],
@@ -4574,53 +4688,8 @@ class mercadolibre_orders(models.Model):
                     saleorderline_item_fields[uom_field] = product_related_obj.uom_id.id
                     saleorderline_item_fields.update( self._set_product_unit_price( product_related_obj=product_related_obj, Item=Item, config=config ) )
 
-                    #TODO: agregar meli_order_id !!! (mismo item dos ordenes diferentes...puede pasar...)
-                    saleorderline_item_ids = saleorderline_obj.search( [('meli_order_item_id','=',saleorderline_item_fields['meli_order_item_id']),
-                                                                        ('meli_order_item_variation_id','=',saleorderline_item_fields['meli_order_item_variation_id']),
-                                                                        ('order_id','=',sorder.id)], limit=1 )
-
-                    if not saleorderline_item_ids:
-                        if sorder.meli_paid_amount==0.0 or 1.1<abs((sorder.meli_paid_amount-(sorder.meli_discount_seller_amount or 0))-sorder.amount_total):
-                            saleorderline_item_ids = saleorderline_obj.create( ( saleorderline_item_fields ))
-                    
-                    if saleorderline_item_ids:
-                        #_logger.info(saleorderline_item_ids:"+str(saleorderline_item_ids))
-                        #_logger.info(product_related_obj taxes_id:"+str(product_related_obj.taxes_id))
-                        #_logger.info(product_related_obj taxes_id:"+str(product_related_obj.taxes_id and product_related_obj.taxes_id.company_id))
-                        #_logger.info(saleorderline_item_ids tax:"+str(saleorderline_item_ids[tax_field]))
-                        #_logger.info(saleorderline_item_ids tax company_id:"+str(saleorderline_item_ids[tax_field].company_id))
-                        tax_iva_name = saleorderline_item_ids.meli_order_item_iva
-                        tax_iva_name = tax_iva_name
-                        tax_iva_id = None
-                        if tax_iva_name and product_related_obj.taxes_id:
-                            for txid in product_related_obj.taxes_id:
-                                if ( tax_names_equivalent(txid.name,tax_iva_name) ):
-                                    tax_iva_id = txid
-
-                        for tid in saleorderline_item_ids[tax_field]:
-
-                            if (tid.company_id.id!=sorder.company_id.id 
-                                or (tax_iva_id and tax_iva_id!=tid) ):
-                                #remove
-                                saleorderline_item_ids[tax_field] = [(3, tid.id)]
-
-                        if not saleorderline_item_ids[tax_field] and product_related_obj.taxes_id:
-                            for txid in product_related_obj.taxes_id:
-                                if (txid.company_id.id==sorder.company_id.id):
-                                    if (tax_iva_id):
-                                        if (tax_iva_id!=tid):
-                                            #add
-                                            saleorderline_item_ids[tax_field] = [(4, txid.id)]
-                                    else:
-                                        #add
-                                        saleorderline_item_ids[tax_field] = [(4, txid.id)]
-
-                        if (sorder.state and sorder.state in ['done','sale']) or ("locked" in sorder._fields and sorder.locked):
-                            #_logger.warning("Orden bloqueada no se puede actualizar")
-                            pass;
-                        else:
-                            _logger.info("Sale Order line write")
-                            saleorderline_item_ids.write( ( saleorderline_item_fields ) )
+                    self._meli_upsert_source_sale_line(
+                        order_item_id, sorder, saleorderline_item_fields, config)
 
         if 'payments' in order_json:
             payments = order_json['payments']
