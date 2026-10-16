@@ -131,6 +131,10 @@ class sale_order_line(models.Model):
     meli_order_item_variation_id = fields.Char('Meli Order Item Variation Id')
     meli_order_item_iva = fields.Char("Meli Order Item IVA")
 
+    def _meli_source_economic_update(self, source_id, values):
+        """Directional extension point; no source-aware writes without an adapter."""
+        raise ValidationError("An installed source-economic bridge adapter is required")
+
 class sale_order(models.Model):
     _inherit = "sale.order"
 
