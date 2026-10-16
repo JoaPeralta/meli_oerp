@@ -29,6 +29,7 @@ import ast
 from functools import wraps
 from .meli_pack_admission import (
     AdmissionError, remote_id, verify_order, snapshot_response, enrich_buyer,
+    pack_order_ids, verify_pack_commerce,
 )
 from .meli_oerp_config import *
 
@@ -2645,6 +2646,278 @@ class mercadolibre_orders(models.Model):
             return line
 
     @api.model
+    def _meli_is_pack_route(self, payload, order=None):
+        """Exception routing only: never an admission or write capability."""
+        payload = payload if isinstance(payload, dict) else {}
+        if payload.get("pack_id") or "pack_order" in (payload.get("tags") or []):
+            return True
+        records = order if order is not None else self.search([("order_id", "=", str(payload.get("id") or ""))])
+        return any(record.pack_id or record.sale_order and (
+            (record.sale_order.meli_order_id or "").startswith("pack:")
+            or len(record.sale_order.meli_orders) > 1) for record in records)
+
+    @api.model
+    def _meli_pack_local_orders(self, ids, pack_id, config):
+        """Read own local identities, including an integrity-only hidden check."""
+        seller = self._meli_assert_order_admission_actor(config)
+        records = self.search(["|", ("order_id", "in", ids), ("pack_id", "=", pack_id)])
+        records.check_access("read")
+        records.check_access("write")
+        self.flush_model(["order_id", "pack_id"])
+        self.env.cr.execute(
+            "SELECT EXISTS (SELECT 1 FROM mercadolibre_orders "
+            "WHERE (order_id = ANY(%s) OR pack_id = %s) AND NOT (id = ANY(%s)))",
+            [ids, pack_id, records.ids])
+        if self.env.cr.fetchone()[0]:
+            raise AccessError("Pack identities are not completely accessible")
+        seen = set()
+        for order in records:
+            if order.order_id in seen or order.order_id not in ids or order.pack_id != pack_id:
+                raise ValidationError("Local pack membership is duplicate, stale or contradictory")
+            seen.add(order.order_id)
+            self._meli_preflight_order_history(
+                {"id": order.order_id, "pack_id": pack_id, "seller": {"id": seller}},
+                config, local_id=order.id)
+        return records
+
+    @api.model
+    def _meli_collect_pack_commerce(self, payload, config, meli):
+        """Recompute provenance; caller flags/snapshots never authorize a GET.
+
+        /packs is integration-visible, not a global cross-seller certificate.
+        An unclassified member must already have a verified own local identity
+        before fetching it. Shipment admission supplies the other supported
+        first-discovery path through explicit own seller associations.
+        """
+        seller = self._meli_assert_order_admission_actor(config)
+        current = verify_order(payload, seller)
+        pack_id = remote_id(current.get("pack_id"))
+
+        def get(path):
+            body, metadata = snapshot_response(meli.get(path, {"access_token": meli.access_token}))
+            if metadata["status"] != 200 or metadata["missing"]:
+                raise ValidationError("A complete fresh pack/order response is unavailable")
+            return body
+
+        pack = get("/packs/" + pack_id)
+        ids = pack_order_ids(pack, pack_id)
+        if remote_id(current["id"]) not in ids:
+            raise ValidationError("The current own order is absent from its visible pack")
+        local = self._meli_pack_local_orders(ids, pack_id, config)
+        admitted = self._meli_order_admission(current, config, meli)
+        if not admitted["complete"]:
+            raise ValidationError("Own shipment membership remains incomplete")
+        if any(row["status"] != 200 for row in admitted["responses"]):
+            raise ValidationError("Partial own membership snapshots cannot project commerce")
+        known = {remote_id(row["id"]) for row in admitted["orders"]}
+        if known - set(ids):
+            raise ValidationError("Pack and own shipment populations contradict one another")
+        authorized = known | set(local.mapped("order_id"))
+        if set(ids) - authorized:
+            raise ValidationError("Own visible pack discovery is pending; unknown members were not fetched")
+        snapshots = []
+        for oid in ids:
+            # Every ID is independently classified OWN before any member GET.
+            source = verify_order(get("/orders/" + oid), seller, expected_id=oid, expected_pack=pack_id)
+            self._meli_preflight_order_history(source, config)
+            discounts = get("/orders/" + oid + "/discounts")
+            if not isinstance(discounts, dict) or discounts.get("details") != []:
+                raise ValidationError("Discount allocation is unknown or unsupported")
+            snapshots.append(source)
+        if get("/packs/" + pack_id) != pack:
+            raise ValidationError("Visible pack changed while collecting its own snapshots")
+        return verify_pack_commerce(pack, snapshots, seller)
+
+    @api.model
+    def _meli_import_pack(self, payload, config, meli):
+        """Atomically project one verified own visible group, always as a draft.
+
+        Never recurse through the scalar importer, remove pack_id, adopt an
+        individual root, import fiscal identities, confirm or invoke logistics.
+        The existing protected source/economic operations remain authoritative.
+        """
+        with self.env.cr.savepoint():
+            try:
+                group = self._meli_collect_pack_commerce(payload, config, meli)
+            except AdmissionError as exc:
+                raise ValidationError(str(exc)) from exc
+            company = config.company_id if "company_id" in config._fields else config
+            plist = config.mercadolibre_pricelist
+            if not plist or plist.currency_id.name != group["currency"]:
+                raise ValidationError("A compatible configured pack pricelist is required")
+            if ("mercadolibre_channel_mkt" in config._fields and config.mercadolibre_channel_mkt
+                    and group["channel"] not in config.mercadolibre_channel_mkt.mapped("code")):
+                raise ValidationError("Pack channel is excluded by its configuration")
+            for source in group["orders"]:
+                date = fields.Datetime.to_datetime(ml_datetime(source["date_closed"] or source["date_created"]))
+                if not date:
+                    raise ValidationError("Explicit valid child order dates are required")
+                for name, lower in (("mercadolibre_filter_order_datetime_start", True),
+                                    ("mercadolibre_filter_order_datetime", True),
+                                    ("mercadolibre_filter_order_datetime_to", False)):
+                    boundary = config[name] if name in config._fields else False
+                    if boundary and ((lower and boundary > date) or (not lower and boundary < date)):
+                        raise ValidationError("Pack child is outside the configured date range")
+
+            partners = self.env["res.partner"].search([
+                ("meli_buyer_id", "=", group["buyer_id"]),
+                "|", ("company_id", "=", False), ("company_id", "=", company.id)])
+            partners.check_access("read")
+            if len(partners) != 1 or partners.property_account_position_id:
+                raise ValidationError("One existing compatible buyer mapping without fiscal remapping is required")
+            partner = partners
+            partner.flush_recordset(["meli_buyer_id", "company_id"])
+            self.env.cr.execute(
+                "SELECT EXISTS (SELECT 1 FROM res_partner WHERE meli_buyer_id = %s "
+                "AND (company_id IS NULL OR company_id = %s) AND NOT (id = ANY(%s)))",
+                [group["buyer_id"], company.id, partner.ids])
+            if self.env.cr.fetchone()[0]:
+                raise AccessError("Pack buyer mapping is not completely accessible")
+
+            ids = [remote_id(row["id"]) for row in group["orders"]]
+            orders = self._meli_pack_local_orders(ids, group["pack_id"], config)
+            roots = orders.mapped("sale_order")
+            sales = self.env["sale.order"]
+            identity = "pack:" + group["pack_id"]
+            roots |= sales.search([("meli_order_id", "=", identity)])
+            sales.flush_model(["meli_order_id"])
+            self.env.cr.execute(
+                "SELECT EXISTS (SELECT 1 FROM sale_order WHERE meli_order_id = %s AND NOT (id = ANY(%s)))",
+                [identity, roots.ids])
+            if self.env.cr.fetchone()[0]:
+                raise AccessError("Pack sale identity is not completely accessible")
+            if len(roots) > 1:
+                raise ValidationError("Existing sale roots cannot be merged into a pack")
+            root = roots
+            if root:
+                root.check_access("read")
+                root.check_access("write")
+                if (root.meli_order_id != identity or root.state != "draft" or root.picking_ids
+                        or root.invoice_ids or root.meli_update_forbidden or root.meli_discount_seller_amount
+                        or root.meli_coupon_amount or root.meli_financing_fee_amount or root.meli_shipping_amount
+                        or root.company_id != company or root.pricelist_id != plist
+                        or root.partner_id != partner or root.partner_invoice_id != partner
+                        or root.partner_shipping_id != partner or root.fiscal_position_id
+                        or root.meli_shipping_id and root.meli_shipping_id != (group["shipping_id"] or False)):
+                    raise ValidationError("Existing pack root is processed or incompatible")
+                if set(root.meli_orders.ids) != set(orders.ids) or any(order.sale_order != root for order in orders):
+                    raise ValidationError("Existing pack root membership is incomplete or contradictory")
+                membership = root._fields["meli_orders"]
+                root.flush_recordset(["meli_orders"])
+                self.flush_model(["sale_order"])
+                self.env.cr.execute(sql.SQL(
+                    "SELECT EXISTS (SELECT 1 FROM mercadolibre_orders WHERE sale_order = %s AND NOT (id = ANY(%s))) OR "
+                    "EXISTS (SELECT 1 FROM {relation} WHERE {root_column} = %s AND NOT ({member_column} = ANY(%s)))"
+                ).format(relation=sql.Identifier(membership.relation),
+                         root_column=sql.Identifier(membership.column1),
+                         member_column=sql.Identifier(membership.column2)),
+                    [root.id, orders.ids, root.id, orders.ids])
+                if self.env.cr.fetchone()[0]:
+                    raise AccessError("Pack root has another or inaccessible member")
+
+            products = {}
+            for source in group["orders"]:
+                item = source["order_items"][0]["item"]
+                variation = remote_id(item["variation_id"]) if item.get("variation_id") is not None else False
+                product = self.env["product.product"].search([
+                    ("meli_id", "=", item["id"]), ("meli_id_variation", "=", variation),
+                    "|", ("company_id", "=", False), ("company_id", "=", company.id)])
+                product.check_access("read")
+                if (len(product) != 1 or not product.uom_id or product.meli_default_stock_product
+                        or product.type == "combo"
+                        or "bom_ids" in product._fields and any(bom.type == "phantom" for bom in product.bom_ids)):
+                    raise ValidationError("An exact existing product without split/default-stock projection is required")
+                product.flush_model(["meli_id", "meli_id_variation", "product_tmpl_id"])
+                self.env["product.template"].flush_model(["company_id"])
+                self.env.cr.execute(
+                    "SELECT EXISTS (SELECT 1 FROM product_product AS product "
+                    "JOIN product_template AS template ON template.id = product.product_tmpl_id "
+                    "WHERE product.meli_id = %s AND COALESCE(product.meli_id_variation, '') = %s "
+                    "AND (template.company_id IS NULL OR template.company_id = %s) AND NOT (product.id = ANY(%s)))",
+                    [item["id"], variation or "", company.id, product.ids])
+                if self.env.cr.fetchone()[0]:
+                    raise AccessError("Pack product mapping is ambiguous or inaccessible")
+                products[remote_id(source["id"])] = product
+
+            item_model = self.env["mercadolibre.order_items"]
+            existing = item_model.search([("order_id", "in", orders.ids)])
+            existing.check_access("read")
+            item_model.flush_model(["order_id"])
+            self.env.cr.execute(
+                "SELECT EXISTS (SELECT 1 FROM mercadolibre_order_items WHERE order_id = ANY(%s) AND NOT (id = ANY(%s)))",
+                [orders.ids, existing.ids])
+            if self.env.cr.fetchone()[0]:
+                raise AccessError("Pack sources are not completely accessible")
+            if root:
+                lines = self.env["sale.order.line"].search([("order_id", "=", root.id)])
+                lines.check_access("read")
+                lines.flush_model(["order_id"])
+                self.env.cr.execute(
+                    "SELECT EXISTS (SELECT 1 FROM sale_order_line WHERE order_id = %s AND NOT (id = ANY(%s)))",
+                    [root.id, lines.ids])
+                if self.env.cr.fetchone()[0]:
+                    raise AccessError("Pack commercial history is not completely accessible")
+                if any(not line.meli_source_order_item_id or line.meli_source_order_item_id not in existing for line in lines):
+                    raise ValidationError("Anonymous or unrelated pack sale history cannot be adopted")
+
+            if not root:
+                root = sales.create({"name": "ML PACK " + group["pack_id"], "company_id": company.id,
+                    "partner_id": partner.id, "partner_invoice_id": partner.id, "partner_shipping_id": partner.id,
+                    "pricelist_id": plist.id, "fiscal_position_id": False, "meli_order_id": identity})
+            for source in group["orders"]:
+                oid = remote_id(source["id"])
+                order = orders.filtered(lambda row: row.order_id == oid)
+                product = products[oid]
+                values = self.prepare_ml_order_vals(order_json=source, config=config, meli=meli)
+                values.update(pack_id=group["pack_id"], sale_order=root.id,
+                              shipping_id=group["shipping_id"] or False, pack_order=True)
+                if order:
+                    if order.shipping_id and order.shipping_id != (group["shipping_id"] or False):
+                        raise ValidationError("Stored child logistics contradicts the verified pack")
+                    order.write(values)
+                else:
+                    order = self.create(values)
+                    orders |= order
+                old_items = existing.filtered(lambda row: row.order_id == order)
+                item = source["order_items"][0]
+                variation = remote_id(item["item"]["variation_id"]) if item["item"].get("variation_id") is not None else False
+                if len(old_items) > 1 or any(
+                        row.order_item_id != item["item"]["id"]
+                        or (row.order_item_variation_id or False) != variation
+                        or row.product_id != product for row in old_items):
+                    raise ValidationError("Existing child sources are incompatible or ambiguous")
+                source_item = self._meli_upsert_source_item(order, {
+                    "order_id": order.id, "product_id": product.id, "order_item_id": item["item"]["id"],
+                    "order_item_variation_id": variation, "order_item_title": item["item"].get("title", product.name),
+                    "quantity": item["quantity"], "unit_price": str(item["unit_price"]),
+                    "currency_id": source["currency_id"], "sale_fee": item.get("sale_fee", 0)}, config)
+                if not source_item or getattr(source_item, "_name", None) != "mercadolibre.order_items":
+                    raise ValidationError("A child source returned no completed result")
+                tax_field, uom_field = SaleOrderLineTaxField(self), SaleOrderLineUomField(self)
+                taxes = product.taxes_id.filtered(lambda tax: tax.company_id == company)
+                line = self._meli_upsert_source_sale_line(source_item, root, {
+                    "company_id": company.id, "order_id": root.id, "product_id": product.id,
+                    "name": product.display_name, "meli_order_item_id": source_item.order_item_id,
+                    "meli_order_item_variation_id": source_item.order_item_variation_id or False,
+                    "product_uom_qty": item["quantity"], "price_unit": float(item["unit_price"]),
+                    uom_field: product.uom_id.id, tax_field: [(6, 0, taxes.ids)]}, config)
+                if not line or getattr(line, "_name", None) != "sale.order.line":
+                    raise ValidationError("A child projection returned no completed result")
+
+            root.write({"name": "ML PACK " + group["pack_id"], "meli_orders": [(6, 0, orders.ids)],
+                        "meli_status": "paid", "meli_total_amount": float(group["total"]),
+                        "meli_paid_amount": float(group["paid"]), "meli_fee_amount": float(group["fees"]),
+                        "meli_currency_id": group["currency"], "meli_shipping_id": group["shipping_id"] or False})
+            self.env.flush_all()
+            if (root.state != "draft" or root.picking_ids or root.invoice_ids
+                    or len(root.order_line) != len(ids) or set(root.meli_orders.ids) != set(orders.ids)
+                    or root.currency_id.compare_amounts(root.amount_total, float(group["total"]))):
+                raise ValidationError("Pack totals or commercial outputs require unsupported semantics")
+            return {"commercial_group": "draft", "sale_order_id": root.id,
+                    "verified_order_ids": ids, "membership_scope": group["membership_scope"],
+                    "logistics_projected": False}
+
+    @api.model
     def _meli_order_admission(self, payload, config, meli):
         """Own admission is distinct from the pending durable pack projection."""
         seller_id = self._meli_assert_order_admission_actor(config)
@@ -2687,6 +2960,8 @@ class mercadolibre_orders(models.Model):
             raise ValidationError(str(exc)) from exc
         if not meli:
             meli = self.env['meli.util'].get_new_instance(company)
+        if order_json.get("pack_id"):
+            return self._meli_import_pack(order_json, config, meli)
         try:
             admission = self._meli_order_admission(order_json, config, meli)
         except AdmissionError as exc:
@@ -5104,6 +5379,7 @@ class mercadolibre_orders(models.Model):
             _logger.error( order_json["error"] )
             _logger.error( order_json["message"] )
         else:
+            _pack_route = self._meli_is_pack_route(order_json, order)
             try:
                 if meli.access_token=="PASIVA":
                     order_json = None
@@ -5115,6 +5391,9 @@ class mercadolibre_orders(models.Model):
             except (AccessError, ValidationError):
                 raise  # Admission rejection must never enter the effect fallback.
             except Exception as e:
+                if _pack_route:
+                    e._meli_pack_operation_failure = True
+                    raise  # Preserve the group's operation savepoint and caller work.
                 _logger.info("orders_update_order > Error actualizando ORDEN")
                 _logger.error(e, exc_info=True)
                 MeliRollback( self )
@@ -5235,6 +5514,7 @@ class mercadolibre_orders(models.Model):
                         if in_range:
                             __fetch_ids.append(str(order_json["id"]))
                     else:
+                        _pack_route = self._meli_is_pack_route(order_json)
                         _serialization_ex = psycopg2_errors.SerializationFailure if psycopg2_errors else ()
                         for _attempt in range(3):
                             try:
@@ -5242,12 +5522,18 @@ class mercadolibre_orders(models.Model):
                                 MeliCommit( self )
                                 break
                             except _serialization_ex as e:
+                                if _pack_route:
+                                    e._meli_pack_operation_failure = True
+                                    raise  # No nested group retry or global rollback.
                                 MeliRollback( self )
                                 if _attempt < 2:
                                     import time as _time; _time.sleep(0.3 * (_attempt + 1))
                                 else:
                                     _logger.warning("orders_query_iterate > SerializationFailure tras 3 intentos, orden omitida")
                             except Exception as e:
+                                if _pack_route:
+                                    e._meli_pack_operation_failure = True
+                                    raise
                                 _logger.info("orders_query_iterate > Error actualizando ORDEN")
                                 _logger.error(e, exc_info=True)
                                 MeliRollback( self )
@@ -5273,6 +5559,9 @@ class mercadolibre_orders(models.Model):
         try:
             __fetch_ids = self.orders_query_iterate( offset=0, meli=meli, config=config, fetch_id_only=fetch_id_only )
         except Exception as e:
+            # Server-side exception transport only; never an admission capability.
+            if getattr(e, "_meli_pack_operation_failure", False):
+                raise
             _logger.info("orders_query_recent > Error iterando ordenes")
             _logger.error(e, exc_info=True)
             MeliRollback( self )
@@ -5404,6 +5693,15 @@ class mercadolibre_orders(models.Model):
         # (orders_query_iterate, date_desc) NO cubre. Complementario: si el limit trunca,
         # trunca las NUEVAS (ya cubiertas por el sweep normal), nunca las viejas.
         candidates = self.search(domain, order="date_created asc", limit=query_limit)
+
+        # This legacy sweep can cancel an entire sale and globally roll back
+        # on a caught error. A shared/pack root must never enter that loop.
+        # Preflight the whole population outside its broad exception handler,
+        # before Autocommit, a member GET or any child/root mutation.
+        for order in candidates:
+            if order.pack_id or (order.sale_order.meli_order_id or "").startswith("pack:"):
+                raise ValidationError("Pack status projection is pending source-local cancellation semantics")
+            self._meli_assert_individual_sale_root(order, order.sale_order)
 
         Autocommit(self, False)
         checked = changed = cancelled = 0
@@ -5854,13 +6152,16 @@ class mercadolibre_orders_update(models.TransientModel):
 
         Autocommit(self, False)
         rets = []
+        _pack_route = False
         try:
 
             for order_id in orders_ids:
+                _pack_route = False
 
                 #_logger.info(order_update: %s " % (order_id) )
 
                 order = orders_obj.browse(order_id)
+                _pack_route = order._meli_is_pack_route({}, order)
                 ret = order.orders_update_order()
                 #_logger.info("order_update ret:"+str(ret))
                 if ret and type(ret)==dict and 'name' in ret:
@@ -5868,6 +6169,9 @@ class mercadolibre_orders_update(models.TransientModel):
                 if ret and len(ret) and type(ret)==list and ret[0] and "error" in ret[0]:
                     rets.append(ret[0])
         except Exception as e:
+            # Local routing also covers a selected pack's preflight rejection.
+            if _pack_route or getattr(e, "_meli_pack_operation_failure", False):
+                raise
             _logger.info("order_update > Error actualizando ordenes")
             _logger.error(e, exc_info=True)
             MeliRollback( self )

@@ -5,6 +5,7 @@ Logistic requested quantities never replace an order's commercial quantities.
 """
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
+from math import isfinite
 
 
 class AdmissionError(ValueError):
@@ -97,6 +98,94 @@ def enrich_buyer(current, refreshed, seller_id):
         raise AdmissionError("Verified individual buyer enrichment is unavailable")
     current["buyer"] = refreshed["buyer"]
     return current
+
+
+def pack_order_ids(pack, expected_pack):
+    """IDs describe only this integration-visible pack, never seller authority."""
+    if (not isinstance(pack, dict) or remote_id(pack.get("id")) != remote_id(expected_pack)
+            or pack.get("status") != "released" or pack.get("status_detail")):
+        raise AdmissionError("A released, unchanged visible pack is required")
+    rows = pack.get("orders")
+    if not isinstance(rows, list) or not rows:
+        raise AdmissionError("Explicit visible pack membership is required")
+    ids = [remote_id(row.get("id")) for row in rows if isinstance(row, dict)]
+    if len(ids) != len(rows) or len(set(ids)) != len(ids):
+        raise AdmissionError("Visible pack membership is invalid or duplicated")
+    return ids
+
+
+def verify_pack_commerce(pack, snapshots, seller_id):
+    """Validate the complete returned OWN population, not an invisible world.
+
+    This function confers no provenance: its caller must collect responses and
+    authorize every fetch independently. Unsupported allocation stays refused.
+    """
+    if not isinstance(pack, dict) or not isinstance(snapshots, list) or not snapshots:
+        raise AdmissionError("An explicit pack and captured own order population is required")
+    ids = pack_order_ids(pack, pack.get("id"))
+    if not isinstance(pack.get("buyer"), dict) or "shipment" not in pack:
+        raise AdmissionError("Explicit pack buyer and optional-shipment evidence is required")
+    buyer = remote_id(pack["buyer"].get("id"))
+    shipment = pack.get("shipment")
+    if shipment is not None and not isinstance(shipment, dict):
+        raise AdmissionError("Pack shipment must retain its documented object shape")
+    shipping_id = remote_id(shipment["id"]) if shipment and shipment.get("id") else None
+    verified = [verify_order(row, seller_id, expected_pack=pack["id"]) for row in snapshots]
+    seen = [remote_id(row["id"]) for row in verified]
+    if len(seen) != len(set(seen)) or set(seen) != set(ids):
+        raise AdmissionError("Individual snapshots do not exactly cover the visible pack")
+
+    def money(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
+            raise AdmissionError("An explicit finite nonnegative amount is required")
+        try:
+            number = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            raise AdmissionError("An explicit finite nonnegative amount is required") from None
+        if not number.is_finite() or number < 0 or not isfinite(float(number)):
+            raise AdmissionError("An explicit finite nonnegative amount is required")
+        return number
+
+    identity = None
+    total, paid, fees = Decimal(0), Decimal(0), Decimal(0)
+    for row in verified:
+        customer = row.get("buyer") or {}
+        context = row.get("context") or {}
+        if (not isinstance(customer, dict) or not isinstance(context, dict)
+                or not isinstance(row.get("coupon") or {}, dict)
+                or not isinstance(row.get("payments", []), list)):
+            raise AdmissionError("Explicit compatible buyer/channel objects are required")
+        if remote_id(customer.get("id")) != buyer or not context.get("channel"):
+            raise AdmissionError("Pack buyer/channel identity is incompatible")
+        common = (row.get("site_id"), row["currency_id"], context["channel"], customer.get("billing_info"))
+        if not common[0] or (identity is not None and identity != common):
+            raise AdmissionError("Pack company pricing/billing context is incompatible")
+        identity = common
+        if row["status"] != "paid" or row.get("status_detail") or len(row["order_items"]) != 1:
+            raise AdmissionError("Only paid single-source child orders are supported")
+        own_shipping = (row.get("shipping") or {}).get("id")
+        if own_shipping is not None and remote_id(own_shipping) != shipping_id:
+            raise AdmissionError("Child shipment contradicts the visible pack")
+        if shipping_id and own_shipping is None:
+            raise AdmissionError("The child shipment relation is not proven")
+        item = row["order_items"][0]
+        price = money(item["unit_price"])
+        subtotal = item["quantity"] * price
+        if (money(row.get("total_amount")) != subtotal
+                or money(row.get("paid_amount")) != subtotal
+                or money((row.get("coupon") or {}).get("amount", 0))
+                or money(row.get("financing_fee_amount", 0))
+                or money(item.get("full_unit_price", item["unit_price"])) != price
+                or money((row.get("shipping") or {}).get("cost", 0))):
+            raise AdmissionError("Discount, shipping or financing allocation is not supported")
+        total += subtotal
+        paid += money(row["paid_amount"])
+        fees += money(item.get("sale_fee", 0))
+    ordered = {remote_id(row["id"]): row for row in verified}
+    return {"orders": [ordered[oid] for oid in sorted(ids, key=int)], "pack_id": remote_id(pack["id"]),
+            "buyer_id": buyer, "shipping_id": shipping_id, "currency": identity[1],
+            "channel": identity[2], "total": total, "paid": paid, "fees": fees,
+            "membership_scope": "configured-seller-visible-pack"}
 
 
 def snapshot_response(response):
