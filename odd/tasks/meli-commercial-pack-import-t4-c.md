@@ -1,0 +1,127 @@
+# T4-C: source-attributed commercial pack imports
+
+Status: CORRECTED_SOURCE_AND_NATIVE_GREEN / FINAL_REVIEW_AND_SIZE_PENDING. T4C-1 is not complete; all five units remain unchecked until the parent observes final review, size consent, staged audit and a local work-unit commit.
+
+## Objective and reason
+
+Import compatible own MercadoLibre pack orders into one Odoo sale while retaining each individual order/item's identity, quantity, price, taxes, discounts and proven logistics. M4 currently admits identities but blocks packs; B1 persists protected provenance but deliberately rejects anonymous economic updates. Neither is complete commerce.
+
+This separately authorized recoverable child feature extends, and does not rewrite, the webhook feature. Preserve every historical failure, worktree, dirty file and qualification.
+
+## Recovery and exact starting pair
+
+- Parent tracker: `C:/Users/peral/.codex/visualizations/2026/10/09/01a120e6-d01c-7f60-b6e3-3964776a16d2/meli-t4-pack-provenance/odd/tasks/meli-webhook-inbox-c3-c4.md`; SHA256 `21fbdd466418f0a2b62fa95fc0095f32db35a3b72d6e3b9614ccb018c4dd8bfc`; unchanged and mirrored completely.
+- Recovery: `C:/Users/peral/.codex/visualizations/2026/10/15/01a141f7-fdcc-79f1-be33-da48faaa4417/T4-C-context-recovery.md`; SHA256 `149c1e68ae8436fa74bb8c307500210ee120613b954a405eefc2a484e0278051`.
+- Connector predecessor: M4 `b20b36ec61ec5e83e145891fbb0b3d96d205494f`; local integration anchor `codex/t4-c-integration` points there.
+- Connector child: `codex/t4-c-01-source-identity`, `C:/Users/peral/.codex/visualizations/2026/10/15/01a141f7-fdcc-79f1-be33-da48faaa4417/meli-t4-c-01-source-identity`; starts at exact M4.
+- Bridge predecessor: T4-B1 `c109e5071f12f19583f25cf1b6dbfddfe0a541f4`; `codex/t4-c-integration` at `C:/Users/peral/.codex/visualizations/2026/10/15/01a141f7-fdcc-79f1-be33-da48faaa4417/odoo-t4-c-integration`; starts at exact B1.
+- Preparation readback5885e8 exit0: both worktrees clean before this task document; no staged entries or existing child task file. Do not reapply prior commits. Bridge source changes require their own isolated validated child, not an unrelated baseline.
+
+## Authorized scope and safety constraints
+
+Retain the approved nullable, stored, copyFalse `sale.order.line.meli_source_order_item_id -> mercadolibre.order_items` relation, write-once identity, native ACL/rules and dependency direction bridge -> connector; no circular import, new schema/UNIQUE1:1, guessed historical backfill or elevated commercial writes.
+
+Validate individual remote order/seller/company/publication/variation/currency/economics; source-aware replay and child updates must not select a sibling's line. Packs group commerce; shipment membership proves logistics separately. Never probe a known foreign member or invent missing ownership/logistics. Historical NULL rows stay compatible, with ambiguous adoption refused.
+
+Keep single-account V1, configured seller, VIARENGO company, explicit Circuit A and technical actor `su=False`; reject ordinary/sudo/hidden/B/foreign binding paths. Preserve T1/T2/T3/C1/C5, approved channel READ, eleven connector crons and the new inactive cron. Keep worker commerce blocked.
+
+One local commercial operation succeeds coherently or rolls back; no intermediate database commits, nested retry loops or `MeliRollback` against the caller's transaction. Do not destructively alter confirmed sales, reservations, done deliveries or posted invoices. Unsupported return/split/kit effects fail closed with evidence; no C2/C6/C7 expansion or invoice generation.
+
+No HOMO, Railway, real databases/backups, ML credentials/OAuth/commercial API, ARCA, external payments/carriers, cron activation, main/staging/pins, push, remote PR, merge or deployment. No RDD/Gentle AI, including status/assess. T4-D concurrency coordination, T5 and T6 are excluded; concurrent idempotency is not a C acceptance claim. Stop for a demonstrated new structural/security decision before incorporating it.
+
+## Test-first and runtime verification contract
+
+Feature-scoped observed RED -> GREEN is mandatory before each new behavior; global `strict_tdd` remains UNKNOWN. Source: unchanged parent tracker16/98/250/343, preserved by current authority; do not infer or modify a global mode. RED must reproduce the actual baseline fault with valid fixtures, not merely a missing proposed helper or setup failure.
+
+Exact standalone runner: `C:/Users/peral/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe -I -B -X utf8 -m unittest discover -s tests -p '<actual test filename>' -v`, cwd the matching isolated repository child. Current focal pattern is `test_meli_t4_source_identity.py` (10 tests); registered native file is `test_meli_t4_source_identity_native.py` (9 cases). Existing M4 focal pattern is `test_meli_t4_pack_admission.py`; bridge actor pattern is `test_meli_t4_pack_actor.py`.
+
+Actual Odoo19/PG verification executed through new frozen successors `t4c-01-runtime-v1` and corrected `t4c-01-runtime-v2`, with exact baseline/candidate addon maps, DB roles, actor, scripts and exclusive outputs. Both roles had B1 installed; no fieldless baseline or module upgrade was used. Core pin `0f577f1d3a9bf80991b043695bfde9510593e301`; native Python `C:/Users/peral/.codex/visualizations/2026/10/09/01a120e6-d01c-7f60-b6e3-3964776a16d2/c3-c4-implementation/runtime-lab/venv/Scripts/python.exe`; NEW cluster loopback127.0.0.1:63904 only. Fresh owned starts, PID/creation/executable/control/listener bindings and orderly stops were observed; both labs are now stopped. Never reuse historical PID/grants or overwrite old evidence.
+
+Preserve normal registered ORM/MRO/ACL, SQL/network/pre-registry fences, noHTTP/workers0/cronthreads0, isolated home/temp/cache/pass/service paths and all historical proofs. Existing GREEN2 controls bind old348/349 roles/final20 and cannot execute C unchanged. Generic server upgrade tried forbidden maintenance DB; use only a separately scoped existing-clone official registry route if an actual module upgrade is required, never widen the DB fence.
+
+## Pending coherent local work units
+
+- [ ] T4C-1 — Reproduce the real individual-order/variation source lookup fault; correct only the source-item upsert, reject ambiguous/incompatible matches and prove source-local replay/updates with native permissions. Keep the M4 pack/multiline barrier intact. Initial forecast260-380 was exceeded; measured code/tests614 plus the full current tracker require a new exact size decision. Source-local refusal also needs the observed operation savepoint correction below.
+- [ ] T4C-2 — Add the minimum directional connector seam and private validated bridge source-aware economic operation; retain generic B1 refusal, identity/ancestor/output/cascade guards and caller-caught atomic rollback. No Boolean-context bypass or sudo. Forecast180-300.
+- [ ] T4C-3 — Connect ordinary individual-line import/replay to exact durable source identity; prove independent transaction counts/economics, historical compatibility and ambiguity refusal without sibling writes. Forecast160-280.
+- [ ] T4C-4 — Group compatible own pack orders independently of shipment availability; correct the shipment commercial path, source-local prices/taxes/discounts, and only proven stock/logistics relations. Release barriers only for implemented and natively verified cases. Forecast240-460; split only at a genuine safe boundary if measured necessary.
+- [ ] T4C-5 — Implement bounded child cancellation and processed/unsupported-history refusal; close all fifteen scenarios, accumulated T4-A/B1/C and T1/T2/T3/C1/C5 regressions, fresh-process durability, stock traceability and ordinary independent review. Forecast200-380.
+
+Each unit needs its own observed source RED/GREEN, applicable actual disposable Odoo19/PG proof, parent spot check and fresh ordinary independent review before any local Conventional Commit. Keep tests/docs with behavior; record actual commands/results, failed/skipped/pending checks, complete diff size, exact commit and rollback boundary here. Do not mark a task complete from admission, field existence, source-only tests or an exception.
+
+## Required final functional acceptance (all pending)
+
+1. First individual-order import.
+2. Reimport without duplicate commercial/source rows.
+3. Two-order pack with different products and one compatible shared sale.
+4. Two-order pack with identical publication and variation, separately attributed lines.
+5. Different quantities and prices retained per child.
+6. Individualized taxes/discounts with verified net/gross semantics, no double subtraction or guessed allocation.
+7. Whole-pack replay in a fresh transaction.
+8. One-child update leaves the sibling unchanged.
+9. One-child cancellation preserves the sibling and safe shared sale.
+10. Shared shipment with proven commercial/logistics relations.
+11. Pack without shipment, no fabricated logistics.
+12. Seller-visible subset with foreign/invisible members, no unauthorized association/probe.
+13. Historical unbound rows remain compatible without guessed backfill.
+14. Ambiguous/incompatible and B/foreign-company/third-party associations are rejected without residual effects.
+15. Relationships and economics persist after a coherent disposable commit and new process/registry readback.
+
+Use independent transactions and actual record counts, quantities, prices, tax/discount amounts, totals, source/order/root links and intended warehouse/move relations. Preserve processed documents and all operational/security invariants. No external effects or accounting generation; evidence must distinguish inherited elevations, transient writes, sequence changes and audit qualifications honestly.
+
+## Local chain, compatibility and rollback
+
+Human-selected `chain_strategy=feature-branch-chain`, **EXCLUSIVELY LOCAL**; `delivery_strategy=ask-on-risk`. In each repository the first child depends on its integration anchor and later children on their immediate predecessor. No remote tracker/child PR or default-branch integration is authorized. Never mix in stacked-to-main or repoint old branches.
+
+Repository pair map starts `{connector:M4 b20b36ec61ec5e83e145891fbb0b3d96d205494f, bridge:B1 c109e5071f12f19583f25cf1b6dbfddfe0a541f4}`. C1 changes only the connector side; later cross-repository units must record exact compatible pairs and safe partial states. Git cannot atomically commit/release two repositories; no automatic cross-Git atomicity or local commit implies deployment readiness.
+
+Preliminary total1040-1800 authored additions+deletions; **current T4C-1 behavior/test lines614, new T4-C commits0**, before counting this complete tracker if proposed committed. Count all actual code/tests/docs, including this tracker if committed; exclude only generated artifacts from authored estimates, not snapshot identity. No inherited M4/B1 exception, code-golf, deleted assertions or unsafe predecessor. The human approved only the historical exact591 candidate (#3261), then authorized bounded R1 correctness fixes and reruns. That exception does not cover the corrected final candidate; a new exact size decision is required before commit.
+
+Classify deployment impact per exact diff: B1's field/schema already requires module upgrade wherever not installed; a restart/deploy is never DB proof. New data/security/schema changes require a separately scoped affected-module upgrade and independent installed/effective metadata proof. Future coordinated release/rollback must name both repository commits, module states and safe order; no production action now. Roll back only the unit's behavior/tests/docs, preserve source history/provenance and never destructively downgrade installed schema or processed documents.
+
+## Progress and next step
+
+Corrected T4C-1 implementation and its observed functional proof are present; exact Git successors remain at M4/B1, five units unchecked. Full task mirror topic: `odd/meli-commercial-pack-import-t4-c/tasks`, project `odoo-viarengo`; repository locator `odd/tasks/meli-commercial-pack-import-t4-c.md`. No unit acceptance, review, native acceptance, staging or commit is implied.
+
+Next: parent obtains final ordinary independent review and one exact corrected-candidate size decision, performs its spot check and staged-byte audit, then conditionally creates the local work-unit commit. No staging or commit was performed by the writer. Do not advance T4C-2 or declare T4C-1, T4-C or C3/C4 commerce complete from this checkpoint.
+
+## Historical source-only checkpoint and preserved stop
+
+The following paragraphs describe the PRE-CONSENT591 checkpoint, not current verification. Its full original98-line bytes are preserved at `t4c-01-native-proof-v2/tracker-591-checkpoint.md`, SHA256 `234044a1df95131f3c6ff58853f4af639c6034d109de4f97eecfc6f2ad550328`. Later observations below supersede its NOT_RUN and STOP state, not its historical evidence.
+
+The existing raw SQL selected publication plus local order but omitted variation, then sudo-wrote a winner. A valid single incoming variation can overwrite a contradictory unbound local source; duplicates and hidden matches were not refused. Correction confines the real importer to actor-checked own-order/publication/normalized local variation, deterministic incompatibility/ambiguity refusal, and native non-sudo writes. B1 guards, pack/multiline barrier, sale-line projection and worker are unchanged.
+
+Observed source REDv1 `8f25dd`: 5FAIL/2PASS on the exact existing AST block, not a missing helper. Its proposed extra-source expectation was corrected to fail-closed stale-history refusal after the official indexed single-item/variation evidence; preserve the old log as historical expectation revision. REDv2 `7e5bb9`: 5FAIL/2PASS with the safe expectation, before production changes. GREEN `fc7939`: 7PASS/0ERROR/SKIP. These use doubles around the actual code fragment, not native ORM or full-importer acceptance.
+
+Fresh source connector11 commands `c197b0` -> `192518` exit0; bridge actor/binding and guard/ACL pass. Original bridge worker command `2ee3fb` remains exit1, 18tests/14ERROR from its hardcoded missing sibling locator. External exact locator-only view `4cf345` passes18 with inverse-byte substitution proof; it is not an unmodified-suite PASS. Evidence: current visualization root `t4c-01-source-proof-v1`; no original bridge test or assertion changed.
+
+Native test file contains eight whole TransactionCase cases including actual full-importer stale/duplicate counterexamples and source replay/security/B1 guards; **all NOT_RUN**. Offline package `t4c-01-runtime-v1` prepared351/351 frozen addon files, identical new tests, only source-role difference `meli_oerp/models/orders.py`; baselineM4+B1installed and candidateC1+B1installed are intended. Preparation `bd0bc8` only copied new files and compiled helpers. No ownership binding, PG start, SQL connection, DB clone, registry, native test or service operation occurred. Historical helpers/grants/DBs were not activated or overwritten.
+
+Measured source diff `c72325`: production+60/-27=87, standalone tests211, native tests195 =493 before tracker. No separate docs exist beyond this tracker. One honest slicing assessment finds no proven safe <=400 slice in these unchanged boundaries: tests-only would leave intended failures; native tests depend on the standalone extractor and removing it breaks their baseline proof; code-only loses required proof. This is not universal indivisibility and does not forbid a separately authorized, measured alternate boundary. No assertion removal, refactor/shrink loop or size waiver occurred. Exact final full paths/hashes/counts and checks remain in the new t4c-01 handoff artifacts outside the candidate; no local commit is authorized until the human decides.
+
+## Corrected T4C-1 proof and current delivery boundary
+
+The original591 candidate executed natively: same8 cases baseline8run/7failure-events/0ERROR/0SKIP and candidate8PASS. Independent static review R1 then exposed incomplete proof: caller-caught stale/duplicate/hidden exceptions left six tables changed before the helper boundary (order, sale/root relation, buyer, partner and mail), despite unchanged source snapshots. Supplemental real-ORM tests reproduced3FAIL/0ERROR on that candidate; baseline did not reject those histories. All failures and fixtures are retained, not reclassified as success.
+
+The bounded correction wraps only `orders_update_order_json(self, data, context=None, config=None, meli=None)` with a private `functools.wraps` decorator and lexical operation savepoint. Escaping exceptions roll back this import while preserving caller-owned work and exception type. Legacy ordinary returns, including error/admission_pending dictionaries, are unchanged; no universal rollback guarantee is claimed for swallowed errors or transitive legacy paths not exercised. No global rollback, commit, retry, schema, ACL, B1, worker or economic-projection change was added.
+
+Observed corrected proof under registered Odoo19/MRO/ACL actor5/suFalse/company1/A:
+
+- Standalone actual-source suite10PASS; original7 retained plus exception/success/error-dictionary decorator controls. All11 connector commands total224PASS. Bridge actor6, binding5, guard26 and channelACL6PASS.
+- Original bridge worker command still18tests/14locatorERROR. Its exact external locator-only view passes18, with inverse-byte proof and unchanged assertions; this is a separate285-successful-test population, not an unmodified worker-suite PASS. An additional adjusted-launcher import-path failure is preserved separately.
+- Same final9 native cases: baseline9run/8failure-events/0ERROR/0SKIP; corrected candidate9PASS/0ERROR/0SKIP. Original8 retained and strengthened; late source-write RuntimeError added. Stale/duplicate/hidden and late failure compare all590 stored-table digests and caller sentinel. Operation profiles observed no MeliRollback or global cursor commit/rollback; MeliCommit is the existing flush-only helper.
+- EXACT byte-identical supplemental R1 diagnostic (`ae5e7fe489ef8a85cddd3cd8f9c4ae137240af13dfbe8bb825b94b0d995a6323`) changed from old candidate3FAIL to corrected3PASS: no changed table, original ValidationError/AccessError retained, caller sentinel retained.
+- Selected45 and unchanged B1 provenance20 each pass in BOTH installed-B1 roles, zero FAIL/ERROR/SKIP. Baseline20 still emits its inherited RED label; actual20/0/0/0 and installed field are the evidence. Initial provenance launch stopped before cases for missing scoped actor flags/helper preparation; its failure is retained. Parent then authorized only the two exact rollback-only B/ordinary actors, no password/invitation/ACL/group definition or actor5 change; new observer wrappers bind only current filestores.
+- Applicable T3 corpus passes170 checks (80 permissions,16 transaction lifetime,59 worker/lock/error,15 catalog) plus8 replay observations. Client construction remains deliberately stubbed and external fences unchanged; no commercial API/OAuth was executed.
+
+Durability ran in three NEW processes and independent cursors on ONLY owned synthetic `c34_t4c1_candidate_v1`: seed PID28812/TX5041, replay PID23424/TX5061, READONLY readback PID5816/no assigned TX. Explicit caller commits occurred only after complete successful operations (1+1), never inside the importer. Three source-only orders separate publication/variation identities, plus one real individual full import. Order IDs49-52 and source IDs38-41 remain stable; source-only A and full-import D quantities2->4, siblings2/2, unit100USD/product2. Counts order/source/sale/line4/4/3/4 ->8/8/4/5, unchanged on replay. The new SOL intentionally remains unbound: source-aware SOL economics and pack commerce are NOT implemented by this lookup unit.
+
+All590 stored tables/schema were equal before/after rollback-only suites in donor and both clones; temporary actors/group links disappeared. After intentional durable fixtures, donor/baseline still equal their original anchor and candidate equals its new postdurable anchor in an independent read-only process. Cron11/action11 full UID/date metadata, all33 receipts, users/groups/ACL/rules, installed module/field metadata, existing B1 bound anchors and zero stock/fiscal records were preserved. Sequence advancement, transient avatar files, physical pages/WAL and filestore audit limits remain qualified; no cleanup was used to manufacture invariance. Final PG stop exit0 verified both PID files and listener absent; OLD control hash stayed unchanged.
+
+Evidence roots: `t4c-01-native-proof-v1` (old591 native/caller-caught failure), `t4c-01-runtime-v2/proofs` (final same9/45/T3 and physical snapshots), `t4c-01-native-proof-v2` (R1 unchanged diagnostic, source receipts, scoped provenance20, durable transactions, final readbacks, shutdown and frozen manifest). Exact commands/cwds/exits/events/hashes are retained there. Runtime roles contain351/351 files; only production role difference is `meli_oerp/models/orders.py`; bridge B1 and integration refs remain unchanged.
+
+Current measured production+74/-27=101, standalone263 and native250 =614 authored code/test changes; full current tracker adds 127, giving 741 across exactly four paths. No separate committed documentation exists beyond this tracker. The one functional slicing pass did not establish a safe <=400 boundary preserving source proof, native proof and coherent refusal. R1 protection is required, not a second scope expansion or budget-shrinking pass. This is not universal indivisibility; no code-golf, assertion removal or inherited size waiver is claimed.
+
+Deployment classification: this exact connector delta changes Python methods only, with no field/schema/data/security/manifest change; on the already-installed M4/B1 pair it requires code restart, not a new module upgrade. B1 still requires its own upgrade wherever its field is not installed. No code was deployed. Release/rollback must preserve the compatible pair and historical provenance; no destructive schema downgrade or implicit cross-Git atomic release.
+
+Pending: final independent review, parent spot check, explicit exact-final-size consent, complete staged/raw-blob audit and local Conventional Commit. All five unit checkboxes remain intentionally unchecked. RDD is not invoked; no remote/push/PR/merge/deploy, worker activation, stock/fiscal action or production operation occurred.

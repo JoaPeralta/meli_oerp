@@ -26,10 +26,23 @@ from markupsafe import Markup
 import logging
 import re
 import ast
+from functools import wraps
 from .meli_pack_admission import (
     AdmissionError, remote_id, verify_order, snapshot_response, enrich_buyer,
 )
 from .meli_oerp_config import *
+
+
+def _meli_order_import_savepoint(method):
+    """Roll back an escaping import exception without aborting caller work.
+
+    Legacy normal returns, including error dictionaries, remain unchanged.
+    """
+    @wraps(method)
+    def wrapped(self, data, context=None, config=None, meli=None):
+        with self.env.cr.savepoint():
+            return method(self, data, context=context, config=config, meli=meli)
+    return wrapped
 
 # Traducción de códigos de cancelación ML → español
 _MELI_CANCEL_CODES_ES = {
@@ -2461,6 +2474,64 @@ class mercadolibre_orders(models.Model):
                 raise ValidationError("Historical sale order forbids importer updates")
 
     @api.model
+    def _meli_upsert_source_item(self, order, values, config):
+        """Update only an unambiguous own individual source, without elevation.
+
+        A different stored variation is contradictory local history, not
+        permission to overwrite it or invent another commercial component.
+        This lookup does not lock, coordinate importers or project sale lines.
+        """
+        seller = self._meli_assert_order_admission_actor(config)
+        company = config.company_id if "company_id" in config._fields else config
+        order.ensure_one()
+        order.check_access("read")
+        order.check_access("write")
+        if order.company_id != company or order.seller_id != self.env.user:
+            raise AccessError("Source item requires its configured own order/company")
+        self._meli_preflight_order_history(
+            {"id": order.order_id, "seller": {"id": seller}}, config, local_id=order.id)
+        incoming = dict(values)
+        publication = incoming.get("order_item_id")
+        if (incoming.get("order_id") != order.id or not isinstance(publication, str)
+                or not publication.strip()):
+            raise ValidationError("Source item identity contradicts its individual order")
+
+        def variation_key(value):
+            if value is None or value is False or value == "":
+                return False  # Existing nullable local Char representation only.
+            try:
+                return remote_id(value)
+            except AdmissionError as exc:
+                raise ValidationError("Source variation identity is invalid") from exc
+
+        variation = variation_key(incoming.get("order_item_variation_id"))
+        incoming["order_item_variation_id"] = variation
+        items = self.env["mercadolibre.order_items"]
+        candidates = items.search([("order_id", "=", order.id),
+                                   ("order_item_id", "=", publication)])
+        candidates.check_access("read")
+        # Integrity-only Boolean: a rule-hidden candidate must not become a
+        # guessed create or a sudo winner. No hidden row data leaves SQL.
+        items.flush_model(["order_id", "order_item_id", "order_item_variation_id"])
+        self.env.cr.execute(
+            "SELECT EXISTS (SELECT 1 FROM mercadolibre_order_items "
+            "WHERE order_id = %s AND order_item_id = %s AND NOT (id = ANY(%s)))",
+            [order.id, publication, candidates.ids],
+        )
+        if self.env.cr.fetchone()[0]:
+            raise AccessError("Source identity is not completely accessible")
+        matching = candidates.filtered(
+            lambda item: variation_key(item.order_item_variation_id) == variation)
+        if len(matching) > 1 or len(matching) != len(candidates):
+            raise ValidationError("Source identity is ambiguous or incompatible")
+        with self.env.cr.savepoint():
+            if matching:
+                matching.check_access("write")
+                matching.write(incoming)  # Installed anchor guards remain effective.
+                return matching
+            return items.create(incoming)
+
+    @api.model
     def _meli_order_admission(self, payload, config, meli):
         """Own admission is distinct from the pending durable pack projection."""
         seller_id = self._meli_assert_order_admission_actor(config)
@@ -2480,6 +2551,7 @@ class mercadolibre_orders(models.Model):
             result["pending"] = "source_line_projection_pending_t4_bc"
         return result
 
+    @_meli_order_import_savepoint
     def orders_update_order_json( self, data, context=None, config=None, meli=None ):
 
         oid = data["id"]
@@ -4408,33 +4480,8 @@ class mercadolibre_orders(models.Model):
                     else:
                         order_item_fields['product_id'] = product_related.id
 
-                #order_item_ids = order_items_obj.search( [('order_item_id','=',order_item_fields['order_item_id']),
-                #                                            ('order_id','=',order.id)] )
-
-                query = """SELECT id
-                FROM   mercadolibre_order_items
-                WHERE
-                order_item_id = '%s'
-                AND order_id = %i
-                """ % ( order_item_fields['order_item_id'], order and order.id)
-                cr = MeliCr( self )
-                respquery = cr.execute(query)
-                results = cr.fetchall()
-                order_item_ids = results
-
-                #### CREATE ORDER ITEM !!! ####
-
-                #_logger.info("Order item ids: "+str(order_item_ids))
-                order_item_id = False
-                #_logger.info( order_item_fields )
-                if (not order_item_ids):
-                    #_logger.info( "Creating order_item_fields: " + str(order_item_fields) )
-                    order_item_ids = order_items_obj.create( ( order_item_fields ))
-                else:
-                    order_item_id = order_items_obj.sudo().browse(order_item_ids and order_item_ids[0])
-                    if order_item_id:
-                        #_logger.info("writing order_item_fields: "+str(order_item_ids[0]))
-                        order_item_id.write( ( order_item_fields ) )
+                order_item_id = self._meli_upsert_source_item(
+                    order, order_item_fields, config)
 
                 if (product_related_obj == False or len(product_related_obj)==0):
                     _item_sku = Item['item'].get('seller_sku', '') or Item['item'].get('seller_custom_field', '') or ''
