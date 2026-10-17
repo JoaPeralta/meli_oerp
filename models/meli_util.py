@@ -1165,6 +1165,13 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
             return self.rjson
 
         def get(self, path, params={}, extra_headers=None, **kwargs):
+            # A reused SDK client must expose only this GET's outcome.
+            self.response = None
+            self.rjson = {}
+            self.last_status_code = None
+            api_client = getattr(self, "api_client", None)
+            if api_client is not None:
+                api_client.last_response = None
             # When custom headers are required (e.g. x-version for versioned
             # endpoints) the SDK's resource_get does not expose a per-call
             # header hook, so fall back to the requests-based client which
@@ -1196,6 +1203,8 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
                     getattr(getattr(self, "api_client", None), "last_response", None),
                     "status", None)
             except _ApiException as e:
+                if api_client is not None:
+                    api_client.last_response = None
                 self.last_status_code = getattr(e, "status", None)
                 self.rjson = {
                     "error": "get error",
@@ -1204,7 +1213,11 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
                     "message": getattr(e, "body", None),
                 }
             except:
-                pass
+                self.response = None
+                self.rjson = {}
+                self.last_status_code = None
+                if api_client is not None:
+                    api_client.last_response = None
             return self
 
         # get_mini y post_mini usan requests directo (como en la versión original)
