@@ -769,6 +769,8 @@ class MeliApiNoSDK:
         - Mantiene self.response y self.rjson
         - Retorna self
         """
+        self.last_status_code = None
+        self.response = self.rjson = None
         import time as _time_module
         _t_start = _time_module.time() if MeliApiNoSDK._benchmark_enabled else 0
         _original_path = path
@@ -800,23 +802,17 @@ class MeliApiNoSDK:
                 timeout=timeout,
                 allow_redirects=True,
             )
+            self.last_status_code = resp.status_code
             self.response = self._parse_response(resp)
             self.rjson = self.response
 
             if resp.status_code >= 400:
-                _logger.warning(
-                    "PUT %s falló: status=%s body=%s",
-                    path, resp.status_code, str(self.rjson)[:200]
-                )
-
-        except requests.RequestException as e:
-            _logger.warning("PUT %s error: %s", path, str(e))
-            self.rjson = {
-                "error": "put error",
-                "status": 0,
-                "cause": "request_exception",
-                "message": str(e)
-            }
+                _logger.warning("PUT request failed with HTTP %s", resp.status_code)
+        except Exception as e:
+            self.last_status_code = 0
+            _logger.warning("PUT transport outcome unavailable (%s)", type(e).__name__)
+            self.rjson = {"error": "put error", "status": 0,
+                          "cause": "request_exception", "message": type(e).__name__}
             self.response = self.rjson
         finally:
             if MeliApiNoSDK._benchmark_enabled:
@@ -1256,29 +1252,40 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
             return self
 
         def put(self, path, body=None, params={}, extra_headers=None, **kwargs):
+            self.last_status_code = None
+            self.response = self.rjson = None
+            api_client = getattr(self, "api_client", None)
+            previous_http = getattr(api_client, "last_response", None)
             try:
                 atok = params.get("access_token", "") or ""
-                headers = params.get("headers", {}) or {}
-                if extra_headers:
-                    headers = dict(headers)
-                    headers.update(extra_headers)
+                headers = dict(params.get("headers") or {})
+                headers.update(extra_headers or {})
                 self.response = self.resource_put(resource=path, access_token=atok, body=body, headers=headers)
                 self.rjson = self.response
+                current_http = getattr(api_client, "last_response", None)
+                if current_http is not previous_http:
+                    self.last_status_code = getattr(current_http, "status", None)
             except _ApiException as e:
-                self.rjson = {"error": "put error", "status": e.status, "cause": e.reason, "message": e.body}
-            except:
-                pass
+                self.last_status_code = getattr(e, "status", None)
+                self.response = self.rjson = {"error": "put error", "status": self.last_status_code,
+                                              "cause": type(e).__name__, "message": "PUT request failed"}
+            except Exception as e:
+                self.last_status_code = 0
+                self.response = self.rjson = {"error": "put error", "status": 0,
+                                              "cause": type(e).__name__, "message": "PUT outcome unavailable"}
             return self
 
         def put_mini(self, path, body=None, params={}, extra_headers=None, **kwargs):
-            """PUT sin SDK (requests directo) - para compatibilidad"""
+            """Use the same fresh outcome contract as the direct requests backend."""
+            self.last_status_code = None
+            self.response = self.rjson = None
             _nosdk = MeliApiNoSDK(config=configuration_nosdk)
             _nosdk.__dict__.update({k: v for k, v in self.__dict__.items()
-                                     if k in ('client_id', 'client_secret', 'access_token',
-                                              'refresh_token', 'redirect_uri', 'seller_id')})
+                                   if k in ("client_id", "client_secret", "access_token",
+                                            "refresh_token", "redirect_uri", "seller_id")})
             _nosdk.put(path, body, params, extra_headers=extra_headers)
-            self.response = _nosdk.response
-            self.rjson = _nosdk.rjson
+            self.response, self.rjson = _nosdk.response, _nosdk.rjson
+            self.last_status_code = _nosdk.last_status_code
             return self
 
         def delete(self, path, params={}, extra_headers=None, **kwargs):
@@ -1834,6 +1841,14 @@ class MeliUtil(models.AbstractModel):
         Devuelve (status_code, rjson, response). rjson es None si el cuerpo no
         se puede parsear: un cuerpo ilegible no dice nada sobre el token.
         """
+        api_rest_client._meli_stock_seller_snapshot = None
+        # The SDK can swallow a transport error: no old probe body/status survives.
+        for attr in ("last_status_code", "response", "rjson"):
+            if hasattr(api_rest_client, attr):
+                setattr(api_rest_client, attr, None)
+        sdk_client = getattr(api_rest_client, "api_client", None)
+        if sdk_client is not None:
+            sdk_client.last_response = None
         response = api_rest_client.get(
             "/users/" + str(company.mercadolibre_seller_id),
             {'access_token': api_rest_client.access_token})
@@ -1841,7 +1856,25 @@ class MeliUtil(models.AbstractModel):
             rjson = response.json()
         except Exception:
             rjson = None
-        status = getattr(api_rest_client, "last_status_code", None)
+        status = getattr(response, "status_code", None)
+        if status is None and response is api_rest_client:
+            status = getattr(api_rest_client, "last_status_code", None)
+        # Ephemeral classification from this existing probe, never editable flags.
+        probe_status = status
+        seller = str(company.mercadolibre_seller_id or "")
+        client_id = str(getattr(company, "mercadolibre_client_id", "") or "")
+        if (type(probe_status) is int and probe_status == 200
+                and isinstance(rjson, dict) and not rjson.get("error")
+                and str(rjson.get("id")) == seller
+                and isinstance(rjson.get("tags"), list)
+                and all(isinstance(tag, str) for tag in rjson["tags"])
+                and str(getattr(api_rest_client, "seller_id", "")) == seller
+                and client_id and str(getattr(api_rest_client, "client_id", "")) == client_id):
+            api_rest_client._meli_stock_seller_snapshot = {
+                "status": probe_status, "seller_id": seller, "company_id": company.id,
+                "client_id": client_id,
+                "body": {"id": rjson["id"], "tags": list(rjson["tags"])},
+            }
         return status, rjson, response
 
     def _meli_refresh_is_due(self, company, refresh_force=False):

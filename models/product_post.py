@@ -79,6 +79,7 @@ class product_template_post(models.TransientModel):
             self.env['meli.util']._meli_require_reconnect()
 
         res = {}
+        stock_errors = []
         _logger.info("context in product_template_post:")
         _logger.info(self.env.context)
         custom_context = {
@@ -104,11 +105,21 @@ class product_template_post(models.TransientModel):
 
                     if self.post_stock:
                         res = product.with_context(custom_context).product_template_post_stock(meli=meli)
+                        results = res if isinstance(res, list) else [res]
+                        if not results:
+                            stock_errors.append({"error": "stock_result_missing"})
+                        for outcome in results:
+                            if not isinstance(outcome, dict) or (outcome and not outcome.get("error")):
+                                stock_errors.append({"error": "stock_result_unknown"})
+                            elif outcome.get("error"):
+                                stock_errors.append(outcome)
                     if self.post_price:
                         res = product.with_context(custom_context).product_template_post_price(meli=meli)
                     if self.post_title:
                         res = product.with_context(custom_context).product_template_post_title(meli=meli)
                         if res and isinstance(res, dict) and 'error' in res:
+                            if stock_errors:
+                                return {"error": "stock_batch_incomplete", "errors": stock_errors}
                             return warningobj.info( title='MELI TITLE', message="No se pudo actualizar el título en Mercado Libre.", message_html=self.pretty_json(res) )
                     if self.action_pause:
                         res = product.with_context(custom_context).action_meli_pause()
@@ -116,6 +127,8 @@ class product_template_post(models.TransientModel):
                         res = product.with_context(custom_context).product_template_post()
 
                     if (res and 'name' in res):
+                        if stock_errors:
+                            return {"error": "stock_batch_incomplete", "errors": stock_errors}
                         return res
 
                     posted_products+=1
@@ -123,6 +136,8 @@ class product_template_post(models.TransientModel):
         if (posted_products==0 and not 'name' in res):
             res = warningobj.info( title='MELI WARNING', message="Se intentaron publicar 0 productos. Debe forzar las publicaciones o marcar el producto con el campo Meli Publication, debajo del titulo.", message_html="" )
 
+        if stock_errors:
+            return {"error": "stock_batch_incomplete", "errors": stock_errors}
         return res
 
 
@@ -209,6 +224,7 @@ class product_post(models.TransientModel):
             self.env['meli.util']._meli_require_reconnect()
 
         res = {}
+        stock_errors = []
         for product_id in product_ids:
             product = product_obj.browse(product_id)
             #import pdb;pdb.set_trace();
@@ -219,11 +235,21 @@ class product_post(models.TransientModel):
 
                 if self.post_stock:
                     res = product.product_post_stock(meli=meli)
+                    results = res if isinstance(res, list) else [res]
+                    if not results:
+                        stock_errors.append({"error": "stock_result_missing"})
+                    for outcome in results:
+                        if not isinstance(outcome, dict) or (outcome and not outcome.get("error")):
+                            stock_errors.append({"error": "stock_result_unknown"})
+                        elif outcome.get("error"):
+                            stock_errors.append(outcome)
                 if self.post_price:
                     res = product.product_post_price(meli=meli)
                 if self.post_title:
                     res = product.product_post_title(meli=meli)
                     if res and isinstance(res, dict) and 'error' in res:
+                        if stock_errors:
+                            return {"error": "stock_batch_incomplete", "errors": stock_errors}
                         return warningobj.info( title='MELI TITLE', message="No se pudo actualizar el título en Mercado Libre.", message_html=self.pretty_json(res) )
                 if self.action_pause:
                     res = product.action_meli_pause()
@@ -235,8 +261,12 @@ class product_post(models.TransientModel):
             #    res = product.product_meli_status_pause()
 
             if res and 'name' in res:
+                if stock_errors:
+                    return {"error": "stock_batch_incomplete", "errors": stock_errors}
                 return res
 
+        if stock_errors:
+            return {"error": "stock_batch_incomplete", "errors": stock_errors}
         return res
 
 

@@ -1920,6 +1920,7 @@ class res_company(models.Model):
         # OPTIMIZED: Use lists instead of string concatenation
         logs_list = []
         errors_list = []
+        failures = []
 
         try:
             if auto_commit:
@@ -1944,9 +1945,13 @@ class res_company(models.Model):
                         resjson = obj.product_post_stock(meli=meli)
                         logs_list.append(f"{obj.default_code} {obj.meli_id}: {obj.meli_available_quantity}")
 
-                        if "error" in resjson:
-                            obj.meli_stock_error = str(resjson)
-                            errors_list.append(f"{obj.default_code} {obj.meli_id} >> {resjson}")
+                        if not isinstance(resjson, dict) or resjson:
+                            code = resjson.get("error") if isinstance(resjson, dict) else None
+                            obj.meli_stock_error = code if isinstance(code, str) and code.startswith("stock_") else "stock_update_incomplete"
+                            errors_list.append(f"{obj.default_code} {obj.meli_id}: stock_update_incomplete")
+                            failures.append({"product_id": obj.id if hasattr(obj, "id") else None,
+                                "error": "stock_update_incomplete",
+                                "stock_confirmed": isinstance(resjson, dict) and resjson.get("stock_confirmed") is True})
                         else:
                             obj.meli_stock_error = str({})
 
@@ -1960,30 +1965,37 @@ class res_company(models.Model):
 
                     except Exception as e:
                         _logger.info("meli_update_remote_stock > Exception founded!")
-                        _logger.info(e, exc_info=True)
+                        _logger.warning("Stock batch exception (%s)", type(e).__name__)
                         logs_list.append(f"{obj.default_code} {obj.meli_id}: {obj.meli_available_quantity}")
-                        errors_list.append(f"{obj.default_code} {obj.meli_id} >> {e}")
+                        errors_list.append(f"{obj.default_code} {obj.meli_id}: stock_batch_exception")
                         if auto_commit:
                             self.env.cr.rollback()
 
             noti.resource = "meli_update_remote_stock #"+str(icount) +'/'+str(maxcommits)
+            # A diagnostic must not become a blind retry of failed/uncertain writes.
+            if not errors_list:
+                try:
+                    diagnostic = self.meli_stock_diagnostic(meli=meli)
+                    if isinstance(diagnostic, dict) and diagnostic.get("error"):
+                        errors_list.append("stock_diagnostic_incomplete")
+                        failures.append({"error": "stock_diagnostic_incomplete"})
+                except Exception as exc:
+                    _logger.warning("Stock diagnostic unavailable (%s)", type(exc).__name__)
+                    errors_list.append("stock_diagnostic_unavailable")
             noti.stop_internal_notification(errors="\n".join(errors_list), logs="\n".join(logs_list))
 
-            # Safety diagnostic: detect paused items with stock, drift, etc.
-            try:
-                self.meli_stock_diagnostic(meli=meli)
-            except Exception as _diag_err:
-                _logger.warning("meli_update_remote_stock > diagnostic error: %s", _diag_err)
-
         except Exception as e:
+            errors_list.append("stock_batch_exception")
             _logger.info("meli_update_remote_stock > Exception founded!")
-            _logger.info(e, exc_info=True)
+            _logger.warning("Stock batch exception (%s)", type(e).__name__)
             if auto_commit:
                 self.env.cr.rollback()
             noti.stop_internal_notification(errors="\n".join(errors_list), logs="\n".join(logs_list))
             if auto_commit:
                 MeliCommit( self )
 
+        if errors_list:
+            return {"error": "stock_batch_incomplete", "errors": errors_list, "failures": failures}
         return {}
 
     def meli_update_remote_stock_rt(self, meli=False):
@@ -2024,6 +2036,7 @@ class res_company(models.Model):
         # OPTIMIZED: Use lists instead of string concatenation
         logs_list = []
         errors_list = []
+        failures = []
 
         try:
             if auto_commit:
@@ -2048,9 +2061,13 @@ class res_company(models.Model):
                         resjson = obj.product_post_stock(meli=meli)
                         logs_list.append(f"{obj.default_code} {obj.meli_id}: {obj.meli_available_quantity}")
 
-                        if "error" in resjson:
-                            obj.meli_stock_error = str(resjson)
-                            errors_list.append(f"{obj.default_code} {obj.meli_id} >> {resjson}")
+                        if not isinstance(resjson, dict) or resjson:
+                            code = resjson.get("error") if isinstance(resjson, dict) else None
+                            obj.meli_stock_error = code if isinstance(code, str) and code.startswith("stock_") else "stock_update_incomplete"
+                            errors_list.append(f"{obj.default_code} {obj.meli_id}: stock_update_incomplete")
+                            failures.append({"product_id": obj.id if hasattr(obj, "id") else None,
+                                "error": "stock_update_incomplete",
+                                "stock_confirmed": isinstance(resjson, dict) and resjson.get("stock_confirmed") is True})
                         else:
                             obj.meli_stock_error = str({})
 
@@ -2064,9 +2081,9 @@ class res_company(models.Model):
 
                     except Exception as e:
                         _logger.info("meli_update_remote_stock_rt > Exception founded!")
-                        _logger.info(e, exc_info=True)
+                        _logger.warning("Stock batch exception (%s)", type(e).__name__)
                         logs_list.append(f"{obj.default_code} {obj.meli_id}: {obj.meli_available_quantity}")
-                        errors_list.append(f"{obj.default_code} {obj.meli_id} >> {e}")
+                        errors_list.append(f"{obj.default_code} {obj.meli_id}: stock_batch_exception")
                         if auto_commit:
                             self.env.cr.rollback()
 
@@ -2074,14 +2091,17 @@ class res_company(models.Model):
             noti.stop_internal_notification(errors="\n".join(errors_list), logs="\n".join(logs_list))
 
         except Exception as e:
+            errors_list.append("stock_batch_exception")
             _logger.info("meli_update_remote_stock_rt > Exception founded!")
-            _logger.info(e, exc_info=True)
+            _logger.warning("Stock batch exception (%s)", type(e).__name__)
             if auto_commit:
                 self.env.cr.rollback()
             noti.stop_internal_notification(errors="\n".join(errors_list), logs="\n".join(logs_list))
             if auto_commit:
                 MeliCommit( self )
 
+        if errors_list:
+            return {"error": "stock_batch_incomplete", "errors": errors_list, "failures": failures}
         return {}
 
     def _meli_diag_persist_ml_status(self, pid, meli_id, ml_status, ml_qty):
@@ -2170,6 +2190,7 @@ class res_company(models.Model):
         reactivate_candidates = []        # (id, sku, meli_id, odoo_qty, meli_qty)
         drift_candidates = []             # (id, sku, meli_id, odoo_qty, meli_qty)
         fulfillment_user_candidates = []  # fulfillment_user_product_id items with Odoo stock
+        diagnostic_errors = []
         actions_taken = []                # human-readable lines for chatter summary
         checked_items_log = []            # per-item detail for chatter debug
 
@@ -2259,11 +2280,14 @@ class res_company(models.Model):
             for pid, sku, meli_id, odoo_qty, meli_qty in all_to_check:
                 item_log = f"[{sku}] {meli_id} Odoo={odoo_qty:.0f} stored_qty={meli_qty}"
                 try:
+                    product = self.env["product.product"].browse(pid)
                     response = meli.get("/items/%s" % meli_id, {'access_token': meli.access_token})
-                    if not response:
-                        checked_items_log.append(f"⚠️ {item_log} → sin respuesta ML")
+                    status, rjson = product._meli_stock_payload(response, meli)
+                    if (status != 200 or not isinstance(rjson, dict) or rjson.get("error")
+                            or rjson.get("id") != meli_id):
+                        diagnostic_errors.append({"error": "stock_item_unproven"})
+                        checked_items_log.append(f"{item_log}: stock_item_unproven")
                         continue
-                    rjson = response.json()
                     ml_status = rjson.get('status', 'unknown')
                     ml_qty = rjson.get('available_quantity', 0)
                     _logger.warning(
@@ -2273,6 +2297,10 @@ class res_company(models.Model):
                     item_log += f" → ML:{ml_status} ML_qty={ml_qty}"
                     ml_logistic = rjson.get('shipping', {}).get('logistic_type', '')
                     ml_user_product_id = rjson.get('user_product_id')
+                    if ml_user_product_id:
+                        diagnostic_errors.append({"error": "stock_route_unsupported"})
+                        checked_items_log.append(f"{item_log}: stock_route_unsupported")
+                        continue
                     # fulfillment_user_product_id: logistic_type='fulfillment' AND user_product_id set
                     is_fulfillment_user = bool(ml_user_product_id and ml_logistic == 'fulfillment')
 
@@ -2298,7 +2326,11 @@ class res_company(models.Model):
                                 "MELI_STOCK_DIAG: REACTIVATING [%s] %s (paused + Odoo_qty=%.0f)",
                                 sku, meli_id, odoo_qty
                             )
-                            product.product_post_stock(meli=meli)
+                            stock_result = product.product_post_stock(meli=meli)
+                            if not isinstance(stock_result, dict) or stock_result:
+                                diagnostic_errors.append(stock_result if isinstance(stock_result, dict) else {"error": "stock_result_unknown"})
+                                checked_items_log.append(f"{item_log}: stock_update_incomplete")
+                                continue
                             actions_taken.append(f"✅ REACTIVADA [{sku}] {meli_id} — paused + Odoo={odoo_qty:.0f}")
                             checked_items_log.append(f"✅ {item_log} → REACTIVADA")
                             if auto_commit:
@@ -2348,7 +2380,11 @@ class res_company(models.Model):
                                 sku, meli_id, odoo_qty
                             )
                             product = self.env['product.product'].browse(pid)
-                            product.product_post_stock(meli=meli)
+                            stock_result = product.product_post_stock(meli=meli)
+                            if not isinstance(stock_result, dict) or stock_result:
+                                diagnostic_errors.append(stock_result if isinstance(stock_result, dict) else {"error": "stock_result_unknown"})
+                                checked_items_log.append(f"{item_log}: stock_update_incomplete")
+                                continue
                             actions_taken.append(f"📤 PUSH CORRECCIÓN [{sku}] {meli_id} — active+ML_qty=0, Odoo={odoo_qty:.0f}")
                             checked_items_log.append(f"📤 {item_log} → push corrección")
                             if auto_commit:
@@ -2386,7 +2422,11 @@ class res_company(models.Model):
                                         "MELI_STOCK_DIAG: PUSH FULFILLMENT_USER [%s] %s (pushable=%d < Odoo=%.0f, delta=%d)",
                                         sku, meli_id, pushable_qty, odoo_qty, int(odoo_qty - pushable_qty)
                                     )
-                                    product.product_post_stock(meli=meli)
+                                    stock_result = product.product_post_stock(meli=meli)
+                                    if not isinstance(stock_result, dict) or stock_result:
+                                        diagnostic_errors.append(stock_result if isinstance(stock_result, dict) else {"error": "stock_result_unknown"})
+                                        checked_items_log.append(f"{item_log}: stock_update_incomplete")
+                                        continue
                                     actions_taken.append(
                                         f"📤 PUSH FULFILLMENT_USER [{sku}] {meli_id} — {loc_str} pushable={pushable_qty} < Odoo={odoo_qty:.0f} (delta={int(odoo_qty-pushable_qty)})"
                                     )
@@ -2420,8 +2460,8 @@ class res_company(models.Model):
                         )
                         raise  # propagate to cron_meli_stock_diagnostic's savepoint handler
                     _logger.warning("MELI_STOCK_DIAG: error checking [%s] %s: %s", sku, meli_id, e)
-                    actions_taken.append(f"❌ ERROR [{sku}] {meli_id}: {e}")
-                    checked_items_log.append(f"❌ {item_log} → error: {e}")
+                    diagnostic_errors.append({"error": "stock_diagnostic_exception"})
+                    checked_items_log.append(f"{item_log}: stock_diagnostic_exception")
 
         t_diag_elapsed = _time.time() - t_diag_start
         _logger.info(
@@ -2478,6 +2518,8 @@ class res_company(models.Model):
             'drift_candidates': len(drift_candidates),
             'actions_taken': len(actions_taken),
             'elapsed_seconds': round(t_diag_elapsed, 2),
+            **({"error": "stock_diagnostic_incomplete", "failures": diagnostic_errors}
+               if diagnostic_errors else {}),
         }
 
     def meli_update_remote_price(self, meli=False):

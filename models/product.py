@@ -915,9 +915,17 @@ class product_template(models.Model):
         _logger.info(custom_context)
         res = []
         for productT in self:
+            template_results = []
             for variant in productT.product_variant_ids:
                 r = variant.with_context(custom_context).product_post_stock(meli=meli)
                 res.append(r)
+                template_results.append(r)
+            if template_results and all(isinstance(result, dict) and not result
+                                        for result in template_results):
+                productT.meli_stock_update = ml_datetime(datetime.now())
+                productT.meli_stock_error = "Ok"
+            elif template_results:
+                productT.meli_stock_error = "stock_batch_incomplete"
         return res
 
     def product_template_post_price( self, context=None, meli=None ):
@@ -3114,31 +3122,22 @@ class product_product(models.Model):
 
         return {}
 
-    def product_meli_status_active( self, meli=False ):
+    def product_meli_status_active(self, meli=False):
+        """Report activation separately; an empty response does not confirm it."""
         company = self.env.user.company_id
-        product_obj = self.env['product.product']
-
         if not meli:
-            meli = self.env['meli.util'].get_new_instance(company)
+            meli = self.env["meli.util"].get_new_instance(company)
             if meli.need_login():
-                self.env['meli.util']._meli_require_reconnect()
-
-        if (meli):
-            pass;
-        else:
-            return {}
-
+                self.env["meli.util"]._meli_require_reconnect()
         for product in self:
-            product_tmpl = product.product_tmpl_id
-
-            _logger.info("activating "+str(product.meli_id))
-            response = product.meli_id and meli.put_mini("/items/"+product.meli_id, { 'status': 'active' }, {'access_token':meli.access_token})
-            if (response):
-                _logger.info(response.json())
-            else:
-                _logger.info("product_meli_status_active error")
-                _logger.info(response)
-
+            if not product.meli_id:
+                return {"error": "activation_item_missing"}
+            response = meli.put_mini("/items/" + product.meli_id,
+                {"status": "active"}, {"access_token": meli.access_token})
+            status, body = product._meli_stock_payload(response, meli)
+            if (status != 200 or not isinstance(body, dict) or body.get("error")
+                    or body.get("id") != product.meli_id or body.get("status") != "active"):
+                return {"error": "activation_unconfirmed"}
         return {}
 
     def product_meli_delete( self ):
@@ -4726,226 +4725,139 @@ class product_product(models.Model):
 
         return new_meli_available_quantity
 
-    def product_post_stock( self, context=None, meli=False, config=None ):
-        context = context or self.env.context
-        _logger.info("meli_oerp > product_post_stock context: " + str(context))
-        company = self.env.user.company_id
-        warningobj = self.env['meli.warning']
-
-        product_obj = self.env['product.product']
-        product = self
-        product_tmpl = self.product_tmpl_id
-        config = config or company
-        error = {}
-
-        if not meli or not hasattr(meli, 'client_id'):
-            meli = self.env['meli.util'].get_new_instance(company)
-            if meli.need_login():
-                self.env['meli.util']._meli_require_reconnect()
-
-        product.meli_stock_update = ml_datetime(datetime.now())
-        product_tmpl.meli_stock_update = product.meli_stock_update
-
-        if "meli_update_stock_blocked" in product_tmpl._fields and product_tmpl.meli_update_stock_blocked:
-            error = { "error": "Blocked by product template configuration." }
-            product.meli_stock_error = str(error)
-            product_tmpl.meli_stock_error = product.meli_stock_error
-            meli_message_post(product, error["error"])
-            meli_message_post(product_tmpl, error["error"])
-            return error
-
-        if "meli_update_stock_blocked" in product._fields and product.meli_update_stock_blocked:
-            error = { "error": "Blocked by product configuration." }
-            product.meli_stock_error = str(error)
-            product_tmpl.meli_stock_error = product.meli_stock_error
-            meli_message_post(product, error["error"])
-            meli_message_post(product_tmpl, error["error"])
-            return error
-
+    def _meli_stock_payload(self, response, client):
+        """Read this response without treating a false HTTP response as absence."""
+        if response is None:
+            return None, None
+        status = getattr(response, "status_code", None)
+        if status is None and response is client:
+            status = getattr(client, "last_status_code", None)
+        if type(status) is not int:
+            return None, None
         try:
-            #self.product_update_stock()
-            product_fab = False
-            if (1==1 and product.virtual_available<=0 and product.route_ids):
-                for route in product.route_ids:
-                    if (1==2 and route.name in ['Fabricar','Manufacture']):
-                        _logger.info("Fabricar:"+str(product.meli_available_quantity))
-                        product_fab = True
+            return status, response.json()
+        except Exception:
+            return status, None
 
-            if (not product_fab):
-                product.meli_available_quantity = product._meli_available_quantity(meli=meli,config=config)
+    def _meli_stock_failure(self, code, stock_confirmed=False):
+        outcome = {"error": code, "stock_confirmed": stock_confirmed}
+        self.meli_stock_error = code
+        self.product_tmpl_id.meli_stock_error = code
+        return outcome
 
-            if product.meli_available_quantity<0:
-                product.meli_available_quantity = 0
+    def _meli_stock_route_error(self, client, company):
+        seller = str(getattr(company, "mercadolibre_seller_id", "") or "")
+        snapshot = getattr(client, "_meli_stock_seller_snapshot", None)
+        client_id = str(getattr(company, "mercadolibre_client_id", "") or "")
+        if (not seller.isdigit() or not isinstance(snapshot, dict)
+                or snapshot.get("status") != 200 or type(snapshot.get("status")) is not int
+                or snapshot.get("company_id") != company.id
+                or snapshot.get("seller_id") != seller
+                or not client_id or snapshot.get("client_id") != client_id
+                or str(getattr(client, "client_id", "")) != client_id
+                or str(getattr(client, "seller_id", "")) != seller):
+            return "stock_route_unproven"
+        body = snapshot.get("body")
+        if (not isinstance(body, dict) or str(body.get("id")) != seller
+                or not isinstance(body.get("tags"), list)
+                or any(not isinstance(tag, str) for tag in body["tags"])):
+            return "stock_route_unproven"
+        unsupported = {"user_product_seller", "warehouse_management", "multiwarehouse",
+                       "multi_origin", "multiorigin"}
+        if unsupported.intersection(body["tags"]) or self.meli_user_product_id:
+            return "stock_route_unsupported"
+        owner = self.company_id
+        if owner and owner.id != company.id:
+            return "stock_company_mismatch"
+        # Direct variation PUT confirmation is not established by the current contract.
+        if self.meli_id_variation or self.product_tmpl_id.meli_pub_as_variant:
+            return "stock_variation_unsupported"
+        return None
 
-            fields = {
-                "available_quantity": product.meli_available_quantity
-            }
+    def _meli_stock_legacy_item(self, client, company):
+        item_id = self.meli_id or ""
+        if (not isinstance(item_id, str) or len(item_id) < 4
+                or not item_id[:3].isalpha() or item_id[:3] != item_id[:3].upper()
+                or not item_id[3:].isdigit()):
+            return None, "stock_item_identity_invalid"
+        # A swallowed SDK GET must not reuse its previous body/status for this read.
+        for attr in ("last_status_code", "response", "rjson"):
+            if hasattr(client, attr):
+                setattr(client, attr, None)
+        api_client = getattr(client, "api_client", None)
+        if api_client is not None:
+            api_client.last_response = None
+        response = client.get("/items/" + item_id, {"access_token": client.access_token})
+        status, body = self._meli_stock_payload(response, client)
+        if (status != 200 or not isinstance(body, dict) or body.get("error")
+                or body.get("id") != item_id
+                or str(body.get("seller_id")) != str(company.mercadolibre_seller_id)
+                or not isinstance(body.get("tags"), list)
+                or any(not isinstance(tag, str) for tag in body["tags"])
+                or not isinstance(body.get("variations"), list)
+                or not isinstance(body.get("shipping"), dict)):
+            return None, "stock_item_unproven"
+        unsupported = {"user_product_seller", "warehouse_management", "multiwarehouse",
+                       "multi_origin", "multiorigin"}
+        if (unsupported.intersection(body["tags"]) or body.get("user_product_id")
+                or body.get("inventory_id") or body["variations"]
+                or body["shipping"].get("logistic_type") not in
+                ("drop_off", "cross_docking", "xd_drop_off", "self_service", "custom", "not_specified")):
+            return None, "stock_route_unsupported"
+        return body, None
 
-            _logger.info("post stock:"+str(product.meli_available_quantity))
-            #_logger.info("product_tmpl.meli_pub_as_variant:"+str(product_tmpl.meli_pub_as_variant))
-            #_logger.info(product_tmpl.meli_pub_principal_variant.id)
-            if (product_tmpl.meli_pub_as_variant):
-                productjson = False
-                if (product_tmpl.meli_pub_principal_variant.id==False and len(product_tmpl.product_variant_ids)):
-                    product_tmpl.meli_pub_principal_variant = product_tmpl.product_variant_ids[0]
-
-                if (product_tmpl.meli_pub_principal_variant.id):
-                    base_meli_id = product_tmpl.meli_pub_principal_variant.meli_id
-                    if (base_meli_id):
-                        response = meli.get("/items/%s" % base_meli_id, {'access_token':meli.access_token, 'include_attributes': 'all'})
-                        if (response):
-                            productjson = response.json()
-
-                #chequeamos la variacion de este producto
-                if ( productjson and "variations" in productjson and len(productjson["variations"]) ):
-                    varias = {
-                        "variations": []
-                    }
-                    _logger.info("product_post_stock > Update variations stock")
-                    found_comb = False
-                    pictures_v = []
-                    same_price = False
-                    for ix in range(len(productjson["variations"]) ):
-                        #check if combination is related to this product
-                        if 'picture_ids' in productjson["variations"][ix]:
-                            if (len(productjson["variations"][ix]["picture_ids"])>len(pictures_v)):
-                                pictures_v = productjson["variations"][ix]["picture_ids"]
-                        same_price = productjson["variations"][ix]["price"]
-                        _logger.info(productjson["variations"][ix])
-                        if (self._is_product_combination(productjson["variations"][ix]) or str(productjson["variations"][ix]["id"])==str(product.meli_id_variation)):
-                            _logger.info("_is_product_combination! Post stock to variation")
-                            #_logger.info(productjson["variations"][ix])
-                            found_comb = True
-                            #reset meli_id_variation (TODO: resetting must be done outside)
-                            product.meli_id_variation = productjson["variations"][ix]["id"]
-                            var = {
-                                #"id": str( product.meli_id_variation ),
-                                "available_quantity": product.meli_available_quantity,
-                                #"picture_ids": ['806634-MLM28112717071_092018', '928808-MLM28112717068_092018', '643737-MLM28112717069_092018', '934652-MLM28112717070_092018']
-                            }
-                            varias["variations"].append(var)
-                            #_logger.info(varias)
-                            _logger.info(var)
-                            responsevar = meli.put_mini("/items/"+product.meli_id+'/variations/'+str( product.meli_id_variation ), var, {'access_token':meli.access_token})
-                            #_logger.info(responsevar.json())
-                            if responsevar:
-                                _logger.info(responsevar.json())
-                                rjson = responsevar.json()
-                                if rjson:
-                                    if "error" in rjson:
-                                        _logger.error(rjson)
-                                        error = rjson
-                                        product.meli_stock_error = str(error)
-                                        product_tmpl.meli_stock_error = product.meli_stock_error
-                                        return error
-
-                    if found_comb==False:
-                        #add combination!!
-                        _logger.info("Combination not founded: add combination")
-                        addvar = self._combination()
-                        #_logger.info(addvar)
-                        if addvar:
-                            if ('picture_ids' in addvar):
-                                if len(pictures_v)>=len(addvar["picture_ids"]):
-                                    addvar["picture_ids"] = pictures_v
-                            if (config.mercadolibre_post_default_code): #TODO: fixing SKU must be specific parameter
-                                addvar["seller_custom_field"] = product.default_code
-                            addvar["price"] = same_price
-                            #_logger.info("Add variation!")
-                            #_logger.info(addvar)
-                            responsevar = meli.post("/items/"+product.meli_id+"/variations", addvar, {'access_token':meli.access_token})
-                            if responsevar:
-                                _logger.info(responsevar.json())
-                                rjson = responsevar.json()
-                                if rjson:
-                                    if "error" in rjson:
-                                        error = rjson
-                                        product.meli_stock_error = str(error)
-                                        product_tmpl.meli_stock_error = product.meli_stock_error
-                                        return error
-                            #_logger.info(responsevar.json())
-                #_logger.info("Available:"+str(product_tmpl.virtual_available))
-                best_available = 0
-                for vr in product_tmpl.product_variant_ids:
-                    sum = vr.meli_available_quantity
-                    if (sum<0):
-                        sum = 0
-                    best_available+= sum
-                if (best_available>0 and product.meli_status=="paused" and product.meli_update_stock_blocked==False and product_tmpl.meli_update_stock_blocked==False):
-                    _logger.info(
-                        "STOCK_SYNC REACTIVATE (variant): %s meli_id=%s best_available=%s → activating",
-                        product.default_code, product.meli_id, best_available
-                    )
-                    product.product_meli_status_active()
-                elif (best_available<=0 and product.meli_status=="active"):
-                    _logger.info("Pause!")
-                    #product.product_meli_status_pause()
-            else:
-                if (product.meli_id and not product.meli_id_variation):
-                    #_logger.info("meli:"+str(meli))
-                    response = meli.get("/items/%s" % product.meli_id, {'access_token':meli.access_token})
-                    if (response):
-                        pjson = response.json()
-                        if "variations" in pjson:
-                            if (len(pjson["variations"])==1):
-                                product.meli_id_variation = pjson["variations"][0]["id"]
-
-                if (product.meli_id_variation):
-                    #_logger.info("Posting using product.meli_id_variation")
-                    var = {
-                        #"id": str( product.meli_id_variation ),
-                        "available_quantity": product.meli_available_quantity,
-                        #"picture_ids": ['806634-MLM28112717071_092018', '928808-MLM28112717068_092018', '643737-MLM28112717069_092018', '934652-MLM28112717070_092018']
-                    }
-                    responsevar = meli.put_mini("/items/"+product.meli_id+'/variations/'+str( product.meli_id_variation ), var, {'access_token':meli.access_token})
-                    if (responsevar):
-                        rjson = responsevar.json()
-                        if rjson:
-                            _logger.info(rjson)
-                            if ('available_quantity' in rjson):
-                                _logger.info( "Posted ok:" + str(rjson['available_quantity']) )
-                            if "error" in rjson:
-                                error = rjson
-                                product.meli_stock_error = str(error)
-                                product_tmpl.meli_stock_error = product.meli_stock_error
-                                return error
-                else:
-                    response = meli.put_mini("/items/"+product.meli_id, fields, {'access_token':meli.access_token})
-                    if (response):
-                        rjson = response.json()
-                        if ('available_quantity' in rjson):
-                            _logger.info( "Posted ok:" + str(rjson['available_quantity']) )
-                        if "error" in rjson:
-                            error = rjson
-                            product.meli_stock_error = str(error)
-                            product_tmpl.meli_stock_error = product.meli_stock_error
-                            return error
-
-                _ml_status_now = product.meli_status
-                if (product.meli_available_quantity<=0 and _ml_status_now=="active"):
-                    #product.product_meli_status_pause(meli=meli)
-                    _logger.info("pause")
-                elif (product.meli_available_quantity>0 and _ml_status_now=="paused" and product.meli_update_stock_blocked==False and product_tmpl.meli_update_stock_blocked==False):
-                    _logger.info(
-                        "STOCK_SYNC REACTIVATE: %s meli_id=%s qty=%s meli_status=paused → activating",
-                        product.default_code, product.meli_id, product.meli_available_quantity
-                    )
-                    product.product_meli_status_active(meli=meli)
-
-        except Exception as e:
-            # 26.87 (H1): la excepcion se registraba en meli_stock_error pero la
-            # funcion devolvia {} = EXITO. El llamador marcaba el binding como
-            # publicado y la publicacion salia de la cola sin haberse actualizado.
-            # Ahora el error viaja en el return.
-            _logger.error("product_post_stock > exception error: %s", e, exc_info=True)
-            error = { 'error': str(e) }
-            product.meli_stock_error = str(error)
-            product_tmpl.meli_stock_error = product.meli_stock_error
-
-        product.meli_stock_error = str(error) if error else "Ok"
-        product_tmpl.meli_stock_error = product.meli_stock_error
-        # 26.87 (H1): devolver el error si lo hubo (antes: siempre {}).
-        return error or {}
+    def product_post_stock(self, context=None, meli=False, config=None):
+        """Confirm only the demonstrated legacy item route; never infer remote success."""
+        self.ensure_one()
+        product, template = self, self.product_tmpl_id
+        company = config or self.env.user.company_id
+        if (("meli_update_stock_blocked" in template._fields and template.meli_update_stock_blocked)
+                or ("meli_update_stock_blocked" in product._fields and product.meli_update_stock_blocked)):
+            return self._meli_stock_failure("stock_update_blocked")
+        confirmed = False
+        try:
+            if not meli or not hasattr(meli, "client_id"):
+                meli = self.env["meli.util"].get_new_instance(company)
+                if meli.need_login():
+                    self.env["meli.util"]._meli_require_reconnect()
+            error = self._meli_stock_route_error(meli, company)
+            if error:
+                return self._meli_stock_failure(error)
+            _item, error = self._meli_stock_legacy_item(meli, company)
+            if error:
+                return self._meli_stock_failure(error)
+            quantity = self._meli_available_quantity(meli=meli, config=company)
+            if (isinstance(quantity, bool) or not isinstance(quantity, (int, float))
+                    or not math.isfinite(quantity) or quantity != int(quantity)):
+                return self._meli_stock_failure("stock_quantity_unsupported")
+            quantity = max(0, int(quantity))
+            product.meli_available_quantity = quantity
+            response = meli.put_mini("/items/" + product.meli_id,
+                {"available_quantity": quantity}, {"access_token": meli.access_token})
+            status, body = self._meli_stock_payload(response, meli)
+            value = body.get("available_quantity") if isinstance(body, dict) else None
+            if (status != 200 or not isinstance(body, dict) or body.get("error")
+                    or body.get("id") != product.meli_id
+                    or isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value != quantity):
+                return self._meli_stock_failure("stock_write_unconfirmed")
+            confirmed = True
+            product.meli_stock_update = ml_datetime(datetime.now())
+            # A template timestamp never claims that unvisited sibling variants succeeded.
+            if len(template.product_variant_ids) == 1:
+                template.meli_stock_update = product.meli_stock_update
+            if quantity > 0 and product.meli_status == "paused":
+                activation = product.product_meli_status_active(meli=meli)
+                if not isinstance(activation, dict) or activation.get("error"):
+                    return self._meli_stock_failure("stock_reactivation_unconfirmed", stock_confirmed=True)
+            product.meli_stock_error = "Ok"
+            template.meli_stock_error = "Ok"
+            return {}
+        except Exception as exc:
+            _logger.warning("Stock outcome uncertain (%s)", type(exc).__name__)
+            return self._meli_stock_failure(
+                "stock_reactivation_uncertain" if confirmed else "stock_write_uncertain",
+                stock_confirmed=confirmed)
 
     #update internal product stock based on meli_default_stock_product
     def product_update_stock(self, stock=False, meli=False, config=None):

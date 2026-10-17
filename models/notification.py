@@ -598,4 +598,4 @@ class MercadolibreNotification(models.Model):
         self.processing_ended = ml_datetime( str( datetime.now() ) )
         self.processing_errors = str(errors)
         self.processing_logs = str(logs)
-        self.state = 'SUCCESS'
+        self.state = 'FAILED' if errors else 'SUCCESS'
