@@ -381,8 +381,8 @@ class TestImageUploadSecurity(unittest.TestCase):
                     if not (path.name == "meli_util.py" and isinstance(node.func.value, ast.Name) and node.func.value.id == "self"):
                         calls.append((path.relative_to(ROOT).as_posix(), node.lineno, node.func.attr))
         self.assertEqual(sorted(calls), [("models/product.py", 573, "upload"),
-                                ("models/product.py", 3205, "upload"),
-                                ("models/product.py", 3312, "upload")])
+                                ("models/product.py", 3204, "upload"),
+                                ("models/product.py", 3311, "upload")])
 
 
 if __name__ == "__main__":
