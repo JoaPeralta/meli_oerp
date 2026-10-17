@@ -29,7 +29,7 @@ import ast
 from functools import wraps
 from .meli_pack_admission import (
     AdmissionError, remote_id, verify_order, snapshot_response, enrich_buyer,
-    pack_order_ids, verify_pack_commerce,
+    pack_order_ids, verify_pack_commerce, fetch_pack_snapshot,
 )
 from .meli_oerp_config import *
 
@@ -277,16 +277,15 @@ class sale_order(models.Model):
         # every time someone viewed the order in the UI
         for order in self:
             morder = order.meli_orders and order.meli_orders[0]
-            if morder:
-                # Only read existing values, do NOT call update_order_status()
-                order.meli_status = morder.status
-                order.meli_status_detail = morder.status_detail
+            if (str(order.meli_order_id or "").startswith("pack:")
+                    or any(child.pack_id for child in order.meli_orders)
+                    or len(order.meli_orders) > 1):
+                order.meli_status_brief = "Pack: individual and local states are separate"
+            elif morder:
                 raw = str(morder.status)+" ship-"+( (morder.shipment_status and str(morder.shipment_status)) or "" ) + ( (morder.shipment_substatus and str(morder.shipment_substatus)) or "")
                 order.meli_status_brief = self.MELI_STATUS_LABELS.get(raw, raw)
             else:
                 order.meli_status_brief = "-"
-                order.meli_status =  order.meli_status
-                order.meli_status_detail = order.meli_status_detail
 
     def search_meli_status_brief(self, operator, value):
         #_logger.info(search_meli_status_brief")
@@ -1318,6 +1317,10 @@ class sale_order(models.Model):
     @api.depends('meli_status_detail', 'state')
     def _compute_meli_cancel_banner(self):
         for order in self:
+            if (str(order.meli_order_id or "").startswith("pack:")
+                    or len(order.meli_orders) > 1 or any(child.pack_id for child in order.meli_orders)):
+                order.meli_cancel_banner = False
+                continue  # A local final-own cancellation is not official pack cancellation.
             detail = (order.meli_status_detail or '').strip().lstrip('|').strip()
             if not detail or order.state != 'cancel':
                 order.meli_cancel_banner = False
@@ -1410,6 +1413,10 @@ class sale_order(models.Model):
                  'invoice_ids.state', 'picking_ids.state')
     def _compute_meli_cancel_pending_banner(self):
         for order in self:
+            if (str(order.meli_order_id or "").startswith("pack:")
+                    or len(order.meli_orders) > 1 or any(child.pack_id for child in order.meli_orders)):
+                order.meli_cancel_pending_banner = False
+                continue
             # Solo mostrar cuando ML canceló pero Odoo NO está cancelado
             if order.meli_status != 'cancelled' or order.state == 'cancel':
                 order.meli_cancel_pending_banner = False
@@ -2699,7 +2706,7 @@ class mercadolibre_orders(models.Model):
                 raise ValidationError("A complete fresh pack/order response is unavailable")
             return body
 
-        pack = get("/packs/" + pack_id)
+        pack = fetch_pack_snapshot(meli, pack_id)
         ids = pack_order_ids(pack, pack_id)
         if remote_id(current["id"]) not in ids:
             raise ValidationError("The current own order is absent from its visible pack")
@@ -2724,7 +2731,7 @@ class mercadolibre_orders(models.Model):
             if not isinstance(discounts, dict) or discounts.get("details") != []:
                 raise ValidationError("Discount allocation is unknown or unsupported")
             snapshots.append(source)
-        if get("/packs/" + pack_id) != pack:
+        if fetch_pack_snapshot(meli, pack_id) != pack:
             raise ValidationError("Visible pack changed while collecting its own snapshots")
         return verify_pack_commerce(pack, snapshots, seller)
 
@@ -2952,6 +2959,10 @@ class mercadolibre_orders(models.Model):
         if not config:
             config = company
         seller_identity = self._meli_assert_order_admission_actor(config)
+        if isinstance(order_json, dict) and order_json.get("status") in (
+                "cancelled", "pending_cancel", "partially_refunded"):
+            return self._meli_apply_cancellation(order_json, config, meli=meli, local_id=oid,
+                                                  expected_id=data.get("remote_order_id"))
         try:
             order_json = verify_order(order_json, seller_identity,
                                       expected_id=data.get("remote_order_id"))
@@ -5339,6 +5350,11 @@ class mercadolibre_orders(models.Model):
 
         return {}
 
+
+    @api.model
+    def _meli_apply_cancellation(self, payload, config, meli=None, local_id=None, expected_id=None):
+        """Fail closed without the installed source-local cancellation adapter."""
+        raise ValidationError("An installed source-cancellation bridge is required")
 
     def orders_update_order( self, context=None, meli=None, config=None ):
 

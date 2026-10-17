@@ -12,6 +12,15 @@ class AdmissionError(ValueError):
     """Essential ownership/identity is missing or the shape is unsupported."""
 
 
+def fetch_pack_snapshot(meli, pack_id):
+    """Shared read boundary; callers retain their existing snapshot/drift policy."""
+    body, metadata = snapshot_response(meli.get("/packs/" + remote_id(pack_id),
+                                                {"access_token": meli.access_token}))
+    if metadata["status"] != 200 or metadata["missing"]:
+        raise AdmissionError("A complete fresh pack response is unavailable")
+    return body
+
+
 def remote_id(value):
     if isinstance(value, bool) or not isinstance(value, (str, int)):
         raise AdmissionError("A positive remote identity is required")

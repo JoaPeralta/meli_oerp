@@ -38,7 +38,8 @@ def method(name, prefix=False, extra_scope=None):
     scope = {"AdmissionError": admission.AdmissionError, "ValidationError": ValueError,
              "verify_order": admission.verify_order, "remote_id": admission.remote_id,
              "snapshot_response": admission.snapshot_response, "pack_order_ids": admission.pack_order_ids,
-             "verify_pack_commerce": admission.verify_pack_commerce}
+              "verify_pack_commerce": admission.verify_pack_commerce,
+              "fetch_pack_snapshot": admission.fetch_pack_snapshot}
     scope.update(extra_scope or {})
     exec(compile(ast.fix_missing_locations(ast.Module([node], [])), "actual-orders-entry", "exec"), scope)
     return scope[name]
