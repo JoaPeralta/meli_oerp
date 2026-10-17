@@ -372,13 +372,11 @@ class res_company(models.Model):
 
         company = self.env.user.company_id
 
-        apistate = self.env['meli.util'].get_new_instance(company)
-        if apistate.needlogin_state:
-            return True
-
         if (company.mercadolibre_cron_get_orders_status):
             #_logger.info("company.mercadolibre_cron_get_orders_status")
-            self.env['mercadolibre.orders'].orders_resync_status(meli=apistate, config=company)
+            # Resync validates its entire local selector before the factory
+            # can probe identity. Its client/login guard remains authoritative.
+            return self.env['mercadolibre.orders'].orders_resync_status(config=company)
 
     mercadolibre_client_id = fields.Char(string='App Id', help='Client ID para ingresar a MercadoLibre',size=128)
     mercadolibre_secret_key = fields.Char(

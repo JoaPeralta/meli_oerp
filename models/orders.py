@@ -5646,6 +5646,11 @@ class mercadolibre_orders(models.Model):
                     else:
                         order.sale_order.confirm_ml(meli=meli,config=config)
 
+    @api.model
+    def _meli_resync_known_pack_status(self, candidates, config, meli=None, account=None):
+        """The dedicated bridge owns complete known-pack status projection."""
+        raise ValidationError("Pack status resync requires its known source-bound bridge")
+
     def orders_resync_status( self, meli=None, config=None, account=None ):
         """#475 - Re-sincroniza el ESTADO de los pedidos MeLi recientes que siguen
         ABIERTOS en Odoo, para reflejar cancelaciones (y otros cambios de estado)
@@ -5673,10 +5678,6 @@ class mercadolibre_orders(models.Model):
         if config is not None and "company_id" in config._fields and config.company_id:
             company = config.company_id
         self._meli_assert_order_admission_actor(config)
-        if not meli:
-            meli = self.env['meli.util'].get_new_instance(company)
-        if not meli or meli.needlogin_state:
-            return {}
 
         days = 15
         if "mercadolibre_cron_orders_status_days" in config._fields and config.mercadolibre_cron_orders_status_days:
@@ -5710,14 +5711,20 @@ class mercadolibre_orders(models.Model):
         # trunca las NUEVAS (ya cubiertas por el sweep normal), nunca las viejas.
         candidates = self.search(domain, order="date_created asc", limit=query_limit)
 
-        # This legacy sweep can cancel an entire sale and globally roll back
-        # on a caught error. A shared/pack root must never enter that loop.
-        # Preflight the whole population outside its broad exception handler,
-        # before Autocommit, a member GET or any child/root mutation.
+        # A pack population never falls through to the legacy global-rollback
+        # loop, including a selector containing unsupported single orders.
+        if any(order.pack_id or (order.sale_order.meli_order_id or "").startswith("pack:")
+               for order in candidates):
+            return self._meli_resync_known_pack_status(candidates, config, meli=meli, account=account)
+        # Preserve the single-only legacy control, not a new safety guarantee.
+        # Its entire local preflight still precedes even the identity factory.
         for order in candidates:
-            if order.pack_id or (order.sale_order.meli_order_id or "").startswith("pack:"):
-                raise ValidationError("Pack status projection is pending source-local cancellation semantics")
             self._meli_assert_individual_sale_root(order, order.sale_order)
+
+        if not meli:
+            meli = self.env['meli.util'].get_new_instance(company)
+        if not meli or meli.needlogin_state:
+            return {}
 
         Autocommit(self, False)
         checked = changed = cancelled = 0

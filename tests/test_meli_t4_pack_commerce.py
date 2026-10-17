@@ -292,6 +292,9 @@ class ResyncSafetyTests(unittest.TestCase):
                                 _meli_assert_order_admission_actor=lambda config: "42",
                                 _meli_assert_individual_sale_root=lambda *args: None)
         incoming = dict(payload(), status="cancelled")
+        # Connector-only execution has no source-bound bridge; keep the
+        # anonymous shared-root case negative through the actual default seam.
+        model._meli_resync_known_pack_status = method("_meli_resync_known_pack_status").__get__(model)
         client = SimpleNamespace(access_token=None, needlogin_state=False,
                                  get=lambda *args, **kwargs: SimpleNamespace(json=lambda: incoming))
         with self.assertRaisesRegex(ValueError, "Pack status"):
