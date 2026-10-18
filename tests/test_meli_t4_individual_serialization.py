@@ -270,7 +270,8 @@ class Fixture:
         self.env["viarengo.meli.bridge"] = SimpleNamespace(_assert_actor=actor)
         self.model = installed(env=self.env, id=12, ids=[12], order_id="101", seller=repr({"id": 42}),
             company_id=self.company, seller_id=self.user, sale_order=self.root, pack_id=False,
-            shipment=False, currency_id="USD", status="paid", status_detail="", _fields={})
+            shipment=False, shipping_id=False, currency_id="USD", status="paid", status_detail="", _fields={},
+            _table="mercadolibre_orders")
         installed.__iter__ = lambda record: iter([record])
         installed.__len__ = lambda record: 1
         installed.__or__ = lambda record, other: record
@@ -307,10 +308,19 @@ class Fixture:
         plain = SimpleNamespace(_fields={}, flush_model=lambda fields: None)
         for name in ("product.product", "product.pricelist", "res.partner", "mercadolibre.posting",
                      "mercadolibre.payments", "mercadolibre.shipment"):
-            self.env[name] = plain
+            self.env[name] = copy.copy(plain)
         self.env["sale.order.line"] = SimpleNamespace(_fields={"meli_source_order_item_id": True},
                                                        flush_model=lambda fields: None)
         self.env["mercadolibre.order_items"] = plain
+        for name in ("sale.order", "sale.order.line", "mercadolibre.order_items",
+                     "mercadolibre.shipment", "mercadolibre.shipment.item"):
+            model = self.env.setdefault(name, SimpleNamespace())
+            model._table = name.replace(".", "_")
+            model.check_access = lambda mode, name=name: self.access.append((name, mode))
+            model.flush_model = lambda fields: None
+        self.env["sale.order"]._fields = root._fields
+        self.env["mercadolibre.shipment"]._fields = {"orders": SimpleNamespace(
+            relation="shipment_order_double_rel", column1="shipment_id", column2="order_id")}
         self.env["meli.util"] = SimpleNamespace(get_new_instance=lambda config: self.client)
         self.env["meli.warning"] = SimpleNamespace()
         class Buyer:
@@ -827,7 +837,7 @@ class IndividualSerializationTests(unittest.TestCase):
                     line.product_id = SimpleNamespace(id=999)
                 self.assert_denied_before_physical_write(fixture)
 
-    def test_first_commercial_projection_is_explicitly_not_guarded(self):
+    def test_existing_rootless_parent_is_guarded_before_first_commercial_write(self):
         failure = WriteBoundaryReached("existing unbound parent projection")
         fixture = Fixture(failure)
         fixture.model.sale_order = Rows()
@@ -835,7 +845,80 @@ class IndividualSerializationTests(unittest.TestCase):
         with self.assertRaises(WriteBoundaryReached) as caught:
             fixture.invoke("json")
         self.assertIs(caught.exception, failure)
-        self.assertFalse(getattr(failure, "_meli_individual_operation_failure", False))
+        self.assertTrue(getattr(failure, "_meli_individual_operation_failure", False))
+        self.assertEqual(self.updates(fixture), [(
+            "UPDATE mercadolibre_orders SET write_date=write_date WHERE id=%s RETURNING id", [12])])
+        self.assertEqual(len(fixture.writes), 1)
+        self.assertEqual(fixture.caller, {"sentinel": "unrelated uncommitted caller work"})
+
+    def rootless(self, failure=None):
+        fixture = Fixture(failure or WriteBoundaryReached("first commercial write"))
+        fixture.model.sale_order = Rows()
+        fixture.env["sale.order"].search = lambda *args, **kwargs: Rows()
+        return fixture
+
+    def test_rootless_known_remote_false_is_guarded_not_first_local_creation(self):
+        fixture = self.rootless()
+        with self.assertRaises(WriteBoundaryReached) as caught:
+            fixture.model.orders_update_order_json({"id": False, "order_json": fixture.body},
+                config=fixture.company, meli=fixture.client)
+        self.assertIs(caught.exception, fixture.failure)
+        self.assertEqual(len(self.updates(fixture)), 1)
+        self.assertTrue(caught.exception._meli_individual_operation_failure)
+
+    def test_rootless_identity_and_native_actor_boundaries_precede_integrity_sql(self):
+        for kind in ("seller", "company", "sudo", "circuit"):
+            with self.subTest(kind=kind):
+                fixture = self.rootless()
+                if kind == "seller":
+                    fixture.model.seller = repr({"id": 99})
+                elif kind == "company":
+                    fixture.model.company_id = SimpleNamespace(id=2)
+                elif kind == "sudo":
+                    fixture.env.su = True
+                else:
+                    fixture.env.context["default_viarengo_circuit_code"] = "b"
+                self.assert_denied_before_physical_write(fixture)
+                self.assertFalse(any("meli_order_id=%s OR meli_order=%s" in q for q, p in fixture.cr.calls))
+
+    def test_rootless_hidden_or_orphan_graph_is_not_adopted(self):
+        fixture = self.rootless()
+        fetch = fixture.cr.fetchone
+        fixture.cr.fetchone = lambda: (True,) if "meli_order_id=%s OR meli_order=%s" in fixture.cr.calls[-1][0] else fetch()
+        self.assert_denied_before_physical_write(fixture)
+        query, params = next((q, p) for q, p in fixture.cr.calls if "meli_order_id=%s OR meli_order=%s" in q)
+        for table in ("source_double_rel", "mercadolibre_order_items", "sale_order_line",
+                      "mercadolibre_shipment", "shipment_order_double_rel", "mercadolibre_shipment_item"):
+            self.assertIn(table, query)
+        self.assertEqual(params, [12, "101", 12, 12, 12, 12, "101", 12, 12, "101"])
+
+    def test_rootless_nonpaid_or_shipped_or_incomplete_observation_is_not_eligible(self):
+        for kind in ("status", "stored_status", "shipment", "stored_shipment", "pack", "items", "currency"):
+            with self.subTest(kind=kind):
+                fixture = self.rootless()
+                if kind == "status":
+                    fixture.body["status"] = "pending_cancel"
+                elif kind == "stored_status":
+                    fixture.model.status = "cancelled"
+                elif kind == "shipment":
+                    fixture.body["shipping"] = {"id": 900}
+                elif kind == "stored_shipment":
+                    fixture.model.shipping_id = "900"
+                elif kind == "pack":
+                    fixture.model.pack_id = "900"
+                elif kind == "items":
+                    fixture.body["order_items"] = []
+                else:
+                    fixture.model.currency_id = "ARS"
+                self.assert_denied_before_physical_write(fixture)
+
+    def test_truly_absent_parent_retains_existing_producer_without_physical_guard(self):
+        fixture = self.rootless()
+        fixture.model.search = lambda *args, **kwargs: Rows()
+        with self.assertRaises(WriteBoundaryReached) as caught:
+            fixture.model.orders_update_order_json({"id": False, "order_json": fixture.body},
+                config=fixture.company, meli=fixture.client)
+        self.assertIs(caught.exception, fixture.failure)
         self.assertEqual(self.updates(fixture), [])
 
     def test_pack_routes_keep_existing_producer_without_individual_guard(self):
