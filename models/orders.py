@@ -5721,6 +5721,11 @@ class mercadolibre_orders(models.Model):
         if any(order.pack_id or (order.sale_order.meli_order_id or "").startswith("pack:")
                for order in candidates):
             return self._meli_resync_known_pack_status(candidates, config, meli=meli, account=account)
+        individual_resync = getattr(self, "_meli_resync_known_individual_status", None)
+        if individual_resync:
+            result = individual_resync(candidates, config, meli=meli, account=account)
+            if result is not None:
+                return result
         # Preserve the single-only legacy control, not a new safety guarantee.
         # Its entire local preflight still precedes even the identity factory.
         for order in candidates:

@@ -8,7 +8,9 @@ An explicit verified bridge binding is required; no historical sibling fallback.
 import ast
 import copy
 import datetime
+from decimal import Decimal, InvalidOperation
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -113,6 +115,11 @@ class Rows(list):
 
     def flush_recordset(self, fields):
         return None
+
+
+class Record(SimpleNamespace):
+    def __getitem__(self, key):
+        return getattr(self, key)
 
 
 class Cursor:
@@ -224,6 +231,9 @@ class Fixture:
             "psycopg2_errors": SimpleNamespace(SerializationFailure=SerializationFailure),
             "fields": SimpleNamespace(Datetime=SimpleNamespace(now=datetime.datetime.now)),
             "timedelta": datetime.timedelta, "DECLARATION": "viarengo_meli_root_circuit"}
+        self.scope.update(Decimal=Decimal, InvalidOperation=InvalidOperation, json=json)
+        for name in ("amount", "cancellation_evidence"):
+            compile_function(ROOT / "models/meli_cancellation.py", name, self.scope)
         orders_path = ROOT / "models/orders.py"
         compile_function(orders_path, "_meli_order_import_savepoint", self.scope)
         compile_function(BRIDGE / "addons/viarengo_circuit_meli/policy.py", "root_values", self.scope)
@@ -236,7 +246,8 @@ class Fixture:
         bridge_admission = compile_layer(BRIDGE / "addons/viarengo_circuit_meli/models/pack_admission.py",
             "MeliOrderAdmission", generic, ["_meli_assert_order_admission_actor"], self.scope)
         installed = compile_layer(BRIDGE / "addons/viarengo_circuit_meli/models/cancellation.py",
-            "SourceCancellation", bridge_admission, ["_meli_observation_anchor", "orders_update_order"], self.scope)
+            "SourceCancellation", bridge_admission,
+            ["_meli_observation_anchor", "_meli_cancel_snapshot", "orders_update_order"], self.scope)
         registration = (BRIDGE / "addons/viarengo_circuit_meli/models/__init__.py").read_text(encoding="utf-8")
         if "from . import individual_serialization" in registration.splitlines():
             path = BRIDGE / "addons/viarengo_circuit_meli/models/individual_serialization.py"
@@ -245,8 +256,10 @@ class Fixture:
             for name in ("membership_incomplete", "line_population_incomplete"):
                 compile_function(BRIDGE / "addons/viarengo_circuit_meli/models/cancellation.py", name, self.scope)
             self.scope["SOURCE"] = "meli_source_order_item_id"
-            installed = compile_layer(path, "IndividualSerialization", installed,
-                ["_meli_individual_serialization_parent", "orders_update_order_json"], self.scope)
+            methods = [node.name for node in next(node for node in ast.parse(path.read_bytes()).body
+                if isinstance(node, ast.ClassDef) and node.name == "IndividualSerialization").body
+                if isinstance(node, ast.FunctionDef)]
+            installed = compile_layer(path, "IndividualSerialization", installed, methods, self.scope)
         # The bridge's native configuration/group/ACL query is a boundary double;
         # generic actor and current bridge admission/wrapper bodies execute below.
         def actor():
@@ -276,6 +289,19 @@ class Fixture:
         root.order_line = Rows([SimpleNamespace(id=40, order_id=self.root, company_id=self.company,
             display_type=False, product_id=source.product_id, meli_source_order_item_id=source,
             check_access=lambda mode: self.access.append(("line", mode)))])
+        currency = SimpleNamespace(name="USD", compare_amounts=lambda a, b: (a > b) - (a < b))
+        root.currency_id, root.amount_total, root.locked = currency, 200, False
+        source.product_id.uom_id = SimpleNamespace(id=1)
+        source.product_id.company_id, source.currency_id = self.company, "USD"
+        line = Record(**vars(root.order_line[0]))
+        root.order_line = Rows([line])
+        line.product_uom_id, line.currency_id = source.product_id.uom_id, currency
+        line.meli_order_item_id, line.meli_order_item_variation_id = "MLA123", "7"
+        line.product_uom_qty, line.price_unit, line.price_total = 2, 100, 200
+        line.price_subtotal, line.price_tax, line.discount = 200, 0, 0
+        line.is_delivery, line.tax_ids, line.move_ids = False, Rows(), Rows()
+        line.qty_delivered = line.qty_invoiced = 0
+        self.model.total_amount = self.model.paid_amount = 200
         self.env["mercadolibre.orders"] = self.model
         self.env["sale.order"] = SimpleNamespace(search=lambda *args, **kwargs: self.root)
         plain = SimpleNamespace(_fields={}, flush_model=lambda fields: None)
@@ -325,6 +351,335 @@ class Fixture:
             self.model.status = "confirmed"  # Legacy selector needs a real status change.
             return self.model.orders_resync_status(config=self.company, meli=self.client)
         raise AssertionError("Unknown source contract route")
+
+
+class ResyncFixture(Fixture):
+    """Actual resync/registered guard; only commercial ORM producer is doubled.
+
+    Source checks establish routing/order/output checks, not native SQL rollback,
+    canonical mail validation or Odoo economics. Registered native tests cover those.
+    """
+    def __init__(self):
+        super().__init__(RuntimeError("Unexpected legacy buyer boundary"))
+        self.body["pack_id"] = None
+        self.model._name = "mercadolibre.orders"
+        currency = SimpleNamespace(name="USD", compare_amounts=lambda a, b: (a > b) - (a < b))
+        root = self.root[0]
+        line = Record(**vars(self.root.order_line[0]))
+        root.order_line = Rows([line])
+        self.source = line.meli_source_order_item_id
+        uom = SimpleNamespace(id=1)
+        self.source.product_id.uom_id = uom
+        self.source.product_id.company_id = self.company
+        self.source.currency_id = "USD"
+        root.currency_id, root.amount_total, root.locked = currency, 200, False
+        line.product_uom_id, line.currency_id = uom, currency
+        line.meli_order_item_id, line.meli_order_item_variation_id = "MLA123", "7"
+        line.product_uom_qty, line.price_unit, line.price_total = 2, 100, 200
+        line.price_subtotal, line.price_tax, line.discount = 200, 0, 0
+        line.is_delivery, line.tax_ids, line.move_ids = False, Rows(), Rows()
+        line.qty_delivered = line.qty_invoiced = 0
+        self.model.total_amount = self.model.paid_amount = 200
+        self.line, self.notes, self.projections = line, [], []
+        self.factory_calls = []
+        self.env.flush_all = lambda: None
+        self.env["meli.util"].get_new_instance = lambda config: self.factory_calls.append(config) or self.client
+        self.scope.update(Decimal=Decimal, InvalidOperation=InvalidOperation, json=json)
+        for name in ("amount", "cancellation_evidence"):
+            compile_function(ROOT / "models/meli_cancellation.py", name, self.scope)
+        compile_function(BRIDGE / "addons/viarengo_circuit_meli/models/cancellation.py",
+                         "_meli_cancel_snapshot", self.scope)
+        self.model._meli_cancel_snapshot = lambda members, lines: self.scope["_meli_cancel_snapshot"](
+            self.model, members, lines)
+        self.model._meli_cancel_population = lambda config: Rows([self.model])
+        self.model._meli_audit_document = lambda note, target: note.document
+        self.model._meli_replay_postconditions = lambda *args: not self.line.product_uom_qty and root.state == "cancel"
+        self.env["mail.message"] = SimpleNamespace(search=lambda *args: Rows(self.notes))
+        root.meli_cancel_with_detail = lambda *args: self.projections.append("FORBIDDEN_LEGACY_WHOLE_CANCEL")
+        self.members = [self]
+        self.after_projection = lambda fixture: None
+        self.producer_result = {}
+        def search(domain, **kwargs):
+            matches = Rows(f.model for f in self.members
+                if not any(term[:2] == ("order_id", "=") and str(term[2]) != f.model.order_id
+                           for term in domain))
+            # Odoo singleton recordsets retain model identity, not Python list identity.
+            return matches[0] if len(matches) == 1 and any(term[0] == "order_id" for term in domain) else matches
+        self.model.search = search
+        self.model.browse = lambda local_id=None: next((f.model for f in self.members if local_id == f.model.id), Rows())
+        self.env["mail.message"].search = lambda *args: Rows(note for f in self.members for note in f.notes)
+        old_fetch = self.cr.fetchone
+        def fetch():
+            query, params = self.cr.calls[-1]
+            if query.startswith("UPDATE mercadolibre_orders"):
+                return (params[0],)
+            if "meli_source_order_item_id IS NOT NULL" in query:
+                return (bool(self.line.meli_source_order_item_id),)
+            return old_fetch()
+        self.cr.fetchone = fetch
+        @contextmanager
+        def savepoint():
+            states = [(f, f.state(), list(f.notes)) for f in self.members]
+            caller = copy.deepcopy(self.caller)
+            try:
+                yield
+            except BaseException:
+                for f, state, notes in states:
+                    f.restore(state)
+                    f.notes[:] = notes
+                self.caller.clear()
+                self.caller.update(caller)
+                raise
+        self.cr.savepoint = savepoint
+        generic = next(cls for cls in type(self.model).__mro__ if cls.__name__ == "CurrentGenericOrders")
+        def project(model, data, **kwargs):
+            selected = next(f for f in self.members if f.model.id == data["id"])
+            model, root, line = selected.model, selected.root[0], selected.line
+            body = data["order_json"]
+            selected.projections.append(copy.deepcopy(body))
+            before = model._meli_cancel_snapshot(Rows([model]), model.sale_order.order_line)
+            if body["status"] in self.scope["CANCELLATION_STATES"]:
+                reason = "processed_history_requires_reconciliation" if root.state == "sale" else (
+                    "remote_cancellation_not_terminal" if body["status"] != "cancelled" else (
+                    "split_or_transformation_requires_reconciliation" if "split" in body.get("tags", []) else False))
+                model.status, model.status_detail = body["status"], body.get("status_detail") or ""
+                if not reason:
+                    line.product_uom_qty, line.price_total, line.price_subtotal = 0, 0, 0
+                    root.amount_total, root.state = 0, "cancel"
+                result = {"cancellation": "reconciliation" if reason else "applied", "error": reason,
+                          "order_id": model.order_id, "sale_order_id": root.id}
+                evidence = self.scope["cancellation_evidence"](body, "42", model.order_id)
+                selected.notes.append(SimpleNamespace(document={"evidence": evidence,
+                    "outcome": reason or "applied", "before": before,
+                    "after": model._meli_cancel_snapshot(Rows([model]), model.sale_order.order_line)}))
+                return result
+            item = body["order_items"][0]
+            selected.source.quantity, selected.source.unit_price = item["quantity"], str(item["unit_price"])
+            line.product_uom_qty, line.price_unit = item["quantity"], item["unit_price"]
+            line.price_total = line.price_subtotal = root.amount_total = item["quantity"] * item["unit_price"]
+            model.status, model.total_amount, model.paid_amount = "paid", body["total_amount"], body["paid_amount"]
+            self.after_projection(selected)
+            return self.producer_result  # Actual scalar producer's normal contract is {}.
+        generic.orders_update_order_json = project
+
+    def state(self):
+        return (self.model.status, self.model.status_detail, self.model.total_amount, self.model.paid_amount,
+            self.source.quantity, self.source.unit_price, self.line.product_uom_qty,
+            self.line.price_unit, self.line.price_total, self.line.price_subtotal,
+            self.root.state, self.root.amount_total)
+
+    def restore(self, value):
+        (self.model.status, self.model.status_detail, self.model.total_amount, self.model.paid_amount,
+            self.source.quantity, self.source.unit_price, self.line.product_uom_qty,
+            self.line.price_unit, self.line.price_total, self.line.price_subtotal,
+            self.root[0].state, self.root[0].amount_total) = value
+
+    def resync(self, client=True):
+        return self.model.orders_resync_status(config=self.company, meli=self.client if client else None)
+
+    def add_second(self):
+        other = ResyncFixture()
+        other.model.id, other.model.ids, other.model.order_id = 13, [13], "102"
+        other.root[0].id, other.root[0].meli_order_id = 21, "102"
+        other.source.id, other.line.id = 31, 41
+        other.model.env, other.root[0].env = self.env, self.env
+        other.model.company_id, other.model.seller_id = self.company, self.user
+        other.root[0].company_id = other.line.company_id = other.source.product_id.company_id = self.company
+        self.members.append(other)
+        return other
+
+
+class IndividualResyncTests(unittest.TestCase):
+    def test_same_status_paid_projects_fresh_economics_once_via_registered_guard(self):
+        fixture = ResyncFixture()
+        fixture.body["order_items"][0].update(quantity=4, unit_price=125)
+        fixture.body.update(total_amount=500, paid_amount=500)
+        result = fixture.resync()
+        self.assertEqual(len(fixture.projections), 1, "SAME_STATUS_UPDATE_WAS_SKIPPED")
+        self.assertEqual((fixture.source.quantity, fixture.line.product_uom_qty, fixture.root.amount_total), (4, 4, 500))
+        self.assertEqual(fixture.client_calls, ["/orders/101"])
+        self.assertEqual(result["results"][0]["outcome"], "verified")
+        self.assertEqual((fixture.commits, fixture.global_rollbacks), ([], []))
+        self.assertEqual(sum(q.startswith("UPDATE mercadolibre_orders") for q, _ in fixture.cr.calls), 1)
+
+    def test_confirmed_cancel_uses_c5_not_legacy_status_prewrite_or_whole_cancel(self):
+        fixture = ResyncFixture()
+        fixture.body["status"] = "cancelled"
+        fixture.resync()
+        self.assertNotIn("FORBIDDEN_LEGACY_WHOLE_CANCEL", fixture.projections)
+        self.assertEqual((fixture.source.quantity, fixture.line.product_uom_qty, fixture.model.paid_amount), (2, 0, 200))
+        self.assertEqual((fixture.root.state, len(fixture.notes)), ("cancel", 1))
+        self.assertEqual((fixture.commits, fixture.global_rollbacks), ([], []))
+
+    def test_processed_and_nonterminal_observations_are_audited_reconciliation(self):
+        for status, processed, tags in (("cancelled", True, []), ("pending_cancel", False, []),
+                                        ("partially_refunded", False, []), ("cancelled", False, ["split"])):
+            with self.subTest(status=status, processed=processed, tags=tags):
+                fixture = ResyncFixture()
+                fixture.body.update(status=status, tags=tags)
+                if processed:
+                    fixture.root[0].state = "sale"
+                result = fixture.resync()
+                self.assertEqual(len(fixture.projections), 1, "OBSERVATION_DID_NOT_REACH_C5")
+                self.assertEqual(result.get("scope"), "known_own_individual_resync",
+                                 "LEGACY_RESULT_IS_NOT_C5_RECONCILIATION")
+                self.assertEqual(result["results"][0]["outcome"], "reconciliation")
+                self.assertEqual((fixture.source.quantity, fixture.line.product_uom_qty, fixture.root.amount_total), (2, 2, 200))
+                self.assertEqual(len(fixture.notes), 1)
+                self.assertEqual((fixture.commits, fixture.global_rollbacks), ([], []))
+
+    def test_preflight_denies_actor_company_hidden_or_ambiguous_graph_before_factory(self):
+        for kind in ("sudo", "b", "foreign", "hidden", "duplicate_root", "identity"):
+            with self.subTest(kind=kind):
+                fixture = ResyncFixture()
+                if kind == "sudo":
+                    fixture.env.su = True
+                elif kind == "b":
+                    fixture.root[0].viarengo_circuit_code = "b"
+                elif kind == "foreign":
+                    fixture.model.seller = repr({"id": 99})
+                elif kind == "identity":
+                    fixture.line.meli_order_item_id = "MLA999"
+                else:
+                    old = fixture.cr.fetchone
+                    match = "UNION ALL SELECT 1 FROM mercadolibre_order_items" if kind == "hidden" else "FROM sale_order WHERE meli_order_id=%s"
+                    fixture.cr.fetchone = lambda old=old, match=match: (True,) if match in fixture.cr.calls[-1][0] else old()
+                with self.assertRaises(Denied):
+                    fixture.resync(client=False)
+                self.assertEqual((fixture.factory_calls, fixture.client_calls, fixture.projections), ([], [], []))
+                self.assertEqual((fixture.commits, fixture.global_rollbacks), ([], []))
+
+    def test_all_selected_graphs_preflight_before_factory_including_mixed_unbound(self):
+        fixture = ResyncFixture()
+        second = fixture.add_second()
+        second.line.meli_source_order_item_id = False
+        # The physical binding Boolean is false for the unbound second root.
+        old = fixture.cr.fetchone
+        fixture.cr.fetchone = lambda: (False,) if "meli_source_order_item_id IS NOT NULL" in fixture.cr.calls[-1][0] else old()
+        with self.assertRaises(Denied):
+            fixture.resync(client=False)
+        self.assertEqual((fixture.factory_calls, fixture.client_calls, fixture.projections), ([], [], []))
+
+    def test_zero_bound_population_retains_explicit_legacy_control(self):
+        fixture = ResyncFixture()
+        fixture.line.meli_source_order_item_id = False
+        result = fixture.resync()
+        self.assertNotIn("scope", result)
+        self.assertEqual(result, {"checked": 1, "changed": 0, "cancelled": 0})
+        self.assertEqual(fixture.projections, [])
+
+    def test_cold_anonymous_mapping_cannot_overwrite_unconsumed_binding_sql(self):
+        fixture = ResyncFixture()
+        fixture.line.meli_source_order_item_id = False
+        events, pending = [], []
+        actual_execute = fixture.cr.execute
+        def execute(query, params=None):
+            actual_execute(query, params)
+            binding = "meli_source_order_item_id IS NOT NULL" in str(query)
+            events.append("binding SELECT" if binding else "ORM SELECT")
+            pending[:] = [(False,)] if binding else [(fixture.line.id, None)]
+        def fetchone():
+            events.append("fetchone binding" if pending == [(False,)] else "fetchone exhausted")
+            return pending.pop(0) if pending else None
+        def fetchall():
+            events.append("fetchall ORM")
+            rows = list(pending)
+            pending.clear()
+            return rows
+        class ColdAnonymousRows(Rows):
+            def mapped(records, name):
+                if name == "meli_source_order_item_id":
+                    fixture.cr.execute("SELECT id,meli_source_order_item_id FROM sale_order_line WHERE id=%s",
+                                       [fixture.line.id])
+                    fixture.cr.fetchall()  # A realistic ORM fetch consumes this SAME cursor.
+                return super().mapped(name)
+        fixture.root[0].order_line = ColdAnonymousRows([fixture.line])
+        fixture.cr.execute, fixture.cr.fetchone, fixture.cr.fetchall = execute, fetchone, fetchall
+        try:
+            result = fixture.model._meli_preflight_individual_resync(
+                Rows([fixture.model]), fixture.company, None)
+        except TypeError as error:
+            self.fail("BINDING_RESULT_OVERWRITTEN_BY_COLD_ORM_FETCH: " + repr(error) + " events=" + repr(events))
+        self.assertIs(result, False, "An authorized anonymous-only population retains the legacy control")
+        self.assertLess(events.index("fetchone binding"), events.index("ORM SELECT"))
+        self.assertEqual((fixture.factory_calls, fixture.client_calls, fixture.projections), ([], [], []))
+
+    def test_partial_or_missing_http_outcome_is_pending_without_business_writes(self):
+        for status in (206, None, 500):
+            with self.subTest(status=status):
+                fixture = ResyncFixture()
+                fixture.client.status_code = fixture.client.last_status_code = status
+                before = fixture.state()
+                result = fixture.resync()
+                self.assertEqual(result["results"][0]["outcome"], "pending")
+                self.assertEqual(fixture.state(), before)
+                self.assertEqual(fixture.projections, [])
+
+    def test_fresh_foreign_pack_currency_or_incomplete_payload_refuses_without_projection(self):
+        for kind in ("foreign", "pack", "currency", "items"):
+            with self.subTest(kind=kind):
+                fixture = ResyncFixture()
+                if kind == "foreign":
+                    fixture.body["seller"]["id"] = 99
+                elif kind == "pack":
+                    fixture.body["pack_id"] = 900
+                elif kind == "currency":
+                    fixture.body["currency_id"] = "ARS"
+                else:
+                    fixture.body["order_items"] = []
+                before = fixture.state()
+                with self.assertRaises(Denied):
+                    fixture.resync()
+                self.assertEqual(fixture.state(), before)
+                self.assertEqual((fixture.projections, fixture.global_rollbacks), ([], []))
+
+    def test_false_or_unprojected_scalar_result_rolls_back_not_inferred_success(self):
+        for value in (False, None, {"error": "synthetic failure"}, {}):
+            with self.subTest(result=value):
+                fixture = ResyncFixture()
+                fixture.body["order_items"][0].update(quantity=4, unit_price=125)
+                fixture.body.update(total_amount=500, paid_amount=500)
+                fixture.producer_result = value
+                if value == {}:
+                    fixture.after_projection = lambda selected: setattr(selected.line, "product_uom_qty", 2)
+                before = fixture.state()
+                with self.assertRaises(Denied):
+                    fixture.resync()
+                self.assertEqual(fixture.state(), before)
+                self.assertEqual((fixture.commits, fixture.global_rollbacks), ([], []))
+
+    def assert_batch_original_failure(self, error_type):
+        fixture = ResyncFixture()
+        second = fixture.add_second()
+        original = error_type("Second already-owned individual late failure")
+        fixture.body["order_items"][0].update(quantity=4, unit_price=125)
+        fixture.body.update(total_amount=500, paid_amount=500)
+        base_get = fixture.client.get
+        def get(path, params):
+            result = base_get(path, params)
+            fixture.body["id"] = 102 if path == "/orders/102" else 101
+            return result
+        fixture.client.get = get
+        def late(selected):
+            if selected is second:
+                self.assertEqual(fixture.root.amount_total, 500, "FIRST_ROOT_NOT_MUTATED_BEFORE_LATE_FAILURE")
+                raise original
+        fixture.after_projection = late
+        before = [f.state() for f in fixture.members]
+        with self.assertRaises(error_type) as caught:
+            fixture.resync()
+        self.assertIs(caught.exception, original)
+        self.assertTrue(original._meli_individual_operation_failure)
+        self.assertEqual([f.state() for f in fixture.members], before)
+        self.assertEqual(fixture.caller, {"sentinel": "unrelated uncommitted caller work"})
+        self.assertEqual((fixture.commits, fixture.global_rollbacks), ([], []))
+        self.assertEqual(fixture.client_calls, ["/orders/101", "/orders/102"])
+
+    def test_second_root_runtime_preserves_original_and_whole_owned_batch(self):
+        self.assert_batch_original_failure(RuntimeError)
+
+    def test_second_root_serialization_preserves_original_and_whole_owned_batch(self):
+        self.assert_batch_original_failure(SerializationFailure)
 
 
 class IndividualSerializationTests(unittest.TestCase):
