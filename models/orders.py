@@ -5538,6 +5538,8 @@ class mercadolibre_orders(models.Model):
                                 MeliCommit( self )
                                 break
                             except _serialization_ex as e:
+                                if getattr(e, "_meli_individual_operation_failure", False):
+                                    raise  # Existing authenticated individual operation; no nested retry.
                                 if _pack_route:
                                     e._meli_pack_operation_failure = True
                                     raise  # No nested group retry or global rollback.
@@ -5547,6 +5549,8 @@ class mercadolibre_orders(models.Model):
                                 else:
                                     _logger.warning("orders_query_iterate > SerializationFailure tras 3 intentos, orden omitida")
                             except Exception as e:
+                                if getattr(e, "_meli_individual_operation_failure", False):
+                                    raise
                                 if _pack_route:
                                     e._meli_pack_operation_failure = True
                                     raise
@@ -5576,7 +5580,8 @@ class mercadolibre_orders(models.Model):
             __fetch_ids = self.orders_query_iterate( offset=0, meli=meli, config=config, fetch_id_only=fetch_id_only )
         except Exception as e:
             # Server-side exception transport only; never an admission capability.
-            if getattr(e, "_meli_pack_operation_failure", False):
+            if (getattr(e, "_meli_pack_operation_failure", False)
+                    or getattr(e, "_meli_individual_operation_failure", False)):
                 raise
             _logger.info("orders_query_recent > Error iterando ordenes")
             _logger.error(e, exc_info=True)
@@ -5765,6 +5770,8 @@ class mercadolibre_orders(models.Model):
                         order.orders_update_order(meli=meli, config=config)
                 MeliCommit(self)
             except Exception as e:
+                if getattr(e, "_meli_individual_operation_failure", False):
+                    raise  # Transport only; single-status legacy semantics remain unchanged.
                 _logger.error("orders_resync_status > error en orden %s: %s", order.order_id, e, exc_info=True)
                 MeliRollback(self)
         _logger.info("orders_resync_status: cuenta=%s checked=%s changed=%s cancelled=%s (days=%s limit=%s)", (account and account.name) or "-", checked, changed, cancelled, days, query_limit)
@@ -6193,7 +6200,8 @@ class mercadolibre_orders_update(models.TransientModel):
                     rets.append(ret[0])
         except Exception as e:
             # Local routing also covers a selected pack's preflight rejection.
-            if _pack_route or getattr(e, "_meli_pack_operation_failure", False):
+            if (_pack_route or getattr(e, "_meli_pack_operation_failure", False)
+                    or getattr(e, "_meli_individual_operation_failure", False)):
                 raise
             _logger.info("order_update > Error actualizando ordenes")
             _logger.error(e, exc_info=True)
