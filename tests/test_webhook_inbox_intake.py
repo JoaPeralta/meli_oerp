@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import socket
 import sys
-from types import ModuleType, SimpleNamespace
+from types import MethodType, ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -516,6 +516,184 @@ class ControllerContracts(unittest.TestCase):
             self.incoming.get_data.return_value = raw
             self.assertEqual(self.functions["meli_notify"](None).status_code, status)
         self.model._receive_webhook.assert_not_called()
+
+
+class LegacyOrderResultContracts(unittest.TestCase):
+    """Actual legacy processor, synthetic producer and savepoint boundary only."""
+
+    def setUp(self):
+        self.network = patch.object(socket, "socket", side_effect=AssertionError("network forbidden"))
+        self.network.start()
+        self.addCleanup(self.network.stop)
+        helper = load_helper()
+        namespace = dict(vars(helper), ValidationError=ValueError, _logger=Mock(),
+                         ml_datetime=lambda value: value)
+        self.functions = methods(MODELS / "notification.py", "MercadolibreNotification", namespace)
+        self.store = {"caller": "preserved", "effects": []}
+        self.row = self.Row()
+        self.cr = self.Cursor(self.store, self.row)
+        self.result = {}
+        self.failure = None
+        self.client = SimpleNamespace(access_token="synthetic", get=Mock(return_value=SimpleNamespace(
+            json=lambda: {"id": 789})))
+        class Orders(SimpleNamespace):
+            def __len__(self):
+                return 1
+        orders = Orders(id=12)
+        orders.search = lambda domain, limit: orders
+        orders.with_context = lambda **context: orders
+        orders.orders_update_order_json = self.produce
+        class Environment(dict):
+            pass
+        env = Environment({"meli.util": SimpleNamespace(get_new_instance=lambda company: self.client),
+                           "mercadolibre.orders": orders})
+        env.user = SimpleNamespace(company_id=SimpleNamespace(id=1))
+        env.cr = self.cr
+        class Records(SimpleNamespace):
+            def __iter__(records):
+                return iter(records.rows)
+        self.records = Records(env=env, rows=[self.row])
+        self.records._assert_legacy_notifications = MethodType(
+            self.functions["_assert_legacy_notifications"], self.records)
+
+    class Row:
+        def __init__(self):
+            object.__setattr__(self, "values", dict(notification_id="legacy-synthetic", resource="/orders/789",
+                state="RECEIVED", processing_started=False, processing_ended=False,
+                processing_errors=False, last_json_response=False))
+            object.__setattr__(self, "fault", None)
+
+        def __getattr__(self, name):
+            return self.values[name]
+
+        def __setattr__(self, name, value):
+            if name == "fault":
+                object.__setattr__(self, name, value)
+                return
+            if self.fault == name and (name != "state" or value == "SUCCESS"):
+                object.__setattr__(self, "fault", None)
+                raise RuntimeError("synthetic outcome write refused")
+            self.values[name] = value
+
+    class Cursor:
+        def __init__(self, store, row):
+            self.store, self.row = store, row
+            self.global_boundaries = []
+
+        @contextmanager
+        def savepoint(self):
+            before, fields = copy.deepcopy(self.store), copy.deepcopy(self.row.values)
+            try:
+                yield
+            except BaseException:
+                self.store.clear()
+                self.store.update(before)
+                self.row.values.clear()
+                self.row.values.update(fields)
+                raise
+
+        def commit(self):
+            self.global_boundaries.append("commit")
+            raise AssertionError("internal commit forbidden")
+
+        def rollback(self):
+            self.global_boundaries.append("rollback")
+            raise AssertionError("global rollback forbidden")
+
+    def produce(self, data):
+        self.assertEqual(data, {"id": 12, "order_json": {"id": 789}})
+        self.store["effects"].append("producer")
+        if self.failure:
+            raise self.failure
+        return self.result
+
+    def invoke(self):
+        self.functions["_process_notification_order"](self.records)
+        self.assertEqual(self.client.get.call_args.args[0], "/orders/789")
+        self.client.get.assert_called_once()
+        self.assertEqual(self.store["caller"], "preserved")
+        self.assertEqual(self.cr.global_boundaries, [])
+
+    def assert_unconfirmed(self, result):
+        self.result = result
+        self.invoke()
+        self.assertEqual(self.row.state, "FAILED")
+        self.assertTrue(self.row.processing_errors)
+        self.assertTrue(self.row.processing_ended)
+        self.assertEqual(self.store["effects"], [], "Producer effects must roll back, not caller work")
+
+    def test_false_result_rolls_back_producer_only(self):
+        self.assert_unconfirmed(False)
+
+    def test_none_result_rolls_back_producer_only(self):
+        self.assert_unconfirmed(None)
+
+    def test_non_dictionary_result_is_not_verified_success(self):
+        for result in (True, 0, [], ["unexpected"], "unexpected"):
+            with self.subTest(result=result):
+                self.setUp_result_iteration()
+                self.assert_unconfirmed(result)
+
+    def setUp_result_iteration(self):
+        self.store["effects"].clear()
+        self.client.get.reset_mock()
+
+    def test_empty_dictionary_retains_legacy_success(self):
+        self.invoke()
+        self.assertEqual(self.row.state, "SUCCESS")
+        self.assertEqual(self.store["effects"], ["producer"])
+        self.assertTrue(self.row.processing_ended)
+
+    def test_false_error_cancellation_outcomes_are_success(self):
+        for outcome in ("applied", "replayed"):
+            with self.subTest(outcome=outcome):
+                self.setUp_result_iteration()
+                self.result = {"cancellation": outcome, "error": False, "order_id": "789"}
+                self.invoke()
+                self.assertEqual(self.row.state, "SUCCESS")
+                self.assertEqual(self.store["effects"], ["producer"])
+
+    def test_truthy_error_preserves_reconciliation_evidence(self):
+        self.result = {"cancellation": "reconciliation", "error": "processed_history_requires_reconciliation"}
+        self.invoke()
+        self.assertEqual(self.row.state, "FAILED")
+        self.assertEqual(self.row.processing_errors, self.result["error"])
+        self.assertEqual(self.store["effects"], ["producer"], "A normal reconciliation result is not rollback")
+
+    def test_ordinary_exception_rolls_back_producer_only(self):
+        self.failure = RuntimeError("synthetic producer failure")
+        self.invoke()
+        self.assertEqual(self.row.state, "FAILED")
+        self.assertEqual(self.store["effects"], [])
+
+    def assert_marked_exception(self, marker):
+        self.failure = RuntimeError("synthetic marked SQL-conflict transport")
+        setattr(self.failure, marker, True)
+        with self.assertRaises(RuntimeError) as caught:
+            self.functions["_process_notification_order"](self.records)
+        self.assertIs(caught.exception, self.failure)
+        self.assertTrue(getattr(caught.exception, marker))
+        self.assertEqual(self.store, {"caller": "preserved", "effects": []})
+        self.assertEqual(self.cr.global_boundaries, [])
+        self.assertNotEqual(self.row.state, "SUCCESS")
+
+    def test_individual_marked_exception_preserves_identity(self):
+        self.assert_marked_exception("_meli_individual_operation_failure")
+
+    def test_pack_marked_exception_preserves_identity(self):
+        self.assert_marked_exception("_meli_pack_operation_failure")
+
+    def test_success_state_write_failure_rolls_back_producer(self):
+        self.row.fault = "state"
+        self.invoke()
+        self.assertEqual(self.row.state, "FAILED")
+        self.assertEqual(self.store["effects"], [])
+
+    def test_ended_write_failure_rolls_back_producer(self):
+        self.row.fault = "processing_ended"
+        self.invoke()
+        self.assertEqual(self.row.state, "FAILED")
+        self.assertEqual(self.store["effects"], [])
 
 
 if __name__ == "__main__":

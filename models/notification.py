@@ -419,6 +419,7 @@ class MercadolibreNotification(models.Model):
                     noti.state = 'FAILED'
                     noti.processing_errors = "Unsafe or invalid webhook resource rejected: %s" % str(noti.resource)
                     _logger.warning("Rejected unsafe order notification resource: %s", str(noti.resource))
+                    noti.processing_ended = ml_datetime(str(datetime.now()))
                     continue
                 res = meli.get(safe_resource, {'access_token':meli.access_token} )
                 ojson =  res.json()
@@ -440,22 +441,29 @@ class MercadolibreNotification(models.Model):
                     if (morder and len(morder)):
                         pdata["id"] =  morder.id
 
-                    # Skip invoice validation on notifications to avoid AFIP concurrent numbering issues
-                    rsjson = morder.with_context(meli_skip_invoice_validation=True).orders_update_order_json( pdata )
-                    _logger.info("rsjson:"+str(rsjson))
-
-                    if (rsjson and 'error' in rsjson):
-                        noti.state = 'FAILED'
-                        noti.processing_errors = str(rsjson['error'])
-                    else:
-                        noti.state = 'SUCCESS'
-                        noti.processing_errors = str(rsjson)
+                    # Keep the producer and its recorded outcome in one local boundary.
+                    # Normal error mappings may deliberately preserve reconciliation evidence.
+                    with self.env.cr.savepoint():
+                        rsjson = morder.with_context(meli_skip_invoice_validation=True).orders_update_order_json(pdata)
+                        if not isinstance(rsjson, dict):
+                            raise ValidationError("Order importer returned no verified result")
+                        if rsjson.get("error"):
+                            noti.state = 'FAILED'
+                            noti.processing_errors = str(rsjson['error'])
+                        else:
+                            noti.state = 'SUCCESS'
+                            noti.processing_errors = str(rsjson)
+                        noti.processing_ended = ml_datetime(str(datetime.now()))
+                else:
+                    noti.processing_ended = ml_datetime(str(datetime.now()))
 
             except Exception as E:
+                if (getattr(E, "_meli_individual_operation_failure", False)
+                        or getattr(E, "_meli_pack_operation_failure", False)):
+                    raise  # Preserve the original conflict for its OUTER transaction owner.
                 noti.state = 'FAILED'
                 noti.processing_errors = str(E)
                 _logger.error("_process_notification_order:"+str(E))
-            finally:
                 noti.processing_ended = ml_datetime(str(datetime.now()))
 
     def _process_notification_item(self):
