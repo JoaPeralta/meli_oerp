@@ -1770,9 +1770,9 @@ class mercadolibre_orders(models.Model):
 
         Output: a new dict preserving all v2 fields PLUS the legacy uppercase
         keys (FIRST_NAME, LAST_NAME, DOC_TYPE, DOC_NUMBER, ...) the downstream
-        code in this module expects. Also fills INVOICE_TYPE per site_id
-        rules now that the upstream field is being phased out:
-        MLA: CUIT -> Factura A, DNI/CUIL -> Factura B.
+        code in this module expects. Explicit INVOICE_TYPE values take precedence;
+        existing MLA taxpayer/document mappings remain, while CUIT without
+        taxpayer evidence leaves the derived display label unknown.
         """
         if not isinstance(bi, dict):
             return bi
@@ -1818,11 +1818,9 @@ class mercadolibre_orders(models.Model):
 
         out['VAT_DISCRIMINATED_BILLING'] = str(attributes.get('vat_discriminated_billing') or '')
 
-        # INVOICE_TYPE: the upstream attribute is being removed; keep it when
-        # present (MLA still returns it as of 03/2026) and otherwise derive
-        # from doc_type for MLA.  IMPORTANT: CUIT alone does NOT imply Factura A —
-        # Monotributo taxpayers also hold CUIT but must receive Factura B.
-        # So we also check TAXPAYER_TYPE_ID before mapping CUIT → Factura A.
+        # Preserve explicit remote values before the existing MLA mappings.
+        # CUIT alone does not establish the required taxpayer condition;
+        # missing or unrecognized CUIT taxpayer evidence keeps the label unknown.
         invoice_type = attributes.get('invoice_type') or bi.get('invoice_type') or ''
         if not invoice_type and site_id and str(site_id).upper() == 'MLA':
             _doc = (doc_type or '').upper()
@@ -1833,9 +1831,6 @@ class mercadolibre_orders(models.Model):
             _is_ri = any(kw in _taxpayer_desc for kw in _ri_keywords)
             _is_non_ri = any(kw in _taxpayer_desc for kw in _non_ri_keywords)
             if _doc == 'CUIT' and _is_ri and not _is_non_ri:
-                invoice_type = 'Factura A'
-            elif _doc == 'CUIT' and not _taxpayer_desc:
-                # Unknown taxpayer type with CUIT — default to Factura A (RI is most common with CUIT)
                 invoice_type = 'Factura A'
             elif _doc in ('DNI', 'CUIL') or (_doc == 'CUIT' and _is_non_ri):
                 invoice_type = 'Factura B'

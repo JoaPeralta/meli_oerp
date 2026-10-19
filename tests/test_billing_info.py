@@ -270,6 +270,95 @@ class TestBillingInfo(unittest.TestCase):
     def test_no_client_preserves_supplied_order_billing(self):
         self.assertEqual(self.model.get_billing_info(data=deepcopy(ORDER)), {"id": 456})
 
+    def test_cuit_missing_or_blank_taxpayer_never_invents_invoice_type(self):
+        cases = (
+            ("missing_taxes", {}), ("null_taxes", {"taxes": None}),
+            ("missing_taxpayer", {"taxes": {}}),
+            ("null_taxpayer", {"taxes": {"taxpayer_type": None}}),
+            ("missing_description", {"taxes": {"taxpayer_type": {}}}),
+            ("null_description", {"taxes": {"taxpayer_type": {"description": None}}}),
+            ("empty_description", {"taxes": {"taxpayer_type": {"description": ""}}}),
+            ("blank_description", {"taxes": {"taxpayer_type": {"description": " \t\n "}}}),
+        )
+        for name, taxes in cases:
+            with self.subTest(case=name):
+                body = {"id": 789, "name": "Synthetic CUIT buyer",
+                        "identification": {"type": "CUIT", "number": "30712345671"}, **taxes}
+                before = deepcopy(body)
+                result = self.model._normalize_billing_info_v2(body, site_id="MLA")
+                self.assertEqual(body, before)
+                self.assertEqual(result["id"], 789)
+                self.assertEqual(result["identification"], before["identification"])
+                self.assertEqual(result["DOC_NUMBER"], "30712345671")
+                self.assertEqual(result["DOC_TYPE"], "CUIT")
+                description = ((body.get("taxes") or {}).get("taxpayer_type") or {}).get("description")
+                self.assertEqual(result["TAXPAYER_TYPE_ID"], description or "")
+                for field in taxes:
+                    self.assertEqual(result[field], before[field])
+                self.assertEqual(result["INVOICE_TYPE"], "")
+
+    def test_cuit_unknown_nonempty_taxpayer_keeps_unknown_label_and_input(self):
+        body = {"identification": {"type": "CUIT", "number": "30712345671"},
+                "taxes": {"taxpayer_type": {"description": "Synthetic unclassified taxpayer"}}}
+        before = deepcopy(body)
+        result = self.model._normalize_billing_info_v2(body, site_id="MLA")
+        self.assertEqual(result["INVOICE_TYPE"], "")
+        self.assertEqual(result["TAXPAYER_TYPE_ID"], "Synthetic unclassified taxpayer")
+        self.assertEqual(body, before)
+
+    def test_explicit_invoice_type_values_and_attribute_precedence_stay_exact(self):
+        for attribute, root, expected in (
+                ("Factura A", None, "Factura A"),
+                ("REMOTE_UNKNOWN_LABEL", "Factura B", "REMOTE_UNKNOWN_LABEL"),
+                ("Factura C", "Factura A", "Factura C"),
+                (None, "Factura B", "Factura B"),
+                ("", "ROOT_UNKNOWN_LABEL", "ROOT_UNKNOWN_LABEL")):
+            with self.subTest(attribute=attribute, root=root):
+                body = {"identification": {"type": "CUIT", "number": "30712345671"},
+                        "attributes": {"invoice_type": attribute}, "invoice_type": root}
+                before = deepcopy(body)
+                result = self.model._normalize_billing_info_v2(body, site_id="MLA")
+                self.assertEqual(result["INVOICE_TYPE"], expected)
+                self.assertEqual(body, before)
+
+    def test_recognized_taxpayer_document_and_non_mla_controls_stay_unchanged(self):
+        cases = [("CUIT", "Responsable Inscripto", "MLA", "Factura A")]
+        cases += [("CUIT", value, "MLA", "Factura B") for value in (
+            "Monotributo", "Exento", "Consumidor Final", "No Responsable", "No Categorizado",
+            "Responsable Inscripto - Monotributo")]
+        cases += [(doc, "", "MLA", "Factura B") for doc in ("DNI", "CUIL")]
+        cases += [("CUIT", "Responsable Inscripto", site, "") for site in (None, "MLM")]
+        for document, description, site, expected in cases:
+            with self.subTest(document=document, description=description, site=site):
+                body = {"identification": {"type": document, "number": "30712345671"},
+                        "taxes": {"taxpayer_type": {"description": description}}}
+                before = deepcopy(body)
+                result = self.model._normalize_billing_info_v2(body, site_id=site)
+                self.assertEqual(result["INVOICE_TYPE"], expected)
+                self.assertEqual(body, before)
+
+    def test_fresh_200_cuit_missing_taxpayer_fetch_preserves_unknown_and_payload(self):
+        for backend in ("nosdk", "sdk"):
+            with self.subTest(backend=backend):
+                body = {"buyer": {"billing_info": {"id": 789,
+                    "identification": {"type": "CUIT", "number": "30712345671"}}}}
+                reply = Reply(200, body)
+                before = deepcopy(reply.payload)
+                data = deepcopy(ORDER)
+                original_order = deepcopy(data)
+                session = Session([reply])
+                nosdk, sdk = clients(session)
+                client = (nosdk if backend == "nosdk" else sdk)()
+                result = self.model.get_billing_info(meli=client, data=data)
+                self.assertEqual(len(session.calls), 1)
+                self.assertEqual(client.last_status_code, 200)
+                self.assertEqual(data, original_order)
+                self.assertEqual(reply.payload, before)
+                self.assertEqual((result["id"], result["DOC_TYPE"], result["DOC_NUMBER"]),
+                                 (789, "CUIT", "30712345671"))
+                self.assertEqual(result["TAXPAYER_TYPE_ID"], "")
+                self.assertEqual(result["INVOICE_TYPE"], "")
+
 
 if __name__ == "__main__":
     unittest.main()
