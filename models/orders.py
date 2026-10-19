@@ -4991,7 +4991,7 @@ class mercadolibre_orders(models.Model):
                     'status': Payment['status'] or '',
                     'date_created': ml_datetime(Payment['date_created']),
                     'date_last_modified': ml_datetime(Payment['date_last_modified']),
-                    'mercadopago_url': mp_payment_url+'?access_token='+str(meli.access_token),
+                    'mercadopago_url': mp_payment_url,
                     'full_payment': '',
                     'fee_amount': 0,
                     'shipping_amount': 0,
@@ -5000,15 +5000,15 @@ class mercadolibre_orders(models.Model):
                 }
 
                 headers = {'Accept': 'application/json', 'User-Agent': 'Odoo', 'Content-type':'application/json'}
-                params = { 'access_token': meli.access_token }
+                headers['Authorization'] = 'Bearer ' + str(meli.access_token)
 
                 # Wrap API call in try/except to handle network errors gracefully
                 # Order processing should continue even if MP API is unreachable
                 mp_response = None
                 try:
-                    mp_response = requests.get( mp_payment_url, params=urlencode(params), headers=headers, timeout=10 )
+                    mp_response = requests.get( mp_payment_url, headers=headers, timeout=10 )
                 except requests.exceptions.RequestException as e:
-                    _logger.warning("MELI: Could not fetch payment details from MercadoPago API (order will continue): %s", str(e))
+                    _logger.warning("MELI: Could not fetch payment details from MercadoPago API (order will continue): %s", type(e).__name__)
 
                 if (mp_response):
                     payment_fields["full_payment"] = mp_response.json()
