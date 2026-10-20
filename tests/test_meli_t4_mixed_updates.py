@@ -10,11 +10,11 @@ from types import SimpleNamespace
 import unittest
 
 from test_meli_t4_pack_commerce import admission, method, payload
-from test_meli_t4_cancellation import kernel
+from test_meli_t4_cancellation import kernel, bridge_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BRIDGE = ROOT.parent / "odoo-t4-c-05-mixed-updates/addons/viarengo_circuit_meli/models/mixed_updates.py"
+BRIDGE = bridge_source("mixed_updates.py")
 
 
 class Rows(list):

@@ -232,6 +232,8 @@ class Fixture:
             "fields": SimpleNamespace(Datetime=SimpleNamespace(now=datetime.datetime.now)),
             "timedelta": datetime.timedelta, "DECLARATION": "viarengo_meli_root_circuit"}
         self.scope.update(Decimal=Decimal, InvalidOperation=InvalidOperation, json=json)
+        # Existing fixtures have no taxes; native fiscal proof is a separate suite.
+        self.scope["ml_product_price_conversion"] = lambda line, product, price, **kwargs: float(price)
         for name in ("amount", "cancellation_evidence"):
             compile_function(ROOT / "models/meli_cancellation.py", name, self.scope)
         orders_path = ROOT / "models/orders.py"

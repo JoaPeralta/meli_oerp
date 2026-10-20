@@ -893,7 +893,8 @@ class mercadolibre_shipment(models.Model):
             if not del_price and shipment.shipping_receiver_cost:
                 del_price = shipment.shipping_receiver_cost
 
-            delivery_price = ml_product_price_conversion( self, product_related_obj=product_shipping_id, price=del_price, config=config ),
+            delivery_price = ml_product_price_conversion(self, product_related_obj=product_shipping_id,
+                price=del_price, config=config, sale_order=sorder),
             if type(delivery_price)==tuple and len(delivery_price):
                 delivery_price = delivery_price[0]
 
@@ -938,7 +939,8 @@ class mercadolibre_shipment(models.Model):
                 _ship_residual = received_amount - _product_total
                 if _ship_residual < 0.0:
                     _ship_residual = 0.0
-                _dp = ml_product_price_conversion( self, product_related_obj=product_shipping_id, price=_ship_residual, config=config )
+                _dp = ml_product_price_conversion(self, product_related_obj=product_shipping_id,
+                    price=_ship_residual, config=config, sale_order=sorder)
                 if type(_dp) == tuple and len(_dp):
                     _dp = _dp[0]
                 delivery_price = _dp

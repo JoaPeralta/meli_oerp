@@ -8,7 +8,9 @@ import logging
 _logger = logging.getLogger(__name__)
 import json
 import re
+from math import isfinite
 from markupsafe import Markup
+from odoo.exceptions import ValidationError
 # Odoo version 19.0
 
 # Odoo 18.0 -> type='json', Odoo 19.0 -> type='jsonrpc'
@@ -621,35 +623,49 @@ def ml_tax_excluded(self, config=None ):
         tax_excluded = (config.mercadolibre_tax_included in ['tax_excluded'])
     return tax_excluded
 
-def ml_product_price_conversion( self, product_related_obj, price, config=None):
-    company_id = ("company_id" in config._fields and config.company_id) or config
-    product_template = product_related_obj.product_tmpl_id
-    ml_price_converted = float(price)
-    tax_excluded = ml_tax_excluded( self, config=config )
-    #tax_excluded = True
-    #_logger.info("Taxes:"+str(product_template.taxes_id))
-    if ( tax_excluded and product_template.taxes_id ):
-        txfixed = 0
-        txpercent = 0
-        #_logger.info("Adjust taxes")
-        for txid in product_template.taxes_id:
-            if (txid.company_id!=company_id):
-                continue;
-            if (txid.type_tax_use=="sale" and not txid.price_include):
-                if (txid.amount_type=="percent"):
-                    txpercent = txpercent + txid.amount
-                if (txid.amount_type=="fixed"):
-                    txfixed = txfixed + txid.amount
-                #_logger.info(txid.amount)
-        if (txfixed>0 or txpercent>0):
-            #_logger.info("Tx Total:"+str(txtotal)+" to Price:"+str(ml_price_converted))
-            ml_price_converted = txfixed + ml_price_converted / (1.0 + txpercent*0.01)
-            #_logger.info("Price adjusted with taxes:"+str(ml_price_converted))
+def ml_product_price_conversion(self, product_related_obj, price, config=None,
+                                sale_order=None, quantity=1.0, taxes=None):
+    """Project a remote gross unit price through Odoo's effective tax engine.
 
-    # Use higher precision (6 decimals) to avoid rounding errors in tax calculations
-    # Odoo will round to the configured decimal precision when saving
-    ml_price_converted = round(ml_price_converted, 6)
-    return ml_price_converted
+    Publication/catalog settings do not describe an order's economics. Preserve
+    original inclusion flags: forced inverse rows alone cannot reconstruct an
+    ordinary Odoo price when included and excluded taxes coexist.
+    """
+    company = (sale_order.company_id if sale_order else
+               (config.company_id if config and "company_id" in config._fields else config)
+               or self.env.company)
+    currency = sale_order.currency_id if sale_order else company.currency_id
+    product = product_related_obj
+    partner = sale_order.partner_id if sale_order else False
+    try:
+        amount, quantity_value = float(price), float(quantity)
+    except (TypeError, ValueError, OverflowError):
+        raise ValidationError("Gross price and quantity must be finite numbers") from None
+    if (type(price) is bool or type(quantity) is bool or not isfinite(amount)
+            or not isfinite(quantity_value) or amount < 0 or quantity_value <= 0
+            or not isfinite(amount * quantity_value)):
+        raise ValidationError("Gross price and quantity must be finite nonnegative economics")
+    if taxes is None:
+        taxes = product.taxes_id.filtered(lambda tax: tax.company_id == company and tax.type_tax_use == "sale")
+        if sale_order and sale_order.fiscal_position_id:
+            taxes = map_tax_compat(sale_order.fiscal_position_id, taxes, product, partner)
+    if any(tax.company_id != company for tax in taxes):
+        raise ValidationError("Effective order taxes belong to a different company")
+    arguments = dict(precision_rounding=currency.rounding, product=product, product_uom=product.uom_id)
+    details = taxes._get_tax_details(amount, quantity_value, **arguments,
+                                    rounding_method="round_globally", special_mode="total_included")
+    unit = (details["total_excluded"] + sum(
+        row["tax_amount"] for row in details["taxes_data"] if row["tax"].price_include)) / quantity_value
+    lines = self.env["sale.order.line"]
+    unit = lines._fields["price_unit"].convert_to_cache(unit, lines)
+    if not isfinite(unit) or unit < 0:
+        raise ValidationError("Gross source has no supported nonnegative Odoo unit price")
+    forward = taxes._get_tax_details(unit, quantity_value, **arguments,
+                                    rounding_method=company.tax_calculation_rounding_method)
+    if (not isfinite(forward["total_included"])
+            or currency.compare_amounts(forward["total_included"], amount * quantity_value)):
+        raise ValidationError("Stored Odoo price cannot reconstruct the gross source total")
+    return unit
 
 
 def get_inventory_fields( product, warehouse, quantity=0 ):

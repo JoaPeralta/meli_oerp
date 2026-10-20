@@ -2072,12 +2072,14 @@ class mercadolibre_orders(models.Model):
                         seller_total += float(charge.amount_original or 0)
         self.discount_seller_amount = seller_total
 
-    def _set_product_unit_price( self, product_related_obj, Item, config=None ):
-        order = self
-        seller_discount = float(order.discount_seller_amount or 0)
-        unit_price = float(Item['unit_price']) - float(seller_discount / float(Item['quantity']))
+    def _set_product_unit_price(self, product_related_obj, Item, config=None, sale_order=None):
+        # Remote unit_price already reflects item discounts. Never subtract an
+        # order-level seller contribution again or allocate it to every item.
+        unit_price = Item['unit_price']
         upd_line = {
-            "price_unit": ml_product_price_conversion( self, product_related_obj=product_related_obj, price=unit_price, config=config )
+            "price_unit": ml_product_price_conversion(
+                self, product_related_obj=product_related_obj, price=unit_price,
+                config=config, sale_order=sale_order, quantity=Item['quantity'])
         }
         #else:
         #    if ( float(Item['unit_price']) == product_template.lst_price and not self.env.user.has_group('sale.group_show_price_subtotal')):
@@ -2888,20 +2890,26 @@ class mercadolibre_orders(models.Model):
                         or (row.order_item_variation_id or False) != variation
                         or row.product_id != product for row in old_items):
                     raise ValidationError("Existing child sources are incompatible or ambiguous")
-                source_item = self._meli_upsert_source_item(order, {
+                source_values = {
                     "order_id": order.id, "product_id": product.id, "order_item_id": item["item"]["id"],
                     "order_item_variation_id": variation, "order_item_title": item["item"].get("title", product.name),
                     "quantity": item["quantity"], "unit_price": str(item["unit_price"]),
-                    "currency_id": source["currency_id"], "sale_fee": item.get("sale_fee", 0)}, config)
+                    "currency_id": source["currency_id"], "sale_fee": item.get("sale_fee", 0)}
+                if "full_unit_price" in item:
+                    source_values["full_unit_price"] = item["full_unit_price"]
+                source_item = self._meli_upsert_source_item(order, source_values, config)
                 if not source_item or getattr(source_item, "_name", None) != "mercadolibre.order_items":
                     raise ValidationError("A child source returned no completed result")
                 tax_field, uom_field = SaleOrderLineTaxField(self), SaleOrderLineUomField(self)
                 taxes = product.taxes_id.filtered(lambda tax: tax.company_id == company)
+                taxes = map_tax_compat(root.fiscal_position_id, taxes, product, root.partner_id)
+                price = ml_product_price_conversion(self, product, item["unit_price"], config=config,
+                    sale_order=root, quantity=item["quantity"], taxes=taxes)
                 line = self._meli_upsert_source_sale_line(source_item, root, {
                     "company_id": company.id, "order_id": root.id, "product_id": product.id,
                     "name": product.display_name, "meli_order_item_id": source_item.order_item_id,
                     "meli_order_item_variation_id": source_item.order_item_variation_id or False,
-                    "product_uom_qty": item["quantity"], "price_unit": float(item["unit_price"]),
+                    "product_uom_qty": item["quantity"], "price_unit": price,
                     uom_field: product.uom_id.id, tax_field: [(6, 0, taxes.ids)]}, config)
                 if not line or getattr(line, "_name", None) != "sale.order.line":
                     raise ValidationError("A child projection returned no completed result")
@@ -4967,7 +4975,8 @@ class mercadolibre_orders(models.Model):
                         'name': product_related_obj.display_name or Item['item']['title'],
                     }
                     saleorderline_item_fields[uom_field] = product_related_obj.uom_id.id
-                    saleorderline_item_fields.update( self._set_product_unit_price( product_related_obj=product_related_obj, Item=Item, config=config ) )
+                    saleorderline_item_fields.update(self._set_product_unit_price(
+                        product_related_obj=product_related_obj, Item=Item, config=config, sale_order=sorder))
 
                     self._meli_upsert_source_sale_line(
                         order_item_id, sorder, saleorderline_item_fields, config)

@@ -12,9 +12,10 @@ import unittest
 
 from test_meli_t4_pack_commerce import method
 from test_meli_t4_pack_commerce import admission, payload
+from test_meli_t4_cancellation import bridge_source
 
 ROOT = Path(__file__).resolve().parents[1]
-BRIDGE = ROOT.parent / "odoo-t4-c-05-shared-resync/addons/viarengo_circuit_meli/models/shared_resync.py"
+BRIDGE = bridge_source("shared_resync.py")
 
 
 class Rows(list):
@@ -53,6 +54,7 @@ def adapter(name):
              "amount": __import__("test_meli_t4_cancellation").kernel.amount,
              "snapshot_response": __import__("test_meli_t4_pack_commerce").admission.snapshot_response}
     scope["line_population_incomplete"] = lambda *args: False
+    scope["ml_product_price_conversion"] = lambda line, product, price, **kwargs: float(price)
     exec(compile(ast.fix_missing_locations(ast.Module([node], [])), str(BRIDGE), "exec"), scope)
     return scope[name]
 
@@ -60,7 +62,7 @@ def adapter(name):
 class PublicSharedResyncTests(unittest.TestCase):
     def receiver(self, result=None, late=None):
         company = SimpleNamespace(id=1, _fields={}, mercadolibre_cron_get_orders_status=True)
-        root = SimpleNamespace(id=10, meli_order_id="pack:900")
+        root = SimpleNamespace(id=10, meli_order_id="pack:900", company_id=company)
         first = SimpleNamespace(id=1, order_id="101", pack_id="900", sale_order=root, status="paid",
                                 source_quantity=2, source_line=21)
         second = SimpleNamespace(id=2, order_id="102", pack_id="900", sale_order=root, status="paid",
@@ -70,7 +72,8 @@ class PublicSharedResyncTests(unittest.TestCase):
         class Line(SimpleNamespace):
             def __getitem__(self, key):
                 return getattr(self, key)
-        root.order_line = Rows([Line(meli_source_order_item_id=source, product_uom_qty=4, price_unit=125, price_total=500)])
+        root.order_line = Rows([Line(meli_source_order_item_id=source, product_uom_qty=4, price_unit=125, price_total=500,
+                                    product_id=SimpleNamespace(id=2), tax_ids=[])])
         root.amount_total, root.state, root.picking_ids, root.invoice_ids = 500, "draft", [], []
         root.locked, root.meli_update_forbidden = False, False
         root.order_line[0].move_ids, root.order_line[0].qty_delivered, root.order_line[0].qty_invoiced = [], 0, 0

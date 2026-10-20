@@ -3,6 +3,7 @@ import copy
 import ast
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace, MethodType
@@ -13,6 +14,14 @@ from test_meli_t4_pack_commerce import method, payload
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def bridge_source(name):
+    """An explicit paired checkout, never a historical worktree name guess."""
+    root = os.environ.get("VIARENGO_ROOT")
+    if not root:
+        raise RuntimeError("VIARENGO_ROOT must select the paired Odoo checkout")
+    return Path(root).resolve() / "addons/viarengo_circuit_meli/models" / name
 package = ModuleType("c5_contract")
 package.__path__ = [str(ROOT / "models")]
 sys.modules[package.__name__] = package
@@ -185,8 +194,8 @@ class LocalVisibilityRegressionTests(unittest.TestCase):
             return type(self)(dict.fromkeys(values)) if values and hasattr(values[0], "id") else values
 
     def compute(self, hidden=False):
-        path = ROOT.parent / "odoo-t4-c-05-cancellation-status/addons/viarengo_circuit_meli/models/cancellation.py"
-        tree = ast.parse(path.read_text())
+        path = bridge_source("cancellation.py")
+        tree = ast.parse(path.read_text(encoding="utf8"))
         node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
                     and n.name == "_compute_meli_commerce_summary")
         node.decorator_list = []
@@ -217,19 +226,22 @@ class LocalVisibilityRegressionTests(unittest.TestCase):
             def __getitem__(self, name):
                 return getattr(self, name)
         line = Line(id=301, meli_source_order_item_id=source, product_uom_qty=2, price_unit=100,
-                    price_total=200, display_type=False, discount=0, currency_id=root.currency_id)
+                    price_total=200, display_type=False, discount=0, currency_id=root.currency_id,
+                    product_id=SimpleNamespace(id=2), tax_ids=[])
         root.currency_id.compare_amounts = lambda first, second: round(first - second, 2)
         root.order_line = self.Rows([] if hidden else [line])
         root.meli_orders = self.Rows([] if hidden else [child])
         scope = {"Markup": Markup, "SOURCE": "meli_source_order_item_id", "ast": ast,
                  "remote_id": kernel.remote_id, "AdmissionError": kernel.AdmissionError,
-                 "AccessError": PermissionError, "payment_summary": kernel.payment_summary, "amount": kernel.amount}
+                 "AccessError": PermissionError, "ValidationError": ValueError,
+                 "payment_summary": kernel.payment_summary, "amount": kernel.amount,
+                 "ml_product_price_conversion": lambda line, product, price, **kwargs: float(price)}
         # Bind genuine module helpers when present, never a fabricated producer.
         scope["local_commercial_state"] = getattr(kernel, "local_commercial_state", None)
         for fn in tree.body:
             if isinstance(fn, ast.FunctionDef):
                 exec(compile(ast.Module([fn], []), str(path), "exec"), scope)
-        if "sql" in path.read_text():
+        if "sql" in path.read_text(encoding="utf8"):
             class SQL(str):
                 def format(self, *values, **keywords):
                     return self
@@ -251,8 +263,8 @@ class LocalVisibilityRegressionTests(unittest.TestCase):
 class ExistingOwnWrapperTests(unittest.TestCase):
     """Run the actual bridge wrapper/anchors; these doubles are not ORM proof."""
     def receiver(self, body, result=None, failure=None, root=False, seller=42):
-        path = ROOT.parent / "odoo-t4-c-05-cancellation-status/addons/viarengo_circuit_meli/models/cancellation.py"
-        tree = ast.parse(path.read_text())
+        path = bridge_source("cancellation.py")
+        tree = ast.parse(path.read_text(encoding="utf8"))
         cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                    and node.name == "SourceCancellation")
         scope = {"ast": ast, "remote_id": kernel.remote_id, "AdmissionError": kernel.AdmissionError,
@@ -365,8 +377,8 @@ class LocalCommercialStateTests(unittest.TestCase):
 
 class ControlledPriceBoundaryTests(unittest.TestCase):
     def test_quantity_zero_write_explicitly_preserves_source_price(self):
-        path = ROOT.parent / "odoo-t4-c-05-cancellation-status/addons/viarengo_circuit_meli/models/order_line_provenance.py"
-        node = next(node for node in ast.walk(ast.parse(path.read_text()))
+        path = bridge_source("order_line_provenance.py")
+        node = next(node for node in ast.walk(ast.parse(path.read_text(encoding="utf8")))
                     if isinstance(node, ast.FunctionDef) and node.name == "_meli_source_cancel_quantity")
         writes = [call for call in ast.walk(node) if isinstance(call, ast.Call)
                   and isinstance(call.func, ast.Attribute) and call.func.attr == "write"
