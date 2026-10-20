@@ -660,10 +660,35 @@ def ml_product_price_conversion(self, product_related_obj, price, config=None,
     unit = lines._fields["price_unit"].convert_to_cache(unit, lines)
     if not isfinite(unit) or unit < 0:
         raise ValidationError("Gross source has no supported nonnegative Odoo unit price")
-    forward = taxes._get_tax_details(unit, quantity_value, **arguments,
-                                    rounding_method=company.tax_calculation_rounding_method)
-    if (not isfinite(forward["total_included"])
-            or currency.compare_amounts(forward["total_included"], amount * quantity_value)):
+
+    def rounded_details(price_unit, special_mode=False):
+        # Match sale.order.line._compute_amount, including native per-tax and
+        # base-line rounding. Raw _get_tax_details totals alone are insufficient.
+        base_line = taxes._prepare_base_line_for_taxes_computation(None,
+            price_unit=price_unit, quantity=quantity_value, discount=0,
+            tax_ids=taxes, product_id=product, product_uom_id=product.uom_id,
+            partner_id=partner, currency_id=currency, special_mode=special_mode,
+            rate=getattr(sale_order, "currency_rate", 1.0) if sale_order else 1.0)
+        taxes._add_tax_details_in_base_line(base_line, company,
+            rounding_method="round_globally" if special_mode else None)
+        taxes._round_base_lines_tax_details([base_line], company)
+        return base_line["tax_details"]
+
+    forward = rounded_details(unit)
+    if (not isfinite(forward["total_included_currency"])
+            or currency.compare_amounts(forward["total_included_currency"], amount * quantity_value)):
+        # One native inclusive inverse proposal, not a net-price search. Its
+        # base delta compensates per-tax currency rounding for compound taxes.
+        inverse = rounded_details(amount, special_mode="total_included")
+        unit = (inverse["total_excluded_currency"] + inverse["delta_total_excluded_currency"]
+                + sum(row["tax_amount_currency"] for row in inverse["taxes_data"]
+                      if row["tax"].price_include)) / quantity_value
+        unit = lines._fields["price_unit"].convert_to_cache(unit, lines)
+        if not isfinite(unit) or unit < 0:
+            raise ValidationError("Gross source has no supported nonnegative Odoo unit price")
+        forward = rounded_details(unit)
+    if (not isfinite(forward["total_included_currency"])
+            or currency.compare_amounts(forward["total_included_currency"], amount * quantity_value)):
         raise ValidationError("Stored Odoo price cannot reconstruct the gross source total")
     return unit
 

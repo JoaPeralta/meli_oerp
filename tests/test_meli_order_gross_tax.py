@@ -26,6 +26,9 @@ class Taxes(list):
             price_include=included, amount_type="percent", amount=21)])
         self.calls, self.base, self.included_amount = [], base, included_amount
         self.forward = 1000
+        self.rounded_forward = None
+        self.rounded_inverse = None
+        self.rounded_calls = []
 
     def filtered(self, predicate):
         self[:] = [tax for tax in self if predicate(tax)]
@@ -37,6 +40,27 @@ class Taxes(list):
                 "total_included": self.forward * quantity,
                 "taxes_data": [{"tax": self[0], "price_include": True,
                                 "tax_amount": self.included_amount * quantity}]}
+
+    def _prepare_base_line_for_taxes_computation(self, record, **values):
+        return values
+
+    def _add_tax_details_in_base_line(self, line, company, rounding_method=None):
+        details = self._get_tax_details(line["price_unit"], line["quantity"],
+            special_mode=line.get("special_mode", False), rounding_method=rounding_method)
+        line["tax_details"] = {
+            "total_excluded_currency": details["total_excluded"],
+            "total_included_currency": details["total_included"],
+            "delta_total_excluded_currency": 0,
+            "taxes_data": [{"tax": row["tax"], "tax_amount_currency": row["tax_amount"]}
+                           for row in details["taxes_data"]]}
+
+    def _round_base_lines_tax_details(self, lines, company):
+        for line in lines:
+            self.rounded_calls.append(line.get("special_mode", False))
+            if line.get("special_mode") and self.rounded_inverse is not None:
+                line["tax_details"] = self.rounded_inverse
+            elif not line.get("special_mode") and self.rounded_forward is not None:
+                line["tax_details"]["total_included_currency"] = self.rounded_forward(line["price_unit"], line["quantity"])
 
 
 class GrossOrderPricingTests(unittest.TestCase):
@@ -73,6 +97,7 @@ class GrossOrderPricingTests(unittest.TestCase):
                 self.assertAlmostEqual(price, 1000 / 1.21, places=10)
                 self.assertEqual(product.taxes_id.calls[0][2]["special_mode"], "total_included")
                 self.assertEqual(product.taxes_id.calls[0][2]["rounding_method"], "round_globally")
+                self.assertEqual(product.taxes_id.rounded_calls, [False])
 
     def test_effective_mapping_and_original_included_flags_are_used(self):
         model, company, product, root, scope = self.fixture()
@@ -96,6 +121,26 @@ class GrossOrderPricingTests(unittest.TestCase):
         product.taxes_id.forward = 1000.01
         with self.assertRaisesRegex(ValueError, "reconstruct"):
             convert(model, product, 1000, config=company, sale_order=root, quantity=3)
+
+    def test_compound_native_line_rounding_uses_one_inverse_delta_or_refuses(self):
+        """Native API response regression, not execution of Odoo or tax math."""
+        model, company, product, root, scope = self.fixture()
+        company.tax_calculation_rounding_method = "round_globally"
+        taxes = product.taxes_id
+        taxes.base = (3000 / (1.21 * 1.105)) / 3
+        # Official native line rounding: 2243.75 + 471.19 + 285.07 = 3000.01.
+        # Included-mode native base delta is -0.01; no local tax inverse here.
+        taxes.rounded_inverse = {
+            "total_excluded_currency": 2243.75, "delta_total_excluded_currency": -0.01,
+            "taxes_data": [{"tax": taxes[0], "tax_amount_currency": 756.26}]}
+        corrected = 2243.74 / 3
+        taxes.rounded_forward = lambda unit, quantity: 3000 if unit == corrected else 3000.01
+        convert = operation("models/versions.py", "ml_product_price_conversion", scope)
+        self.assertEqual(convert(model, product, "1000", sale_order=root, quantity=3), corrected)
+        self.assertEqual(taxes.rounded_calls, [False, "total_included", False])
+        taxes.rounded_forward = lambda unit, quantity: 3000.01
+        with self.assertRaisesRegex(ValueError, "reconstruct"):
+            convert(model, product, "1000", sale_order=root, quantity=3)
 
     def test_invalid_prices_and_foreign_mapped_taxes_refuse(self):
         model, company, product, root, scope = self.fixture()
