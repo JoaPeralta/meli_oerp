@@ -3185,7 +3185,7 @@ class mercadolibre_orders(models.Model):
             if ('shipping' in order_json and order_json['shipping']):
                 if ('receiver_address' in order_json['shipping']):
                     Receiver = order_json['shipping']['receiver_address']
-                elif ('id' in order_json['shipping']):
+                elif order_json['shipping'].get('id'):
                     Shipment = self.env["mercadolibre.shipment"].search([('shipping_id','=',order_json['shipping']["id"])],limit=1)
                     #_logger.info("Shipment:"+str(Shipment))
                     if (len(Shipment)==1):
