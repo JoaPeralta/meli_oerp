@@ -30,6 +30,7 @@ import pdb
 import threading
 
 from .meli_util import meli_oauth_attempt_issue
+from .meli_pack_admission import snapshot_response
 from .meli_oerp_config import *
 from .warning import warning
 from . import versions
@@ -883,65 +884,55 @@ class res_company(models.Model):
 
         return results
 
-    def filter_meli_ids( self, results, store_id=None ):
+    def _meli_items_bulk(self, meli, ids, attributes=()):
+        """Read complete batches, correlating root and body IDs, never positions."""
+        if not ids:
+            return []
+        if (not isinstance(ids, (list, tuple))
+                or any(not isinstance(id_, str) or not id_ or id_.strip() != id_ or "," in id_ for id_ in ids)
+                or len(set(ids)) != len(ids)):
+            raise UserError("MercadoLibre bulk item selection is invalid or duplicated")
+        items = []
+        for offset in range(0, len(ids), 20):
+            batch = ids[offset:offset + 20]
+            params = {"access_token": meli.access_token, "ids": ",".join(batch)}
+            if attributes:
+                params["attributes"] = ",".join("body." + name for name in attributes)
+            response = meli.get("/items/bulk", params=params)
+            try:
+                rows, metadata = snapshot_response(response)
+            except (ValueError, TypeError):
+                raise UserError("MercadoLibre bulk item response is not valid JSON") from None
+            if (type(metadata["status"]) is not int or metadata["status"] != 200
+                    or metadata["missing"] or not isinstance(rows, list)):
+                raise UserError("MercadoLibre bulk item response is incomplete or unavailable")
+            found = {}
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise UserError("MercadoLibre bulk item response has an invalid envelope")
+                id_, body = row.get("id"), row.get("body")
+                if (not isinstance(id_, str) or id_ not in batch or id_ in found
+                        or type(row.get("status_code")) is not int or row["status_code"] != 200
+                        or row.get("error") or not isinstance(body, dict) or body.get("error")
+                        or body.get("id") != id_ or any(name not in body for name in attributes)):
+                    raise UserError("MercadoLibre bulk item status or identity could not be verified")
+                found[id_] = row
+            if set(found) != set(batch):
+                raise UserError("MercadoLibre bulk item response omitted requested items")
+            items.extend(found[id_] for id_ in batch)
+        return items
 
+    def filter_meli_ids(self, results, store_id=None):
         company = self or self.env.user.company_id
-
-        config = company
-
-
-        meli = self.env['meli.util'].get_new_instance( company )
+        meli = self.env['meli.util'].get_new_instance(company)
         if meli.need_login():
             self.env['meli.util']._meli_require_reconnect()
-
-        official_store_id = store_id
-        if not official_store_id:
+        if not store_id:
             return results
-
-        c = 0
-        n20 = 0
-        rresults = []
-        #_logger.info("results:"+str(results))
-        if not results:
-            return rresults
-
-        ids = ""
-        coma = ""
-        maxc = (results and len(results)) or 0
-        for meli_id in results:
-            c+=1
-            n20+=1
-
-            #read id and official_store_id to check
-            #hacer paquetes de 20 !!!!!! /items?ids=$ITEM_ID1,$ITEM_ID2&attributes=$ATTRIBUTE1,$ATTRIBUTE2,$ATTRIBUTE3
-
-            #armamos el paquete
-            ids+= coma+str(meli_id)
-            coma = ","
-
-            if n20==20 or c==maxc:
-                item_params = {
-                    "ids": str(ids),
-                    "attributes": "id,official_store_id"
-                }
-                #_logger.info("item_params:"+str(item_params))
-                responseItem = meli.get("/items"+str('?ids='+str(ids)+'&attributes='+str('id,official_store_id')), {'access_token':meli.access_token } )
-                #[ { "code": 200, "body": { "id": "MLM863472529", "official_store_id": 3476 } },
-                #_logger.info("responseItem:"+str(responseItem and responseItem.json()))
-                if responseItem.json():
-                    for rr in responseItem.json():
-                        #_logger.info("rr:"+str(rr))
-                        if ("code" in rr and rr["code"]==200):
-                            if ("body" in rr and rr["body"]):
-                                st_id = "official_store_id" in rr["body"] and rr["body"]["official_store_id"]
-                                ml_id = "id" in rr["body"] and rr["body"]["id"]
-                                if (st_id and official_store_id and str(st_id)==str(official_store_id) ):
-                                    rresults.append(ml_id)
-                ids = ""
-                n20 = 0
-        #_logger.info("rresults:"+str(rresults))
-
-        return rresults
+        rows = self._meli_items_bulk(meli, results, attributes=("id", "official_store_id"))
+        return [row["id"] for row in rows
+                if row["body"]["official_store_id"]
+                and str(row["body"]["official_store_id"]) == str(store_id)]
 
     #list all meli ids in odoo from this account, that are not in parameter filter_ids...
     def list_meli_ids( self, filter_ids=None ):
@@ -1636,49 +1627,27 @@ class res_company(models.Model):
     @api.model
     def get_all_items_from_existing_sku(self, products):
         company = self.env.company
-        company = self.env.company
         meli = self.env['meli.util'].get_new_instance(company)
-        params = {
-            'access_token': meli.access_token
-        }
-        meli_ids = []
         for product in products:
-            _logger.info(f"Buscando producto con sku [{product.default_code}]")
             params = {'access_token': meli.access_token}
             response = meli.get(
-                f"/users/{str(meli.seller_id)}/items/search?seller_sku={str(product.default_code)}", 
-                params=params
-            )
-            data = response.json()
-            results = data.get('results', [])
-            if len(results):
-                result = results[0]
-                ids_string = ','.join(results)
-                product.meli_id = result
-                meli_ids.extend(results)
-                params['access_token'] = meli.access_token
-                response = meli.get(
-                    f"/items?ids={ids_string}", 
-                    params=params
-                )
-                res = response.rjson
-                if len(res):
-                    res = res[0]
-                    if res.get('body', False):
-                        try:
-                            product.product_meli_get_product(meli_rjson=res['body'])
-                        except:
-                            continue
-                    else:
-                        _logger.warning("Sin información disponible.")
+                f"/users/{str(meli.seller_id)}/items/search?seller_sku={str(product.default_code)}",
+                params=params)
+            results = response.json().get('results', [])
+            if results:
+                rows = self._meli_items_bulk(meli, results)
+                # The helper returns requested order only after every envelope
+                # is complete and root/body-correlated, including later batches.
+                product.meli_id = rows[0]["id"]
+                try:
+                    product.product_meli_get_product(meli_rjson=rows[0]["body"])
+                except Exception:
+                    continue  # Preserve the existing product-import error policy.
             time.sleep(RATE_LIMIT)
-                
+
     @api.model
     def get_all_items_from_ML(self):
         ICP = self.env['ir.config_parameter'].sudo()
-        def chunks(lst, n):
-            for i in range(0, len(lst), n):
-                yield lst[i:i + n]
         company = self.env.company
         limit_parameter = int(ICP.get_param('meli_local_products_search_range'))
         offset_parameter = int(ICP.get_param('meli_local_products_search_last_offset'))
@@ -1691,7 +1660,6 @@ class res_company(models.Model):
             'offset': offset_parameter,
             'limit': 50,
         }
-        all_items = []
         meli_ids = []
         total = total_items_parameter
         while True:
@@ -1716,43 +1684,14 @@ class res_company(models.Model):
                 _logger.error(f"Error al obtener productos: {data}")
                 break
         
+        # Do not advance the catalogue cursor or return a partial list when
+        # any item/batch is unavailable, malformed or belongs to another ID.
+        all_items = self._meli_items_bulk(meli, meli_ids)
         new_offset = offset_parameter + len(meli_ids)
         if new_offset >= total:
             new_offset = 0
-        new_total = total
         ICP.set_param('meli_local_products_search_last_offset', new_offset)
-        ICP.set_param('meli_local_products_search_total', new_total)
-
-        # Aquí aseguramos que `access_token` sigue presente en el segundo parámetro
-        params = {
-            'access_token': meli.access_token,  # Aseguramos que el token esté aquí también
-            'include_attributes': 'all',
-        }
-    
-        ## Convertir meli_ids en una cadena separada por comas
-        #meli_ids = ','.join(meli_ids)
-        #response = meli.get(
-        #    f"/items?ids={meli_ids}", 
-        #    params=params
-        #)
-        #all_items = response.json
-
-        for meli_id_chunk in chunks(meli_ids, 20):
-            params['access_token'] = meli.access_token
-            # Convertir cada bloque en una cadena separada por comas
-            ids_string = ','.join(meli_id_chunk)
-            try:
-                # Realizar la solicitud para ese bloque de IDs
-                response = meli.get(
-                    f"/items?ids={ids_string}", 
-                    params=params
-                )
-                # Agregar los productos obtenidos a la lista total
-                all_items.extend(response.json())
-            except:
-                _logger.error(f"Error al obtener información de productos: {response.json()}")
-                continue
-            
+        ICP.set_param('meli_local_products_search_total', total)
         return all_items
 
     @staticmethod
