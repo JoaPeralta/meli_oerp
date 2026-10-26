@@ -68,6 +68,59 @@ class EntryBarrierTests(unittest.TestCase):
             {"id": False, "remote_order_id": "101", "order_json": current},
             config=company, meli=object())
 
+    def test_fresh_customer_selection_precedes_existing_mapping_requirement(self):
+        # Execute the real producer through customer selection; an already verified
+        # fresh buyer cannot have an existing principal before its owned projection.
+        node = next(n for n in ast.walk(ast.parse((ROOT / "models/orders.py").read_text()))
+                    if isinstance(n, ast.FunctionDef) and n.name == "_meli_import_pack")
+        node.decorator_list = []
+        body = node.body[1].body if isinstance(node.body[0], ast.Expr) else node.body[0].body
+        stop = next(i for i, n in enumerate(body) if isinstance(n, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == "ids" for t in n.targets))
+        body[:] = body[:stop] + [ast.Return(ast.Name("partner", ast.Load()))]
+        class Record(list):
+            _name = "res.partner"
+            property_account_position_id = False
+            parent_id = False
+            active = True
+            def check_access(self, mode):
+                pass
+            def flush_recordset(self, names):
+                pass
+            @property
+            def ids(self):
+                return [1] if self else []
+        from contextlib import nullcontext
+        company = SimpleNamespace(id=1, _fields={}, mercadolibre_pricelist=SimpleNamespace(
+            currency_id=SimpleNamespace(name="USD")))
+        class Environment(dict):
+            pass
+        env = Environment()
+        env.company = company
+        env.cr = SimpleNamespace(savepoint=nullcontext, execute=lambda *args: None, fetchone=lambda: (False,))
+        principal = Record([1]); principal.env = env; principal.company_id = company
+        principal.meli_buyer_id = "50"; principal.id = 1
+        env["res.partner"] = SimpleNamespace(search=lambda domain: Record())
+        buyer = Record(); buyer._name = "mercadolibre.buyers"; buyer.env = env
+        selected = dict(principal=principal, invoice=principal, shipping=principal, buyer=buyer, metadata=False)
+        calls = []
+        def customer(*args):
+            calls.append("customer")
+            return selected
+        scope = dict(AdmissionError=admission.AdmissionError, ValidationError=ValueError,
+            AccessError=PermissionError, remote_id=admission.remote_id,
+            models=SimpleNamespace(BaseModel=Record),
+            fields=SimpleNamespace(Datetime=SimpleNamespace(to_datetime=lambda value: value)), ml_datetime=lambda value: value)
+        exec(compile(ast.fix_missing_locations(ast.Module([node], [])), "actual-pack-customer-entry", "exec"), scope)
+        source = payload(); source.update(date_created="2026-01-01", date_closed="2026-01-01")
+        group = admission.verify_pack_commerce(pack(), [source, payload(102)], "42")
+        for row in group["orders"]:
+            row.update(date_created="2026-01-01", date_closed="2026-01-01")
+        actor = SimpleNamespace(env=env, _meli_collect_pack_commerce=lambda *args: group,
+            _meli_pack_customer_projection=customer)
+        self.assertIs(scope[node.name](actor, source, company, object()), principal)
+        self.assertEqual(calls, ["customer"])
+
     def test_verified_pack_with_shipment_reaches_explicit_group_path(self):
         result = self.entry({"id": 800})
         self.assertEqual(result, {"commercial_group": "projected"}, "EXISTING_PACK_BARRIER")

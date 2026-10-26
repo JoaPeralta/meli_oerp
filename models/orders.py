@@ -2733,6 +2733,32 @@ class mercadolibre_orders(models.Model):
         return verify_pack_commerce(pack, snapshots, seller)
 
     @api.model
+    def _meli_pack_customer_projection(self, group, config, meli):
+        """Legacy default: existing principal only, no buyer or metadata creation."""
+        company = config.company_id if "company_id" in config._fields else config
+        partners = self.env["res.partner"].search([
+            ("meli_buyer_id", "=", group["buyer_id"]),
+            "|", ("company_id", "=", False), ("company_id", "=", company.id)])
+        partners.check_access("read")
+        if len(partners) != 1 or partners.property_account_position_id:
+            raise ValidationError("One existing compatible buyer mapping without fiscal remapping is required")
+        partner = partners
+        partner.flush_recordset(["meli_buyer_id", "company_id"])
+        self.env.cr.execute(
+            "SELECT EXISTS (SELECT 1 FROM res_partner WHERE meli_buyer_id = %s "
+            "AND (company_id IS NULL OR company_id = %s) AND NOT (id = ANY(%s)))",
+            [group["buyer_id"], company.id, partner.ids])
+        if self.env.cr.fetchone()[0]:
+            raise AccessError("Pack buyer mapping is not completely accessible")
+        return {"principal": partner, "invoice": partner, "shipping": partner,
+                "buyer": self.env["mercadolibre.buyers"], "metadata": False}
+
+    @api.model
+    def _meli_complete_pack_projection(self, group, orders, root, customer, config, meli):
+        """Legacy default deliberately performs no logistics or metadata work."""
+        return False
+
+    @api.model
     def _meli_import_pack(self, payload, config, meli):
         """Atomically project one verified own visible group, always as a draft.
 
@@ -2763,20 +2789,28 @@ class mercadolibre_orders(models.Model):
                     if boundary and ((lower and boundary > date) or (not lower and boundary < date)):
                         raise ValidationError("Pack child is outside the configured date range")
 
-            partners = self.env["res.partner"].search([
-                ("meli_buyer_id", "=", group["buyer_id"]),
-                "|", ("company_id", "=", False), ("company_id", "=", company.id)])
-            partners.check_access("read")
-            if len(partners) != 1 or partners.property_account_position_id:
-                raise ValidationError("One existing compatible buyer mapping without fiscal remapping is required")
-            partner = partners
-            partner.flush_recordset(["meli_buyer_id", "company_id"])
-            self.env.cr.execute(
-                "SELECT EXISTS (SELECT 1 FROM res_partner WHERE meli_buyer_id = %s "
-                "AND (company_id IS NULL OR company_id = %s) AND NOT (id = ANY(%s)))",
-                [group["buyer_id"], company.id, partner.ids])
-            if self.env.cr.fetchone()[0]:
-                raise AccessError("Pack buyer mapping is not completely accessible")
+            customer = self._meli_pack_customer_projection(group, config, meli)
+            if type(customer) is not dict or set(customer) != {"principal", "invoice", "shipping", "buyer", "metadata"}:
+                raise ValidationError("Pack customer projection has an invalid shape")
+            partner, invoice, shipping = (customer[key] for key in ("principal", "invoice", "shipping"))
+            buyer = customer["buyer"]
+            for contact in (partner, invoice, shipping):
+                if (not isinstance(contact, models.BaseModel) or contact._name != "res.partner"
+                        or contact.env is not self.env or len(contact) != 1):
+                    raise ValidationError("Pack contacts must be exact records in the importing environment")
+                contact.check_access("read")
+                if (contact.company_id and contact.company_id != company
+                        or contact != partner and contact.parent_id != partner
+                        or contact.property_account_position_id):
+                    raise ValidationError("Pack contacts contradict the selected customer or fiscal context")
+            if (partner.meli_buyer_id != group["buyer_id"] or not isinstance(buyer, models.BaseModel)
+                    or buyer._name != "mercadolibre.buyers" or buyer.env is not self.env or len(buyer) > 1):
+                raise ValidationError("Pack customer identity is incompatible")
+            if buyer:
+                buyer.check_access("read")
+            if buyer and (buyer.buyer_id != group["buyer_id"]
+                          or any(contact.meli_buyer != buyer for contact in (partner, invoice, shipping))):
+                raise ValidationError("Pack buyer and selected contacts are not exactly bound")
 
             ids = [remote_id(row["id"]) for row in group["orders"]]
             orders = self._meli_pack_local_orders(ids, group["pack_id"], config)
@@ -2800,8 +2834,8 @@ class mercadolibre_orders(models.Model):
                         or root.invoice_ids or root.meli_update_forbidden or root.meli_discount_seller_amount
                         or root.meli_coupon_amount or root.meli_financing_fee_amount or root.meli_shipping_amount
                         or root.company_id != company or root.pricelist_id != plist
-                        or root.partner_id != partner or root.partner_invoice_id != partner
-                        or root.partner_shipping_id != partner or root.fiscal_position_id
+                        or root.partner_id != partner or root.partner_invoice_id != invoice
+                        or root.partner_shipping_id != shipping or root.fiscal_position_id
                         or root.meli_shipping_id and root.meli_shipping_id != (group["shipping_id"] or False)):
                     raise ValidationError("Existing pack root is processed or incompatible")
                 if set(root.meli_orders.ids) != set(orders.ids) or any(order.sale_order != root for order in orders):
@@ -2866,7 +2900,7 @@ class mercadolibre_orders(models.Model):
 
             if not root:
                 root = sales.create({"name": "ML PACK " + group["pack_id"], "company_id": company.id,
-                    "partner_id": partner.id, "partner_invoice_id": partner.id, "partner_shipping_id": partner.id,
+                    "partner_id": partner.id, "partner_invoice_id": invoice.id, "partner_shipping_id": shipping.id,
                     "pricelist_id": plist.id, "fiscal_position_id": False, "meli_order_id": identity})
             for source in group["orders"]:
                 oid = remote_id(source["id"])
@@ -2875,6 +2909,10 @@ class mercadolibre_orders(models.Model):
                 values = self.prepare_ml_order_vals(order_json=source, config=config, meli=meli)
                 values.update(pack_id=group["pack_id"], sale_order=root.id,
                               shipping_id=group["shipping_id"] or False, pack_order=True)
+                if buyer:
+                    if order and order.buyer and order.buyer != buyer:
+                        raise ValidationError("Stored child buyer contradicts the verified pack")
+                    values["buyer"] = buyer.id
                 if order:
                     if order.shipping_id and order.shipping_id != (group["shipping_id"] or False):
                         raise ValidationError("Stored child logistics contradicts the verified pack")
@@ -2918,14 +2956,20 @@ class mercadolibre_orders(models.Model):
                         "meli_status": "paid", "meli_total_amount": float(group["total"]),
                         "meli_paid_amount": float(group["paid"]), "meli_fee_amount": float(group["fees"]),
                         "meli_currency_id": group["currency"], "meli_shipping_id": group["shipping_id"] or False})
+            metadata_projected = self._meli_complete_pack_projection(group, orders, root, customer, config, meli)
+            if type(metadata_projected) is not bool:
+                raise ValidationError("Pack metadata completion returned no explicit result")
             self.env.flush_all()
             if (root.state != "draft" or root.picking_ids or root.invoice_ids
                     or len(root.order_line) != len(ids) or set(root.meli_orders.ids) != set(orders.ids)
                     or root.currency_id.compare_amounts(root.amount_total, float(group["total"]))):
                 raise ValidationError("Pack totals or commercial outputs require unsupported semantics")
-            return {"commercial_group": "draft", "sale_order_id": root.id,
+            result = {"commercial_group": "draft", "sale_order_id": root.id,
                     "verified_order_ids": ids, "membership_scope": group["membership_scope"],
                     "logistics_projected": False}
+            if metadata_projected:
+                result["metadata_projected"] = True
+            return result
 
     @api.model
     def _meli_order_admission(self, payload, config, meli):
