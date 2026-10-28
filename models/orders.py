@@ -591,7 +591,7 @@ class sale_order(models.Model):
         """
         mode = (config and "mercadolibre_order_total_config" in config._fields
                 and config.mercadolibre_order_total_config)
-        if mode == "manual" or not self.meli_orders:
+        if mode not in (False, None, "manual_conflict", "paid_amount", "transaction_amount", "total_amount") or not self.meli_orders:
             return 0
         basis, shipping = money(0), money(0)
         try:
@@ -3011,6 +3011,12 @@ class mercadolibre_orders(models.Model):
         if economics["status"] != "validated":
             return {"error": "Economic evidence is not sufficient for commercial import",
                     "economic_pending": economics["reason"]}
+        if (any(b["type"] == "coupon" for b in economics["benefits"])
+                and meli_resolve_coupon_invoice_mode(config) != "full"):
+            # Do not silently reinterpret a separately configured fiscal policy
+            # or reproduce its old, unverifiable percentage/proration fallback.
+            return {"error": "Configured coupon invoice transformation requires separate validation",
+                    "economic_pending": "coupon_invoice_policy_unsupported"}
 
         saleorder_obj = self.env['sale.order']
         saleorderline_obj = self.env['sale.order.line']
@@ -4599,7 +4605,10 @@ class mercadolibre_orders(models.Model):
         order._meli_store_economic_snapshot(economics)
         # Funding is audit information, not an additional line discount.
         order.discount_seller_amount = float(money(economics["seller_funded"]))
+        order.coupon_amount = float(sum((money(b["total"]) for b in economics["benefits"]
+                                        if b["type"] == "coupon"), money(0)))
         meli_order_fields['meli_discount_seller_amount'] = order.discount_seller_amount
+        meli_order_fields['meli_coupon_amount'] = order.coupon_amount
 
         if (sorder and sorder.id):
             #_logger.info("Updating sale.order: %s" % (sorder.id))
@@ -5022,11 +5031,12 @@ class mercadolibre_orders(models.Model):
                     'order_id': order.id,
                     'payment_id': Payment['id'],
                     'transaction_amount': Payment['transaction_amount'] or '',
-                    'total_paid_amount': Payment['total_paid_amount'] or '',
+                    'total_paid_amount': next(float(money(p["buyer_paid"])) for p in economics["payments"]
+                                              if p["id"] == str(Payment['id'])),
                     'currency_id': Payment['currency_id'] or '',
                     'status': Payment['status'] or '',
-                    'date_created': ml_datetime(Payment['date_created']),
-                    'date_last_modified': ml_datetime(Payment['date_last_modified']),
+                    'date_created': ml_datetime(Payment.get('date_created')),
+                    'date_last_modified': ml_datetime(Payment.get('date_last_modified')),
                     'mercadopago_url': mp_payment_url,
                     'full_payment': '',
                     'fee_amount': 0,

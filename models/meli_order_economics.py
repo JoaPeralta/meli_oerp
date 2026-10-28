@@ -182,6 +182,12 @@ def _payments(order, currency, observations):
             if (_id(mp.get("id")) != pid or mp.get("currency_id") != currency
                     or mp.get("status") != "approved"):
                 raise EconomicEvidenceError("payment_identity_mismatch", "contradictory")
+            # The provider order's payment IDs already bind these observations
+            # to the admitted seller/order. When MP also reports its collector,
+            # it must corroborate that seller, never silently contradict it.
+            if ("collector_id" in mp
+                    and _id(mp["collector_id"]) != _id((order.get("seller") or {}).get("id"))):
+                raise EconomicEvidenceError("payment_collector_mismatch", "contradictory")
             if money(mp.get("transaction_amount")) != transaction:
                 raise EconomicEvidenceError("payment_transaction_mismatch", "contradictory")
             details = mp.get("transaction_details")

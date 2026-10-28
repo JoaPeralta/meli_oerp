@@ -82,7 +82,13 @@ class SQL(str):
 
 class Rows(list):
     def __getitem__(self, key):
+        if key == "meli_source_order_item_id":
+            value = getattr(self, key)
+            return Rows([value]) if value else Rows()
         return getattr(self, key) if isinstance(key, str) else super().__getitem__(key)
+
+    def __sub__(self, other):
+        return Rows(row for row in self if not any(row is member for member in other))
 
     @property
     def ids(self):
@@ -104,7 +110,7 @@ class Rows(list):
         return self
 
     def filtered(self, predicate):
-        return Rows(row for row in self if predicate(row))
+        return Rows(row for row in self if (getattr(row, predicate) if isinstance(predicate, str) else predicate(row)))
 
     def mapped(self, name):
         return Rows(value for row in self if (value := getattr(row, name)))
@@ -187,8 +193,11 @@ class Fixture:
             "buyer": {"id": 50, "name": "Synthetic buyer", "first_name": "Synthetic", "last_name": "Buyer"},
             "order_items": [{"item": {"id": "MLA123", "variation_id": 7},
                              "quantity": 2, "unit_price": 100, "currency_id": "USD"}]}
+        self.body["payments"] = [{"id": 77, "currency_id": "USD", "status": "approved",
+                                  "transaction_amount": 200, "total_paid_amount": 200}]
         root = SimpleNamespace(id=20, company_id=self.company, viarengo_circuit_code="a",
             state="draft", picking_ids=[], invoice_ids=[], meli_update_forbidden=False,
+            meli_shipping_id=False, meli_shipment=False,
             meli_order_id="101", meli_status_detail="", order_line=[],
             _fields={"meli_orders": SimpleNamespace(relation="source_double_rel",
                                                      column1="sale_id", column2="order_id")},
@@ -214,6 +223,8 @@ class Fixture:
             def json(self):
                 if self.path.startswith("/orders/search"):
                     return {"results": [copy.deepcopy(fixture.body)], "paging": {"total": 1, "limit": 1}}
+                if self.path.endswith("/discounts"):
+                    return {"details": []}
                 return copy.deepcopy(fixture.body)
         self.client = Client()
         logger = SimpleNamespace(info=lambda *a, **k: None, error=lambda *a, **k: None,
@@ -232,6 +243,11 @@ class Fixture:
             "fields": SimpleNamespace(Datetime=SimpleNamespace(now=datetime.datetime.now)),
             "timedelta": datetime.timedelta, "DECLARATION": "viarengo_meli_root_circuit"}
         self.scope.update(Decimal=Decimal, InvalidOperation=InvalidOperation, json=json)
+        spec = importlib.util.spec_from_file_location("serialization_economics", ROOT / "models/meli_order_economics.py")
+        economics = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(economics)
+        self.scope.update(interpret_order_economics=economics.interpret_order_economics,
+                          requests=SimpleNamespace(exceptions=SimpleNamespace(RequestException=RuntimeError)))
         # Existing fixtures have no taxes; native fiscal proof is a separate suite.
         self.scope["ml_product_price_conversion"] = lambda line, product, price, **kwargs: float(price)
         for name in ("amount", "cancellation_evidence"):
@@ -242,6 +258,7 @@ class Fixture:
         generic = type("CurrentGenericOrders", (SimpleNamespace,), {})
         names = ("_meli_assert_order_admission_actor", "_meli_preflight_order_history",
             "_meli_assert_individual_sale_root", "_meli_order_admission", "_meli_is_pack_route",
+            "_meli_economic_preflight", "_fetch_order_discounts",
             "orders_update_order_json", "orders_query_iterate", "orders_query_recent", "orders_resync_status")
         for name in names:
             setattr(generic, name, compile_function(orders_path, name, self.scope))
@@ -284,6 +301,10 @@ class Fixture:
         installed.check_access = lambda record, mode: self.access.append(("order", mode))
         installed.flush_model = lambda *args: None
         installed.flush_recordset = lambda *args: None
+        self.model._meli_fetch_payment_observation = lambda pid, client: {
+            "status": 200, "missing": None, "body": {"id": int(pid), "status": "approved", "currency_id": "USD",
+                "collector_id": 42, "transaction_amount": 200, "coupon_amount": 0, "shipping_amount": 0,
+                "transaction_details": {"total_paid_amount": 200}}}
         root.meli_orders = Rows([self.model])
         root.env = self.env
         source = SimpleNamespace(id=30, order_id=self.model, product_id=SimpleNamespace(id=2),
@@ -305,6 +326,7 @@ class Fixture:
         line.is_delivery, line.tax_ids, line.move_ids = False, Rows(), Rows()
         line.qty_delivered = line.qty_invoiced = 0
         self.model.total_amount = self.model.paid_amount = 200
+        self.model.economic_snapshot = None
         self.env["mercadolibre.orders"] = self.model
         self.env["sale.order"] = SimpleNamespace(search=lambda *args, **kwargs: self.root)
         plain = SimpleNamespace(_fields={}, flush_model=lambda fields: None)
@@ -470,6 +492,14 @@ class ResyncFixture(Fixture):
             line.product_uom_qty, line.price_unit = item["quantity"], item["unit_price"]
             line.price_total = line.price_subtotal = root.amount_total = item["quantity"] * item["unit_price"]
             model.status, model.total_amount, model.paid_amount = "paid", body["total_amount"], body["paid_amount"]
+            # Producer projection double: provide its explicit audit contract.
+            # Pure acquisition/normalization is exercised by separate shared-preflight tests.
+            variant = item["item"].get("variation_id")
+            model.economic_snapshot = {"schema": "meli.order.economics/v1", "status": "validated",
+                "order_id": model.order_id, "currency_id": body["currency_id"],
+                "commercial_total": str(body["total_amount"]), "buyer_paid": str(body["paid_amount"]),
+                "items": [{"item_id": item["item"]["id"], "variation_id": None if variant is None else str(variant),
+                           "quantity": item["quantity"], "unit_price": str(item["unit_price"])}]}
             self.after_projection(selected)
             return self.producer_result  # Actual scalar producer's normal contract is {}.
         generic.orders_update_order_json = project
@@ -478,13 +508,13 @@ class ResyncFixture(Fixture):
         return (self.model.status, self.model.status_detail, self.model.total_amount, self.model.paid_amount,
             self.source.quantity, self.source.unit_price, self.line.product_uom_qty,
             self.line.price_unit, self.line.price_total, self.line.price_subtotal,
-            self.root.state, self.root.amount_total)
+            self.root.state, self.root.amount_total, copy.deepcopy(self.model.economic_snapshot))
 
     def restore(self, value):
         (self.model.status, self.model.status_detail, self.model.total_amount, self.model.paid_amount,
             self.source.quantity, self.source.unit_price, self.line.product_uom_qty,
             self.line.price_unit, self.line.price_total, self.line.price_subtotal,
-            self.root[0].state, self.root[0].amount_total) = value
+            self.root[0].state, self.root[0].amount_total, self.model.economic_snapshot) = value
 
     def resync(self, client=True):
         return self.model.orders_resync_status(config=self.company, meli=self.client if client else None)
@@ -531,6 +561,14 @@ class IndividualResyncTests(unittest.TestCase):
                 fixture.body.update(status=status, tags=tags)
                 if processed:
                     fixture.root[0].state = "sale"
+                    # The current paid processed-replay boundary deliberately
+                    # refuses cancellation here; do not weaken it for this fixture.
+                    before = fixture.state()
+                    with self.assertRaises(Denied):
+                        fixture.resync()
+                    self.assertEqual(fixture.state(), before)
+                    self.assertEqual(fixture.projections, [])
+                    continue
                 result = fixture.resync()
                 self.assertEqual(len(fixture.projections), 1, "OBSERVATION_DID_NOT_REACH_C5")
                 self.assertEqual(result.get("scope"), "known_own_individual_resync",

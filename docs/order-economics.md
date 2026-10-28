@@ -26,10 +26,16 @@ explicit shipping amount. This is a fail-closed implementation subset, **not a
 claim that these equalities define every Mercado Libre payment modality**.
 Financing allocation, refunds, ambiguous variants and unexplained differences
 remain pending/unsupported; no balancing estimates or artificial tolerances run.
+Input amounts whose exact decimal product differs from the reported rounded
+total also remain pending; universal external rounding semantics are not claimed.
+The existing native Odoo tax/currency projection still owns fiscal rounding.
 
 `full_unit_price` is retained as an unverified optional reference, never used to
 reconstruct a price. Charges and commission bonuses are not additional product
 discounts. MP coupon metadata is corroboration, not the funding authority.
+MP payment IDs must come from the seller-admitted order. If MP additionally
+reports `collector_id`, it must match that seller; absent collector metadata is
+not invented or treated as a second ownership certificate.
 
 ## Transport and limitations
 
@@ -80,3 +86,8 @@ The manifest version is unchanged: the project policy does not require a bump,
 and a version bump cannot replace `-u meli_oerp`. Existing orders without a
 validated snapshot require explicit revalidation before automatic amount
 acceptance; no historical values are backfilled or silently trusted.
+The existing explicit coupon invoice modes `product_discount`/`separate_line`
+are not silently changed into `full`: coupon imports under those policies stay
+pending as `coupon_invoice_policy_unsupported`. Their old percentage/proration
+fallback is not run; supporting a different fiscal transformation requires its
+own verified policy, outside this commercial interpreter.

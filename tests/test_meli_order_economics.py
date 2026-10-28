@@ -184,6 +184,20 @@ class OrderEconomicsTests(unittest.TestCase):
         p = order(); p["payments"] = []
         self.assertEqual(self.interpret(p)["reason"], "payments_missing")
 
+    def test_rounded_input_totals_are_not_silently_balanced(self):
+        p = order()
+        p["order_items"][0].update(unit_price="33.333", quantity=3, gross_price="99.999")
+        p["total_amount"] = p["paid_amount"] = 100
+        p["payments"][0].update(transaction_amount=100, total_paid_amount=100)
+        self.assertEqual(self.interpret(p)["reason"], "commercial_total_mismatch")
+
+    def test_mp_collector_if_reported_must_match_admitted_order_seller(self):
+        mp = observation({"id": 77, "status": "approved", "currency_id": "ARS", "collector_id": 8,
+                          "transaction_amount": 200, "transaction_details": {"total_paid_amount": 200}})
+        self.assertEqual(self.interpret(payment_observations={"77": mp})["reason"], "payment_collector_mismatch")
+        mp["body"]["collector_id"] = 7
+        self.assertEqual(self.interpret(payment_observations={"77": mp})["status"], "validated")
+
     def test_interpreter_is_pure_deterministic_and_reimport_result_identical(self):
         p, d = order(), [benefit("cashback", 5, 0)]
         before = copy.deepcopy((p, d))
