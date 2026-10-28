@@ -33,6 +33,109 @@ def benefit(kind="discount", total=20, seller=10, quantity=2):
 
 
 class OrderEconomicsTests(unittest.TestCase):
+    def test_review_nested_campaign_metadata_never_reaches_snapshot(self):
+        b = benefit("cashback", 5, 0)
+        b["supplier"]["campaign_id"] = {"access_token": "SYNTHETIC_SECRET",
+                                            "payer": {"email": "private@example.test"}}
+        result = self.interpret(details=[b])
+        self.assertEqual(result["reason"], "economic_metadata_invalid")
+        self.assertEqual(result["status"], "pending")
+        self.assertNotIn("SYNTHETIC_SECRET", json.dumps(result))
+        self.assertNotIn("private@example.test", json.dumps(result))
+
+    def test_review_explicit_coupon_identity_must_match_discount_detail(self):
+        p = order()
+        p["paid_amount"] = p["payments"][0]["total_paid_amount"] = 180
+        p["coupon"] = {"id": "COUPON_A", "amount": 20}
+        b = benefit("coupon")
+        b["coupon"]["id"] = "COUPON_B"
+        result = self.interpret(p, [b])
+        self.assertEqual((result["status"], result["reason"]),
+                         ("contradictory", "coupon_identity_mismatch"))
+
+    def test_all_audited_metadata_rejects_non_scalar_unbounded_values(self):
+        bad_values = ({"secret": "SYNTHETIC_SECRET"}, ["SYNTHETIC_SECRET"],
+                      True, float("nan"), "x" * 129, "bad\nidentifier", 10 ** 130)
+        for field in ("campaign_id", "meli_campaign", "offer_id", "funding_mode", "element_id"):
+            for bad in bad_values:
+                b = benefit("cashback", 5, 0)
+                target = b["items"][0] if field == "element_id" else b["supplier"]
+                target[field] = bad
+                result = self.interpret(details=[b])
+                with self.subTest(field=field, bad_type=type(bad).__name__):
+                    self.assertEqual(result["reason"], "economic_metadata_invalid")
+                    self.assertNotIn("SYNTHETIC_SECRET", json.dumps(result))
+                    self.assertEqual(result["benefits"], [])
+
+    def test_required_and_optional_identifier_types_are_bounded(self):
+        for field in ("benefit", "item", "payment", "currency"):
+            for bad in ({"secret": "SYNTHETIC_SECRET"}, [], False, float("nan"), "x" * 129):
+                p, b = order(), benefit("cashback", 5, 0)
+                if field == "benefit":
+                    b["cashback"]["id"] = bad
+                elif field == "item":
+                    p["order_items"][0]["item"]["id"] = bad
+                elif field == "payment":
+                    p["payments"][0]["id"] = bad
+                else:
+                    p["currency_id"] = bad
+                result = self.interpret(p, [b])
+                with self.subTest(field=field, bad_type=type(bad).__name__):
+                    self.assertNotEqual(result["status"], "validated")
+                    self.assertNotIn("SYNTHETIC_SECRET", json.dumps(result))
+
+    def test_scalar_metadata_preserves_ids_and_does_not_invent_mode_enums(self):
+        b = benefit("cashback", 5, 0)
+        b["supplier"].update(campaign_id=123, meli_campaign="123", offer_id="MLA1-abc", funding_mode="future_documented_mode")
+        b["items"][0]["element_id"] = 1
+        result = self.interpret(details=[b])
+        self.assertEqual(result["status"], "validated", result)
+        stored = result["benefits"][0]
+        self.assertEqual((stored["campaign_id"], stored["offer_id"], stored["element_id"]),
+                         ("123", "MLA1-abc", "1"))
+        self.assertEqual(stored["funding_mode"], "future_documented_mode")
+        b["supplier"]["campaign_id"] = "different"
+        result = self.interpret(details=[b])
+        self.assertEqual((result["status"], result["reason"]),
+                         ("contradictory", "benefit_campaign_identity_mismatch"))
+
+    def test_coupon_identity_normalizes_numeric_string_but_never_selects_one_of_many(self):
+        p = order()
+        p["paid_amount"] = p["payments"][0]["total_paid_amount"] = 180
+        p["coupon"] = {"id": 3, "amount": 20}
+        b = benefit("coupon")
+        b["coupon"]["id"] = "3"
+        self.assertEqual(self.interpret(p, [b])["status"], "validated")
+        b["items"][0]["amounts"] = {"total": 10, "seller": 0}
+        second = copy.deepcopy(b)
+        second["coupon"]["id"] = 4
+        result = self.interpret(p, [b, second])
+        self.assertEqual((result["status"], result["reason"]),
+                         ("pending", "coupon_identity_ambiguous"))
+        p["coupon"] = {"amount": 20}
+        result = self.interpret(p, [b, second])
+        self.assertEqual(result["status"], "validated", result)
+        self.assertEqual({row["id"] for row in result["benefits"]}, {"3", "4"})
+        self.assertIsNone(result["order_coupon_id"])
+        self.assertEqual(result["order_coupon_id_state"], "absent")
+
+    def test_coupon_explicit_unknown_or_bad_identity_is_not_zero_or_assumed_match(self):
+        p = order()
+        p["paid_amount"] = p["payments"][0]["total_paid_amount"] = 180
+        p["coupon"] = {"id": None, "amount": 20}
+        result = self.interpret(p, [benefit("coupon")])
+        self.assertEqual(result["status"], "validated")
+        self.assertIsNone(result["order_coupon_id"])
+        self.assertEqual(result["order_coupon_id_state"], "unknown")
+        p["coupon"]["id"] = {"secret": "SYNTHETIC_SECRET"}
+        result = self.interpret(p, [benefit("coupon")])
+        self.assertEqual(result["reason"], "economic_metadata_invalid")
+        self.assertNotIn("SYNTHETIC_SECRET", json.dumps(result))
+        p["coupon"]["id"] = 0
+        result = self.interpret(p, [benefit("coupon")])
+        self.assertEqual(result["reason"], "coupon_identity_mismatch")
+
+
     def interpret(self, payload=None, details=None, **kwargs):
         return economics.interpret_order_economics(payload or order(),
             observation({"details": [] if details is None else details}), **kwargs)

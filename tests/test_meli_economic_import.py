@@ -33,6 +33,68 @@ def operation(name, namespace=None):
 
 
 class EconomicImportTests(unittest.TestCase):
+    def test_review_invalid_payment_id_never_strips_mp_corroboration(self):
+        payload = order()
+        payload["payments"][0]["id"] = "not-a-payment"
+        payload = admission.verify_order(payload, "7")
+        model = self.producer()
+        result, payments = model._meli_economic_preflight(payload, object())
+        self.assertEqual(result["reason"], "payment_identity_invalid")
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(payments, {})
+        self.assertEqual(model.calls, ["discounts"])
+
+    def test_invalid_payment_population_never_falls_back_or_fetches_a_prefix(self):
+        bad_ids = (None, "not-a-payment", "0", -1, False, {}, [], "9" * 129)
+        for bad in bad_ids:
+            p = order()
+            p["payments"].append(dict(p["payments"][0], id=bad))
+            model = self.producer()
+            result, payments = model._meli_economic_preflight(p, object())
+            with self.subTest(bad_type=type(bad).__name__):
+                self.assertEqual(result["reason"], "payment_identity_invalid")
+                self.assertEqual(payments, {})
+                self.assertEqual(model.calls, ["discounts"])
+        for population in (None, [], {}, "payments", [None], [{}]):
+            p = order()
+            p["payments"] = population
+            model = self.producer()
+            result, payments = model._meli_economic_preflight(p, object())
+            with self.subTest(population_type=type(population).__name__):
+                self.assertNotEqual(result["status"], "validated")
+                self.assertEqual(model.calls, ["discounts"])
+                self.assertEqual(payments, {})
+
+    def test_failed_payment_acquisition_cannot_be_replaced_by_order_only_evidence(self):
+        for response, reason in ((observation({}, 401), "payment_http_401"),
+                                 (observation({}, 403), "payment_http_403"),
+                                 (observation({}, 500), "payment_http_500"),
+                                 (observation(None, None), "payment_http_unknown"),
+                                 (observation({}, 200, "true"), "payment_observation_incomplete")):
+            model = self.producer(payment=response)
+            result, payments = model._meli_economic_preflight(order(), object())
+            with self.subTest(reason=reason):
+                self.assertEqual(result["reason"], reason)
+                self.assertNotEqual(result["status"], "validated")
+                self.assertEqual(set(payments), {"77"})
+                self.assertEqual(model.calls, ["discounts", ("payment", "77")])
+
+    def test_complete_multiple_payment_population_is_preserved(self):
+        p = order()
+        p["order_items"][0].update(quantity=4, gross_price=400)
+        p["total_amount"] = p["paid_amount"] = 400
+        p["payments"].append(dict(p["payments"][0], id=88))
+        model = self.producer()
+        result, payments = model._meli_economic_preflight(p, object())
+        self.assertEqual(result["status"], "validated", result)
+        self.assertEqual(set(payments), {"77", "88"})
+        self.assertEqual(model.calls, ["discounts", ("payment", "77"), ("payment", "88")])
+        p["payments"][1]["id"] = "077"
+        model = self.producer()
+        result, payments = model._meli_economic_preflight(p, object())
+        self.assertEqual(result["reason"], "payment_identity_ambiguous")
+        self.assertEqual(model.calls, ["discounts"])
+
     def producer(self, discounts=None, payment=None):
         model = SimpleNamespace(calls=[])
         model._fetch_order_discounts = lambda **kw: model.calls.append("discounts") or (

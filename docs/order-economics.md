@@ -91,3 +91,25 @@ are not silently changed into `full`: coupon imports under those policies stay
 pending as `coupon_invoice_policy_unsupported`. Their old percentage/proration
 fallback is not run; supporting a different fiscal transformation requires its
 own verified policy, outside this commercial interpreter.
+
+## Bounded evidence correction
+
+Production preflight requires a complete, explicitly identified MP population;
+invalid/missing/malformed IDs never fall back to order-only validation and never
+fetch a valid-looking prefix. Failed/partial payment observations remain pending.
+Audited identifiers accept only bounded printable strings or nonnegative integer
+IDs (normalized to strings); currency and funding modes accept bounded strings.
+Nested/list/bool/non-finite/overlong metadata is rejected, not copied or silently
+sanitized. Optional null remains unknown. No funding-mode enum is invented.
+
+Explicit order coupon identity must correspond to the identified coupon benefit.
+Numeric/string representations normalize consistently; contradictory IDs refuse.
+Multiple endpoint coupons are retained individually; a singular order identity
+cannot select one from that population and stays pending. Absent order identity
+is explicitly absent, not an invented match or a zero identifier.
+
+The focused three review reproductions failed before this correction. The final
+source matrix passes 282 methods across 14 suites (connector154, Odoo128).
+The new native tag `meli_economic_evidence_negative` prepares three real-ORM audit
+preservation negatives, but is **NOT RUN**: local Odoo/PostgreSQL is unavailable.
+No native atomicity or operational readiness is inferred from source doubles.

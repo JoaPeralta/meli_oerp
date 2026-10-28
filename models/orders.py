@@ -2030,16 +2030,27 @@ class mercadolibre_orders(models.Model):
         payments = {}
         if discounts.get("status") == 200 and not discounts.get("missing"):
             try:
-                for payment in payload.get("payments") or []:
-                    pid = remote_id(payment["id"])
-                    if pid in payments:
-                        # The interpreter rejects duplicates; no extra reads.
-                        continue
-                    payments[pid] = self._meli_fetch_payment_observation(pid, meli)
-            except (AdmissionError, KeyError, TypeError):
-                return interpret_order_economics(payload, discounts), {}
-        return interpret_order_economics(payload, discounts,
-            payment_observations=payments if payments else None), payments
+                rows = payload.get("payments")
+                if not isinstance(rows, list) or not rows:
+                    raise AdmissionError("Explicit payment population is required")
+                ids = []
+                for payment in rows:
+                    if not isinstance(payment, dict):
+                        raise AdmissionError("Explicit payment identity is required")
+                    value = payment.get("id")
+                    if ((type(value) is str and len(value) > 128)
+                            or (type(value) is int and value.bit_length() > 425)):
+                        raise AdmissionError("Payment identity exceeds its bounded contract")
+                    ids.append(remote_id(value))
+                if len(set(ids)) != len(ids):
+                    raise AdmissionError("Payment identity population is ambiguous")
+            except (AdmissionError, KeyError, TypeError, ValueError):
+                # Keep the MP population explicitly incomplete. Never degrade a
+                # failed acquisition binding into order-only interpretation.
+                return interpret_order_economics(payload, discounts, payment_observations={}), {}
+            for pid in ids:
+                payments[pid] = self._meli_fetch_payment_observation(pid, meli)
+        return interpret_order_economics(payload, discounts, payment_observations=payments), payments
 
     def _meli_store_economic_snapshot(self, result):
         """Idempotent audit replacement inside the importer's existing savepoint."""

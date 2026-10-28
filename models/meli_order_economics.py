@@ -30,10 +30,39 @@ def decimal_text(value):
     return format(value, "f")
 
 
+def _metadata(value, *, string_only=False, limit=128):
+    """Retain bounded scalar metadata, never nested provider/user payloads.
+
+    Optional null is unknown. Allowed mode strings are not an invented enum;
+    identifiers may be provider strings or integers, normalized to text.
+    """
+    if value is None:
+        return None
+    if type(value) not in ((str,) if string_only else (int, str)):
+        raise EconomicEvidenceError("economic_metadata_invalid")
+    if type(value) is int and (value < 0 or value.bit_length() > 425):
+        raise EconomicEvidenceError("economic_metadata_invalid")
+    text = str(value)
+    if (not text or len(text) > limit or text != text.strip()
+            or not text.isprintable()):
+        raise EconomicEvidenceError("economic_metadata_invalid")
+    return text
+
+
 def _id(value):
-    if type(value) not in (int, str) or not str(value).strip():
+    if value is None:
         raise EconomicEvidenceError("economic_identity_missing")
-    return str(value)
+    return _metadata(value)
+
+
+def _payment_id(value):
+    try:
+        text = _id(value)
+        if not text.isascii() or not text.isdecimal() or int(text) <= 0:
+            raise EconomicEvidenceError("payment_identity_invalid")
+        return str(int(text))
+    except EconomicEvidenceError:
+        raise EconomicEvidenceError("payment_identity_invalid") from None
 
 
 def _body(observation, resource):
@@ -112,7 +141,13 @@ def _benefits(body, items):
         supplier = detail.get("supplier", {})
         if not isinstance(supplier, dict):
             raise EconomicEvidenceError("benefit_supplier_incomplete")
-        origin = (supplier.get("offer_id") if kind == "discount"
+        campaign = _metadata(supplier.get("meli_campaign"))
+        campaign_id = _metadata(supplier.get("campaign_id"))
+        offer = _metadata(supplier.get("offer_id"))
+        funding_mode = _metadata(supplier.get("funding_mode"), string_only=True)
+        if campaign is not None and campaign_id is not None and campaign != campaign_id:
+            raise EconomicEvidenceError("benefit_campaign_identity_mismatch", "contradictory")
+        origin = (offer if kind == "discount"
                   else (detail.get(kind) or {}).get("id"))
         origin = _id(origin)
         allocations = detail.get("items")
@@ -120,6 +155,7 @@ def _benefits(body, items):
             raise EconomicEvidenceError("benefit_allocation_missing")
         for allocation in allocations:
             iid = _id(allocation.get("id"))
+            element_id = _metadata(allocation.get("element_id"))
             candidates = [item for item in items if item["item_id"] == iid]
             if len(candidates) != 1:
                 raise EconomicEvidenceError("benefit_item_unbound")
@@ -133,17 +169,17 @@ def _benefits(body, items):
             if seller > total:
                 raise EconomicEvidenceError("benefit_funding_contradiction", "contradictory")
             record = {"type": kind, "id": origin, "item_id": iid, "quantity": quantity,
-                      "element_id": allocation.get("element_id"),
+                      "element_id": element_id,
                       "total": decimal_text(total), "seller": decimal_text(seller),
                       "marketplace": decimal_text(total - seller),
-                      "campaign_id": supplier.get("meli_campaign", supplier.get("campaign_id")),
-                      "offer_id": supplier.get("offer_id"), "funding_mode": supplier.get("funding_mode"),
+                      "campaign_id": campaign if campaign is not None else campaign_id,
+                      "offer_id": offer, "funding_mode": funding_mode,
                       "incorporated_in_unit_price": kind == "discount",
                       "effect": {"discount": "effective_product_price", "coupon": "buyer_payment_benefit",
                                  "cashback": "cashback"}[kind], "source": "orders.discounts"}
             # The same identified benefit is corroboration, not another discount.
             # Conflicting duplicates never silently elect one source.
-            identity = (kind, origin, iid, allocation.get("element_id"))
+            identity = (kind, origin, iid, element_id)
             if identity in seen:
                 if seen[identity] != record:
                     raise EconomicEvidenceError("benefit_duplicate_contradiction", "contradictory")
@@ -163,12 +199,18 @@ def _payments(order, currency, observations):
     rows = order.get("payments")
     if not isinstance(rows, list) or not rows:
         raise EconomicEvidenceError("payments_missing")
-    result, seen = [], set()
+    ids = []
     for row in rows:
-        pid = _id(row.get("id"))
-        if pid in seen:
-            raise EconomicEvidenceError("payment_identity_ambiguous", "contradictory")
-        seen.add(pid)
+        if not isinstance(row, dict):
+            raise EconomicEvidenceError("payment_population_invalid")
+        pid = _payment_id(row.get("id"))
+        ids.append(pid)
+    if len(set(ids)) != len(ids):
+        raise EconomicEvidenceError("payment_identity_ambiguous", "contradictory")
+    # Identity/population errors outrank missing observations for an earlier
+    # member: never consume a valid-looking prefix of an invalid population.
+    result, seen = [], set(ids)
+    for row, pid in zip(rows, ids):
         if row.get("status") != "approved":
             raise EconomicEvidenceError("payment_status_unsupported", "unsupported")
         if row.get("currency_id") != currency:
@@ -179,7 +221,7 @@ def _payments(order, currency, observations):
         source = "orders.payments"
         if observations is not None:
             mp = _body(observations.get(pid), "payment")
-            if (_id(mp.get("id")) != pid or mp.get("currency_id") != currency
+            if (_payment_id(mp.get("id")) != pid or mp.get("currency_id") != currency
                     or mp.get("status") != "approved"):
                 raise EconomicEvidenceError("payment_identity_mismatch", "contradictory")
             # The provider order's payment IDs already bind these observations
@@ -224,6 +266,7 @@ def interpret_order_economics(order, discounts_observation, payment_observations
     result = {"schema": "meli.order.economics/v1", "status": "pending", "reason": None,
               "order_id": None, "currency_id": None, "items": [], "benefits": [], "payments": [],
               "commercial_total": None, "invoice_product_basis": None, "buyer_paid": None,
+              "order_coupon_id": None, "order_coupon_id_state": "absent",
               "shipping_amount": None, "shipping_in_buyer_paid": None,
               "seller_funded": None, "marketplace_funded": None}
     try:
@@ -231,8 +274,8 @@ def interpret_order_economics(order, discounts_observation, payment_observations
         if not isinstance(order, dict):
             raise EconomicEvidenceError("order_observation_missing")
         result["order_id"] = _id(order.get("id"))
-        currency = order.get("currency_id")
-        if not isinstance(currency, str) or not currency.strip():
+        currency = _metadata(order.get("currency_id"), string_only=True, limit=16)
+        if currency is None:
             raise EconomicEvidenceError("order_currency_missing")
         result["currency_id"] = currency
         items = _items(order, currency)
@@ -251,6 +294,16 @@ def interpret_order_economics(order, discounts_observation, payment_observations
         if coupon is not None:
             if not isinstance(coupon, dict) or "amount" not in coupon:
                 raise EconomicEvidenceError("order_coupon_incomplete")
+            if "id" in coupon:
+                coupon_id = _metadata(coupon["id"])
+                result["order_coupon_id_state"] = "unknown" if coupon_id is None else "confirmed"
+                result["order_coupon_id"] = coupon_id
+                if coupon_id is not None:
+                    identities = {benefit["id"] for benefit in benefits if benefit["type"] == "coupon"}
+                    if coupon_id not in identities:
+                        raise EconomicEvidenceError("coupon_identity_mismatch", "contradictory")
+                    if len(identities) != 1:
+                        raise EconomicEvidenceError("coupon_identity_ambiguous")
             if money(coupon["amount"]) != coupon_total:
                 raise EconomicEvidenceError("coupon_amount_mismatch", "contradictory")
         mp_coupons = [p["coupon_amount"] for p in payments]
