@@ -64,3 +64,19 @@ not establish native ORM atomicity, deployed effectiveness or HOMO readiness.
 
 Rollback is confined to this feature's interpreter, tests and integration seams.
 There are no external dependencies and no operational activation in this work.
+
+## Import and upgrade boundary
+
+Traditional individual imports acquire discounts and MP observations before any
+commercial model mutation. The existing savepoint contains audit and commercial
+projection. The same MP observations are reused, not fetched again after writes.
+Validated evidence replaces `mercadolibre.orders.economic_snapshot` idempotently.
+Coupon/charge metadata no longer drives additional product discounts or fee
+estimates, and coupon size no longer widens confirmation tolerances.
+
+**A module upgrade of `meli_oerp` is REQUIRED** to create the new JSON column.
+No upgrade, deployment, cron activation, confirmation or real import was run.
+The manifest version is unchanged: the project policy does not require a bump,
+and a version bump cannot replace `-u meli_oerp`. Existing orders without a
+validated snapshot require explicit revalidation before automatic amount
+acceptance; no historical values are backfilled or silently trusted.
