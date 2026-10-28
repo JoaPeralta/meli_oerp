@@ -31,6 +31,7 @@ from .meli_pack_admission import (
     AdmissionError, remote_id, verify_order, snapshot_response, enrich_buyer,
     pack_order_ids, verify_pack_commerce, fetch_pack_snapshot,
 )
+from .meli_order_economics import interpret_order_economics, money
 from .meli_oerp_config import *
 
 
@@ -582,66 +583,37 @@ class sale_order(models.Model):
         return None
 
     def meli_amount_to_invoice( self, meli=None, config=None ):
+        """Expected commercial basis, not a second promotional/fiscal engine.
 
-        total_config = (config and "mercadolibre_order_total_config" in config._fields) and config.mercadolibre_order_total_config
-
-        meli_ord = None
-        meli_shipment = None
-
-        if self.meli_orders:
-            meli_ord = self.meli_orders[0]
-            meli_shipment = self.meli_shipment
-
-        if not config or not total_config:
-            return self.meli_total_amount;
-
-        including_shipping_cost = "mercadolibre_including_shipping_cost" in config._fields and config.mercadolibre_including_shipping_cost
-        including_shipping_cost = including_shipping_cost or "always"
-
-
-        if total_config in ['manual']:
-            #resolve always as conflict
+        Legacy orders without current validated evidence require revalidation;
+        never estimate their funding or subtract a seller contribution twice.
+        The existing invoice/tax execution and confirmation guards still own use.
+        """
+        mode = (config and "mercadolibre_order_total_config" in config._fields
+                and config.mercadolibre_order_total_config)
+        if mode not in (False, None, "manual_conflict", "paid_amount", "transaction_amount", "total_amount") or not self.meli_orders:
             return 0
-
-        seller_discount = self.meli_discount_seller_amount or 0.0
-        _coupon_cap = self.meli_coupon_amount or 0.0
-        # /orders/{id}/discounts amounts.seller has two meanings depending on the order:
-        # (A) List-price reduction already reflected in SO unit_price → over-deduction:
-        #     (meli_paid_amount - seller_discount) falls BELOW so.amount_total.
-        #     Cap at coupon_amount to avoid under-invoicing.
-        # (B) Legitimate seller-absorbed discount not in SO unit_price →
-        #     (meli_paid_amount - seller_discount) is ABOVE or near so.amount_total.
-        #     No cap needed; the tolerance in confirm_ml/meli_create_invoice covers the rest.
-        # Distinguish by result: cap only when uncapped amount_to_invoice < so.amount_total.
-        if _coupon_cap > 0 and self.amount_total > 0:
-            _uncapped = (self.meli_paid_amount or 0.0) - seller_discount
-            if _uncapped < self.amount_total:
-                seller_discount = min(seller_discount, _coupon_cap)
-
-        if total_config in ['manual_conflict']:
-
-            if abs(self.meli_total_amount - self.meli_paid_amount + self.meli_coupon_amount)<1.0:
-                if ( meli_shipment and meli_shipment.shipping_cost>0 and meli_shipment.shipping_list_cost>0 ):
+        basis, shipping = money(0), money(0)
+        try:
+            for source in self.meli_orders:
+                snapshot = source.economic_snapshot
+                if (not isinstance(snapshot, dict) or snapshot.get("schema") != "meli.order.economics/v1"
+                        or snapshot.get("status") != "validated"
+                        or snapshot.get("currency_id") != source.currency_id
+                        or money(snapshot.get("commercial_total")) != money(source.total_amount)):
                     return 0
-                return (self.meli_paid_amount - seller_discount)
-            else:
-                #conflict if do not match
-                if ( meli_shipment and meli_shipment.shipping_cost>0 and meli_shipment.shipping_list_cost>0 ):
-                    if ( self.meli_total_amount + self.meli_shipping_cost - self.meli_paid_amount )<1.0:
-                        return (self.meli_paid_amount - seller_discount)
+                basis += money(snapshot["invoice_product_basis"])
+                if snapshot.get("shipping_amount") is not None:
+                    shipping += money(snapshot["shipping_amount"])
+                elif self.meli_shipping_id:
+                    return 0  # An assigned shipment is not proof of its amount.
+            if basis != money(self.meli_total_amount):
                 return 0
-
-        if total_config in ['paid_amount','transaction_amount']:
-
-            if (including_shipping_cost=="never"):
-                return (self.meli_paid_amount - seller_discount - self.meli_shipping_amount)
-
-            return (self.meli_paid_amount - seller_discount)
-
-        if total_config in ['total_amount']:
-            return self.meli_total_amount
-
-        return 0
+        except (ValueError, TypeError, KeyError):
+            return 0
+        include = (config and "mercadolibre_including_shipping_cost" in config._fields
+                   and config.mercadolibre_including_shipping_cost) or "always"
+        return float(basis + (shipping if include != "never" else money(0)))
 
     def meli_confirm_order( self, meli=None, config=None ):
         res = {}
@@ -973,13 +945,10 @@ class sale_order(models.Model):
             return (False, "Sin líneas de venta / producto no encontrado (SKU sin vincular)")
 
         amount_to_invoice = self.meli_amount_to_invoice( meli=meli, config=config )
-        # coupon_amount es costo de ML, no del vendedor — el SO ya tiene el precio completo.
-        # La tolerancia extendida se mantiene como safety-net para órdenes anteriores al fix
-        # que todavía tengan el descuento aplicado en líneas.
-        _tolerance = 1.1
+        # Promotional funding never enlarges the amount mismatch tolerance.
+        # Use the existing currency's precision, not a percentage of a coupon.
+        _tolerance = self.currency_id.rounding
         _coupon = abs(self.meli_coupon_amount or 0.0)
-        if _coupon > 0:
-            _tolerance = max(_tolerance, _coupon * 1.3)
         # If retention taxes are on SO lines (legacy, without withholding module),
         # add back their amounts so the check compares like-for-like.
         # Skip withholding-on-payment taxes — they belong on the payment, not SO lines.
@@ -1002,8 +971,9 @@ class sale_order(models.Model):
         _shipping = self.meli_shipping_amount or 0.0
         _diff_no_ship = abs( float(amount_to_invoice) - _shipping - _amount_total_before_retentions ) if _shipping > 0 else _diff_direct
         confirm_cond = (amount_to_invoice > 0) and (
-            _diff_direct < _tolerance
-            or (_shipping > 0 and _diff_no_ship < _tolerance)
+            not self.currency_id.compare_amounts(amount_to_invoice, _amount_total_before_retentions)
+            or (_shipping > 0 and not self.currency_id.compare_amounts(
+                amount_to_invoice - _shipping, _amount_total_before_retentions))
         )
         if not confirm_cond:
             serror = (
@@ -2031,46 +2001,65 @@ class mercadolibre_orders(models.Model):
 
         return full_phone
 
-    def _fetch_order_discounts(self, meli=None):
-        """Fetch /orders/{order_id}/discounts to determine seller-funded discount amount.
-        Sets discount_seller_amount = sum of amounts.seller from all discount items.
-        If seller=0 for all items, the discount is fully ML-funded and doesn't affect the SO price."""
-        if not meli or not self.order_id:
-            return
+    def _fetch_order_discounts(self, meli=None, order_id=None):
+        """Acquire an immutable observation; no funding estimate or model write."""
+        oid = order_id or self.order_id
+        if not meli or not oid:
+            return {"status": None, "body": None, "missing": None}
         try:
-            response = meli.get("/orders/"+str(self.order_id)+"/discounts", {'access_token': meli.access_token})
-            rjson = response.json()
-            if not rjson or 'details' not in rjson:
-                return
-            seller_total = 0.0
-            for detail in rjson.get('details', []):
-                for item in detail.get('items', []):
-                    amounts = item.get('amounts', {})
-                    seller_total += float(amounts.get('seller', 0) or 0)
-            self.discount_seller_amount = seller_total
-            _logger.info("MELI discounts for order %s: seller_amount=%.2f (coupon_amount=%.2f)",
-                         self.order_id, seller_total, self.coupon_amount)
-        except Exception as e:
-            _logger.info("MELI: Could not fetch /orders/%s/discounts: %s", self.order_id, e)
-            self._estimate_seller_discount_from_charges()
+            body, meta = snapshot_response(meli.get("/orders/" + str(oid) + "/discounts",
+                {"access_token": meli.access_token}))
+            return dict(meta, body=body)
+        except (ValueError, requests.exceptions.RequestException):
+            return {"status": None, "body": None, "missing": None}
 
-    def _estimate_seller_discount_from_charges(self):
-        """Fallback: estimate seller discount from payment charges (mercadolibre.payment.charge).
-        If coupon account_from='collector' -> seller pays; from='ml' -> ML pays."""
-        if not self.sale_order:
-            return
-        seller_total = 0.0
-        charge_model = self.env.get('mercadolibre.payment.charge')
-        if not charge_model:
-            return
-        for meli_order in self.sale_order.meli_orders:
-            for payment in meli_order.payments:
-                if not hasattr(payment, 'charge_ids'):
-                    continue
-                for charge in payment.charge_ids:
-                    if charge.charge_type == 'coupon' and charge.account_from == 'collector':
-                        seller_total += float(charge.amount_original or 0)
-        self.discount_seller_amount = seller_total
+    def _meli_fetch_payment_observation(self, payment_id, meli):
+        """Bounded MP acquisition, reused by the existing metadata projection."""
+        try:
+            response = requests.get("https://api.mercadopago.com/v1/payments/" + remote_id(payment_id),
+                headers={"Accept": "application/json", "User-Agent": "Odoo",
+                         "Authorization": "Bearer " + str(meli.access_token)}, timeout=10)
+            body, meta = snapshot_response(response)
+            return dict(meta, body=body)
+        except (ValueError, requests.exceptions.RequestException):
+            return {"status": None, "body": None, "missing": None}
+
+    def _meli_economic_preflight(self, payload, meli):
+        """Acquire once before mutation, then invoke the shared pure interpreter."""
+        discounts = self._fetch_order_discounts(meli=meli, order_id=payload["id"])
+        payments = {}
+        if discounts.get("status") == 200 and not discounts.get("missing"):
+            try:
+                rows = payload.get("payments")
+                if not isinstance(rows, list) or not rows:
+                    raise AdmissionError("Explicit payment population is required")
+                ids = []
+                for payment in rows:
+                    if not isinstance(payment, dict):
+                        raise AdmissionError("Explicit payment identity is required")
+                    value = payment.get("id")
+                    if ((type(value) is str and len(value) > 128)
+                            or (type(value) is int and value.bit_length() > 425)):
+                        raise AdmissionError("Payment identity exceeds its bounded contract")
+                    ids.append(remote_id(value))
+                if len(set(ids)) != len(ids):
+                    raise AdmissionError("Payment identity population is ambiguous")
+            except (AdmissionError, KeyError, TypeError, ValueError):
+                # Keep the MP population explicitly incomplete. Never degrade a
+                # failed acquisition binding into order-only interpretation.
+                return interpret_order_economics(payload, discounts, payment_observations={}), {}
+            for pid in ids:
+                payments[pid] = self._meli_fetch_payment_observation(pid, meli)
+        return interpret_order_economics(payload, discounts, payment_observations=payments), payments
+
+    def _meli_store_economic_snapshot(self, result):
+        """Idempotent audit replacement inside the importer's existing savepoint."""
+        self.ensure_one()
+        if (not isinstance(result, dict) or result.get("schema") != "meli.order.economics/v1"
+                or result.get("status") != "validated" or result.get("order_id") != self.order_id
+                or result.get("currency_id") != self.currency_id):
+            raise ValidationError("Only validated economic evidence can be persisted")
+        return self.write({"economic_snapshot": result})
 
     def _set_product_unit_price(self, product_related_obj, Item, config=None, sale_order=None):
         # Remote unit_price already reflects item discounts. Never subtract an
@@ -3028,6 +3017,17 @@ class mercadolibre_orders(models.Model):
             return {"error": "Commercial import is pending verified source projection",
                     "admission_pending": admission["pending"],
                     "verified_order_ids": [str(row["id"]) for row in admission["orders"]]}
+
+        economics, payment_observations = self._meli_economic_preflight(order_json, meli)
+        if economics["status"] != "validated":
+            return {"error": "Economic evidence is not sufficient for commercial import",
+                    "economic_pending": economics["reason"]}
+        if (any(b["type"] == "coupon" for b in economics["benefits"])
+                and meli_resolve_coupon_invoice_mode(config) != "full"):
+            # Do not silently reinterpret a separately configured fiscal policy
+            # or reproduce its old, unverifiable percentage/proration fallback.
+            return {"error": "Configured coupon invoice transformation requires separate validation",
+                    "economic_pending": "coupon_invoice_policy_unsupported"}
 
         saleorder_obj = self.env['sale.order']
         saleorderline_obj = self.env['sale.order.line']
@@ -4613,10 +4613,13 @@ class mercadolibre_orders(models.Model):
             #_logger.info(order_fields)
             order = order_obj.create( (order_fields))
 
-        # Fetch discount details from ML API to determine seller-funded portion
-        if order and order.coupon_amount > 0:
-            order._fetch_order_discounts(meli=meli)
-            meli_order_fields['meli_discount_seller_amount'] = order.discount_seller_amount or 0.0
+        order._meli_store_economic_snapshot(economics)
+        # Funding is audit information, not an additional line discount.
+        order.discount_seller_amount = float(money(economics["seller_funded"]))
+        order.coupon_amount = float(sum((money(b["total"]) for b in economics["benefits"]
+                                        if b["type"] == "coupon"), money(0)))
+        meli_order_fields['meli_discount_seller_amount'] = order.discount_seller_amount
+        meli_order_fields['meli_coupon_amount'] = order.coupon_amount
 
         if (sorder and sorder.id):
             #_logger.info("Updating sale.order: %s" % (sorder.id))
@@ -5039,11 +5042,12 @@ class mercadolibre_orders(models.Model):
                     'order_id': order.id,
                     'payment_id': Payment['id'],
                     'transaction_amount': Payment['transaction_amount'] or '',
-                    'total_paid_amount': Payment['total_paid_amount'] or '',
+                    'total_paid_amount': next(float(money(p["buyer_paid"])) for p in economics["payments"]
+                                              if p["id"] == str(Payment['id'])),
                     'currency_id': Payment['currency_id'] or '',
                     'status': Payment['status'] or '',
-                    'date_created': ml_datetime(Payment['date_created']),
-                    'date_last_modified': ml_datetime(Payment['date_last_modified']),
+                    'date_created': ml_datetime(Payment.get('date_created')),
+                    'date_last_modified': ml_datetime(Payment.get('date_last_modified')),
                     'mercadopago_url': mp_payment_url,
                     'full_payment': '',
                     'fee_amount': 0,
@@ -5052,20 +5056,11 @@ class mercadolibre_orders(models.Model):
                     'financing_fee_amount': 0
                 }
 
-                headers = {'Accept': 'application/json', 'User-Agent': 'Odoo', 'Content-type':'application/json'}
-                headers['Authorization'] = 'Bearer ' + str(meli.access_token)
-
-                # Wrap API call in try/except to handle network errors gracefully
-                # Order processing should continue even if MP API is unreachable
-                mp_response = None
-                try:
-                    mp_response = requests.get( mp_payment_url, headers=headers, timeout=10 )
-                except requests.exceptions.RequestException as e:
-                    _logger.warning("MELI: Could not fetch payment details from MercadoPago API (order will continue): %s", type(e).__name__)
-
-                if (mp_response):
-                    payment_fields["full_payment"] = mp_response.json()
-                    payment_fields["shipping_amount"] = payment_fields["full_payment"]["shipping_amount"]
+                # Reuse the already-validated pre-write observation, never another GET.
+                mp_observation = payment_observations.get(str(Payment['id']))
+                if mp_observation and mp_observation["status"] == 200:
+                    payment_fields["full_payment"] = mp_observation["body"]
+                    payment_fields["shipping_amount"] = payment_fields["full_payment"].get("shipping_amount", 0)
                     payment_fields["shipping_seller_cost"] = 0
                     payment_fields["total_paid_amount"] = payment_fields["full_payment"]["transaction_details"]["total_paid_amount"]
 
@@ -5138,18 +5133,8 @@ class mercadolibre_orders(models.Model):
                                     if (order):
                                         order.shipping_seller_cost = payment_fields["shipping_seller_cost"]
 
-                                # Handle coupon as fee (seller absorbs the coupon cost)
-                                # When type is 'coupon' and accounts.from='ml' and accounts.to='payer'
-                                # it means ML gives discount to buyer, seller must absorb it as cost
-                                if ( fee_type=="coupon" ):
-                                    coupon_fee_amount = fee_detail["amounts"] and fee_detail["amounts"]["original"] or 0
-                                    if coupon_fee_amount > 0:
-                                        payment_fields["fee_amount"]+= coupon_fee_amount
-                                        _logger.info("MELI: Adding coupon as fee: %.2f (name: %s)", coupon_fee_amount, fee_name)
-                                        if (order):
-                                            order.fee_amount = payment_fields["fee_amount"]
-                                            if not order.coupon_amount:
-                                                order.coupon_amount = coupon_fee_amount
+                                # Coupon metadata is not a fee or a funding authority.
+                                # Its identified funding is already in economic_snapshot.
 
                                 #if (fee_payer and fee_payer == "collector" and fee_type == "application_fee"):
                                 #    payment_fields["fee_amount"] = fee_detail["amount"]
@@ -5167,7 +5152,7 @@ class mercadolibre_orders(models.Model):
                                 sorder.meli_financing_fee_amount = order.financing_fee_amount
                                 sorder.meli_shipping_seller_cost = order.shipping_seller_cost
 
-                    payment_fields["taxes_amount"] = payment_fields["full_payment"]["taxes_amount"]
+                    payment_fields["taxes_amount"] = payment_fields["full_payment"].get("taxes_amount", 0)
 
                 payment_ids = payments_obj.search( [  ('payment_id','=',payment_fields['payment_id']),
                                                             ('order_id','=',order.id ) ] )
@@ -5178,79 +5163,9 @@ class mercadolibre_orders(models.Model):
                     #_logger.info("Upading payment fields:"+str(payment_fields))
                     payment_ids.write( ( payment_fields ) )
 
-        # coupon_amount = descuento que ML financia DE SU PROPIO COSTO al comprador.
-        # El vendedor cobra el precio completo — este campo NO es un descuento del vendedor.
-        # config.meli_coupon_discount_on_invoice controla si se refleja en la factura:
-        #   False (default): sin descuento en líneas → factura por precio de venta completo.
-        #   True: aplica el cupón ML como % de descuento sobre el precio bruto (con IVA)
-        #         → factura queda exactamente en (total_bruto - coupon_amount).
-        # En ningún caso se tocan descuentos del vendedor ni descuentos manuales preexistentes.
-        if order and order.coupon_amount and sorder:
-            if not sorder.meli_coupon_amount:
-                sorder.meli_coupon_amount = order.coupon_amount
-            # Modo de facturación del cupón ML (tri-estado meli_coupon_invoice_mode):
-            #   full (default): NO se imputa a ninguna línea → factura a precio pleno. Correcto
-            #       cuando ML reembolsa el cupón al vendedor (made-whole). [#433 Elvimarta]
-            #   product_discount: cupón como descuento (%) sobre líneas de PRODUCTO (= flag ON).
-            #   separate_line: cupón como línea(s) de descuento separada(s) por grupo de impuesto
-            #       (OPT-IN, riesgos AFIP/CL — validar antes de habilitar).
-            # El FIX #399 forzaba product_discount aun con el flag OFF cuando el comprador pagaba
-            # el flete entero; eso pisaba la preferencia del cliente (regresión #433). Ahora el
-            # reparto depende SOLO del modo declarado en la config.
-            _coupon_mode = meli_resolve_coupon_invoice_mode(config)
-            _so_editable = sorder.state not in ('done',) and not ("locked" in sorder._fields and sorder.locked)
-            if _coupon_mode == 'product_discount':
-                if _so_editable:
-                    non_delivery_lines = sorder.order_line.filtered(lambda l: not l.is_delivery)
-                    total_gross = 0.0
-                    for line in non_delivery_lines:
-                        tax_pct = sum(
-                            t.amount for t in (line.tax_ids if hasattr(line, 'tax_ids') else line.tax_id)
-                            if t.amount_type == 'percent' and not t.price_include
-                        )
-                        total_gross += line.price_unit * line.product_uom_qty * (1.0 + tax_pct / 100.0)
-                    if total_gross > 0:
-                        discount_pct = round((order.coupon_amount / total_gross) * 100.0, 6)
-                        for line in non_delivery_lines:
-                            line.discount = discount_pct
-                        _logger.info(
-                            "MELI: Applied coupon discount %.4f%% (coupon=%.2f / gross_total=%.2f) "
-                            "to %d lines on SO %s",
-                            discount_pct, order.coupon_amount, total_gross,
-                            len(non_delivery_lines), sorder.name,
-                        )
-            elif _coupon_mode == 'separate_line':
-                if _so_editable:
-                    meli_apply_coupon_separate_line(sorder, order.coupon_amount)
-            else:
-                # modo 'full': sin descuento. Limpiar cualquier descuento de cupón previo.
-                if _so_editable:
-                    non_delivery_lines = sorder.order_line.filtered(lambda l: not l.is_delivery)
-                    total_gross = 0.0
-                    for line in non_delivery_lines:
-                        tax_pct = sum(
-                            t.amount for t in (line.tax_ids if hasattr(line, 'tax_ids') else line.tax_id)
-                            if t.amount_type == 'percent' and not t.price_include
-                        )
-                        total_gross += line.price_unit * line.product_uom_qty * (1.0 + tax_pct / 100.0)
-                    if total_gross > 0:
-                        prev_pct_bug = round((order.coupon_amount / sum(
-                            line.price_unit * line.product_uom_qty
-                            for line in non_delivery_lines
-                        )) * 100.0, 6) if sum(
-                            line.price_unit * line.product_uom_qty for line in non_delivery_lines
-                        ) > 0 else 0
-                        prev_pct_ok = round((order.coupon_amount / total_gross) * 100.0, 6)
-                        for line in non_delivery_lines:
-                            if (abs(line.discount - prev_pct_bug) < 0.01
-                                    or abs(line.discount - prev_pct_ok) < 0.01):
-                                line.discount = 0.0
-                                _logger.info(
-                                    "MELI: Removed coupon discount from line %s on SO %s "
-                                    "(coupon_invoice_mode=full)",
-                                    line.id, sorder.name,
-                                )
-                    meli_remove_coupon_separate_line(sorder)
+        # Effective product prices are already projected by the native tax seam.
+        # Promotional funding is audit-only: no percentage, proration, matching
+        # heuristic or coupon line may modify the commercial result here.
 
         if (1==1 or config.mercadolibre_cron_get_orders_shipment):
             #_logger.info("Updating order: Shipment: "+str(order.shipping_id))
@@ -6088,6 +6003,7 @@ class mercadolibre_orders(models.Model):
     paid_amount = fields.Float(string='Paid amount',help='Includes shipping cost')
     coupon_amount = fields.Float(string='Coupon amount',help='Descuento',default=0.0)
     discount_seller_amount = fields.Float(string='Discount Seller Amount',help='Monto del descuento absorbido por el vendedor',default=0.0)
+    economic_snapshot = fields.Json(string='Validated Economic Evidence', readonly=True, copy=False)
     currency_id = fields.Char(string='Currency')
     buyer =  fields.Many2one( "mercadolibre.buyers","Buyer")
     buyer_billing_info = fields.Text(string="Billing Info")
