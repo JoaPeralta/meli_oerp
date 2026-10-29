@@ -26,6 +26,7 @@ def operation(name, namespace=None):
     node = methods()[name]
     node.decorator_list = []
     scope = dict(interpret_order_economics=economics.interpret_order_economics,
+                 merge_economic_evidence=economics.merge_economic_evidence,
                  ValidationError=ValueError, remote_id=admission.remote_id,
                  AdmissionError=admission.AdmissionError, **(namespace or {}))
     exec(compile(ast.fix_missing_locations(ast.Module([node], [])), "orders.py", "exec"), scope)
@@ -141,18 +142,22 @@ class EconomicImportTests(unittest.TestCase):
         self.assertEqual(result["economic_pending"], "payment_http_503")
         self.assertNotIn("commercial mutation reached", str(result))
 
-    def test_snapshot_upsert_overwrites_identically_without_duplicate_records(self):
+    def test_snapshot_upsert_is_noop_for_identical_evidence_without_duplicate_records(self):
         result = economics.interpret_order_economics(order(), observation({"details": []}))
         record = SimpleNamespace(writes=[], ensure_one=lambda: None, order_id="123", currency_id="ARS")
-        record.write = lambda values: record.writes.append(copy.deepcopy(values)) or True
+        def write(values):
+            record.writes.append(copy.deepcopy(values))
+            record.economic_snapshot = copy.deepcopy(values["economic_snapshot"])
+            return True
+        record._meli_write_economic_snapshot = lambda snapshot: write({"economic_snapshot": snapshot})
         apply = operation("_meli_store_economic_snapshot")
         apply(record, result)
         apply(record, copy.deepcopy(result))
-        self.assertEqual(record.writes, [{"economic_snapshot": result}] * 2)
+        self.assertEqual(record.writes, [{"economic_snapshot": result}])
         invalid = dict(result, status="pending")
         with self.assertRaises(ValueError):
             apply(record, invalid)
-        self.assertEqual(len(record.writes), 2)
+        self.assertEqual(len(record.writes), 1)
 
     def test_unsafe_estimator_and_coupon_proration_are_absent(self):
         source = (ROOT / "models/orders.py").read_text(encoding="utf8")

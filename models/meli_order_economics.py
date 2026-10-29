@@ -5,6 +5,7 @@ Strings encode decimal amounts in the versioned, JSON-serializable audit result.
 An absent value is None, never an inferred zero. See docs/order-economics.md.
 """
 from decimal import Decimal, InvalidOperation
+from copy import deepcopy
 import json
 
 
@@ -23,6 +24,44 @@ def money(value):
         raise EconomicEvidenceError("economic_number_invalid", "contradictory") from None
     if not result.is_finite() or result < 0:
         raise EconomicEvidenceError("economic_number_invalid", "contradictory")
+    return result
+
+
+def merge_economic_evidence(previous, current):
+    """Keep distinct sanitized observations, without recursive history growth.
+
+    A later missing promotional breakdown cannot erase matching complete proof.
+    Changed commercial identity/amounts never inherit its completeness. The
+    latest observation remains explicit even when historical knowledge survives.
+    """
+    current = deepcopy(current)
+    if not isinstance(previous, dict) or not previous:
+        return current
+    if any(previous.get(key) != current.get(key) for key in ("order_id", "currency_id")):
+        raise ValueError("Economic history cannot change order/currency identity")
+
+    def observation(row):
+        return {key: deepcopy(value) for key, value in row.items()
+                if key not in ("history", "latest_observation", "projection")}
+
+    latest = previous.get("latest_observation", observation(previous))
+    if latest == observation(current):
+        return deepcopy(previous)
+    old, incoming = observation(previous), observation(current)
+    history = deepcopy(previous.get("history", []))
+    for row in (old,):
+        if row != incoming and row not in history:
+            history.append(row)
+    same_commerce = all(old.get(key) == incoming.get(key) for key in (
+        "order_id", "currency_id", "items", "commercial_total", "invoice_product_basis",
+        "buyer_paid", "order_coupon_id", "shipping_amount"))
+    keep_complete = (old.get("status") == "validated" and incoming.get("status") == "conditioned_draft"
+                     and same_commerce)
+    result = deepcopy(old if keep_complete else incoming)
+    # Retain the new unknown observation too, but never copy nested histories.
+    if keep_complete and incoming not in history:
+        history.append(incoming)
+    result.update(history=history, latest_observation=incoming)
     return result
 
 
