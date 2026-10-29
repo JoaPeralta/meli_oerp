@@ -1,5 +1,6 @@
 """Prepared ORM negatives for synthetic economic evidence; never real API calls."""
 import copy
+import json
 from unittest.mock import patch
 
 from odoo.exceptions import ValidationError
@@ -16,8 +17,15 @@ class TestEconomicEvidenceNegative(TransactionCase):
         self.original = {"schema": "synthetic-prior-audit/v1", "preserve": True}
         self.source = self.env["mercadolibre.orders"].create({
             "name": "Synthetic economic evidence negative", "order_id": "123", "currency_id": "ARS",
-            "company_id": self.env.company.id, "seller_id": self.env.user.id,
-            "economic_snapshot": copy.deepcopy(self.original)})
+            "company_id": self.env.company.id, "seller_id": self.env.user.id})
+        # Deliberately represent a pre-existing historical audit. The ordinary
+        # ORM must now refuse forged proof; that route is separately exercised
+        # by the conditioned native guard cohort, not bypassed in production.
+        self.env.flush_all()
+        self.env.cr.execute("UPDATE mercadolibre_orders SET economic_snapshot=%s::jsonb WHERE id=%s",
+                            [json.dumps(self.original), self.source.id])
+        self.source.invalidate_recordset(["economic_snapshot"])
+        self.assertEqual(self.source.economic_snapshot, self.original)
 
     def assert_rejected_without_audit_write(self, payload, discounts, expected):
         model = type(self.source)

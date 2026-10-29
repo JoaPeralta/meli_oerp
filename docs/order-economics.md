@@ -42,11 +42,18 @@ not invented or treated as a second ownership certificate.
 An observed HTTP 200 with explicit `details: []` still needs consistent order
 and payment evidence. It is not generalized into a universal no-discount API
 guarantee. Every other transport error or partial response remains explicit.
-Exact `404 discount_not_found` yields
-`discount_not_found_evidence_incomplete`: neither scalar gross equality nor
-missing/zero coupon or charge fields proves exhaustive absence of benefits.
-No successful 404 provider-contract fixture is invented. Independent sufficient
-official evidence is still required to implement that acceptance scenario.
+Exact `404 discount_not_found` does not establish promotional completeness.
+For an owned paid single-item individual without an assigned shipment, complete
+independent MP observations can verify its commercial price and produce
+`conditioned_draft`, `commercial_status=verified`, `promotional_status=unknown`.
+The versioned result retains the HTTP404/error and observed amounts, with
+`benefits`, `seller_funded` and `marketplace_funded` null. This is a local guarded
+quotation policy, not a claim that the provider contract defines404 as zero.
+Every payment ID must come from the admitted seller-owned order and match MP;
+any reported collector must corroborate that seller. Explicit MP coupon and
+shipping amounts are mandatory for this exception, and order coupons and buyer
+differences must reconcile. Unknown fields never become zero. Arbitrary404,
+other transport failures and malformed200 do not enter this exception.
 
 All new test fixtures are synthetic arithmetic examples. Unit/source tests do
 not establish native ORM atomicity, deployed effectiveness or HOMO readiness.
@@ -76,7 +83,7 @@ There are no external dependencies and no operational activation in this work.
 Traditional individual imports acquire discounts and MP observations before any
 commercial model mutation. The existing savepoint contains audit and commercial
 projection. The same MP observations are reused, not fetched again after writes.
-Validated evidence replaces `mercadolibre.orders.economic_snapshot` idempotently.
+Accepted evidence merges into `mercadolibre.orders.economic_snapshot` idempotently.
 Coupon/charge metadata no longer drives additional product discounts or fee
 estimates, and coupon size no longer widens confirmation tolerances.
 
@@ -113,3 +120,60 @@ source matrix passes 282 methods across 14 suites (connector154, Odoo128).
 The new native tag `meli_economic_evidence_negative` prepares three real-ORM audit
 preservation negatives, but is **NOT RUN**: local Odoo/PostgreSQL is unavailable.
 No native atomicity or operational readiness is inferred from source doubles.
+
+## Conditioned draft boundary (evidence version2)
+
+An admitted exact404 with complete independent commercial corroboration projects
+only a quotation. The same importer and interpreter serve manual and automatic
+routes. The quotation stays draft, even when automatic confirmation is configured;
+no invoice acquisition, confirmation, invoice posting or stock fulfillment runs.
+The trusted JSON records verified commercial amounts and unknown promotions.
+Null benefits/funding are authoritative; legacy Float defaults are not evidence
+that the seller or marketplace funded zero. Observed MP coupons remain separate
+from effective merchandise prices and never become a second discount.
+
+Only a private lexical importer capability can update an audited draft's proof,
+amounts and source bindings. It is bound to cursor, actor, company, remote identity
+and elevation state; object identity cannot be supplied by RPC JSON/context flags.
+Removing/clearing/rebinding/copying proof or source traceability is refused. Draft
+projection authority never permits irreversible effects: direct ORM state writes,
+sale confirmation, invoicing/posting, procurement and stock effect entrypoints
+check the actual source evidence before calling inherited native operations.
+Unaudited unrelated native orders retain their existing behavior and ACL path.
+False/absent ML identities never trigger a source-model search on that path.
+The stored singular `sale.order.meli_order` alias is also a protected source
+reference, including explicit/default creation and later attachment/clearing.
+Item/payment creation resolves `default_order_id` just as native ORM creation
+does; omitting the explicit value cannot insert a child into an audited parent.
+The legacy synthetic negative-audit fixture seeds its prior JSON through explicit
+test-only SQL: normal ORM proof creation is intentionally forbidden. This does
+not expose an application bypass or change the negative preflight/audit oracles.
+
+Distinct sanitized observations are retained in a flat, deduplicated `history`.
+Exact retries are no-ops. A later complete observation reuses the same graph.
+A later incomplete observation cannot erase previously complete knowledge:
+`latest_observation` explicitly records current unknown evidence. Changed amounts
+never inherit historical promotional completeness, and current unknown evidence
+cannot authorize effects from old proof. Confirmed/invoiced history is inspected
+before acquisition and is never reprojected by this flow.
+
+Automatic conditioned processing completes its one receipt as `SUCCESS` only with
+durable conditioned JSON and no retry time. That state means processing ended,
+not permission to sell/invoice/ship. A later independent receipt can revalidate
+the same quotation. The existing consumer savepoint contains graph, source audit
+and terminal evidence; a fault rolls them back together. Scheduler retry metadata
+is recorded only after that rollback; PostgreSQL failures escape to the owner.
+
+### Current deployment classification
+
+This extension adds no field, table, ACL, view, data record or destructive backfill.
+The JSON column was already present in the selected current baseline. New Python
+guard/model extensions require an exact connector rebuild and process restart;
+this change does not itself introduce another schema migration. The earlier
+column-creation upgrade requirement above still applies to older installations.
+Disposable CI must prove fresh install and `-u meli_oerp,viarengo_circuit_meli`
+against the selected baseline, preserved prior history, native regressions and
+committed cross-process revalidation. Local source tests do not prove any of
+those outcomes. No HOMO/production upgrade, deploy or cron activation is authorized
+or claimed here. Rollback requires reverting the coordinated pair/pin, retaining
+the existing JSON column and its evidence; never erase audit data on downgrade.

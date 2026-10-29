@@ -5,6 +5,7 @@ Strings encode decimal amounts in the versioned, JSON-serializable audit result.
 An absent value is None, never an inferred zero. See docs/order-economics.md.
 """
 from decimal import Decimal, InvalidOperation
+from copy import deepcopy
 import json
 
 
@@ -23,6 +24,44 @@ def money(value):
         raise EconomicEvidenceError("economic_number_invalid", "contradictory") from None
     if not result.is_finite() or result < 0:
         raise EconomicEvidenceError("economic_number_invalid", "contradictory")
+    return result
+
+
+def merge_economic_evidence(previous, current):
+    """Keep distinct sanitized observations, without recursive history growth.
+
+    A later missing promotional breakdown cannot erase matching complete proof.
+    Changed commercial identity/amounts never inherit its completeness. The
+    latest observation remains explicit even when historical knowledge survives.
+    """
+    current = deepcopy(current)
+    if not isinstance(previous, dict) or not previous:
+        return current
+    if any(previous.get(key) != current.get(key) for key in ("order_id", "currency_id")):
+        raise ValueError("Economic history cannot change order/currency identity")
+
+    def observation(row):
+        return {key: deepcopy(value) for key, value in row.items()
+                if key not in ("history", "latest_observation", "projection")}
+
+    latest = previous.get("latest_observation", observation(previous))
+    if latest == observation(current):
+        return deepcopy(previous)
+    old, incoming = observation(previous), observation(current)
+    history = deepcopy(previous.get("history", []))
+    for row in (old,):
+        if row != incoming and row not in history:
+            history.append(row)
+    same_commerce = all(old.get(key) == incoming.get(key) for key in (
+        "order_id", "currency_id", "items", "commercial_total", "invoice_product_basis",
+        "buyer_paid", "order_coupon_id", "shipping_amount"))
+    keep_complete = (old.get("status") == "validated" and incoming.get("status") == "conditioned_draft"
+                     and same_commerce)
+    result = deepcopy(old if keep_complete else incoming)
+    # Retain the new unknown observation too, but never copy nested histories.
+    if keep_complete and incoming not in history:
+        history.append(incoming)
+    result.update(history=history, latest_observation=incoming)
     return result
 
 
@@ -263,14 +302,26 @@ def interpret_order_economics(order, discounts_observation, payment_observations
     when order payment fields suffice; if supplied, every observation must agree.
     This result is not an authorization to import, invoice, confirm or ship.
     """
-    result = {"schema": "meli.order.economics/v1", "status": "pending", "reason": None,
+    result = {"schema": "meli.order.economics/v1", "evidence_version": 2,
+              "status": "pending", "reason": None,
+              "commercial_status": "pending", "promotional_status": "unknown",
+              "discounts_http_status": None, "discounts_error": None,
               "order_id": None, "currency_id": None, "items": [], "benefits": [], "payments": [],
               "commercial_total": None, "invoice_product_basis": None, "buyer_paid": None,
               "order_coupon_id": None, "order_coupon_id_state": "absent",
               "shipping_amount": None, "shipping_in_buyer_paid": None,
               "seller_funded": None, "marketplace_funded": None}
     try:
-        body = _body(discounts_observation, "discounts")
+        observation = discounts_observation if isinstance(discounts_observation, dict) else {}
+        error_body = observation.get("body")
+        conditioned = (type(observation.get("status")) is int and observation["status"] == 404
+                       and not observation.get("missing") and isinstance(error_body, dict)
+                       and error_body.get("error") == "discount_not_found")
+        result["discounts_http_status"] = observation.get("status")
+        if conditioned:
+            result["discounts_error"] = "discount_not_found"
+            result["benefits"] = None
+        body = None if conditioned else _body(discounts_observation, "discounts")
         if not isinstance(order, dict):
             raise EconomicEvidenceError("order_observation_missing")
         result["order_id"] = _id(order.get("id"))
@@ -279,7 +330,21 @@ def interpret_order_economics(order, discounts_observation, payment_observations
             raise EconomicEvidenceError("order_currency_missing")
         result["currency_id"] = currency
         items = _items(order, currency)
-        benefits = _benefits(body, items)
+        if conditioned:
+            shipping = order.get("shipping")
+            unassigned = shipping is None or (type(shipping) is dict and set(shipping) == {"id"}
+                                               and shipping["id"] is None)
+            if (order.get("status") != "paid" or order.get("status_detail")
+                    or order.get("pack_id") is not None or "pack_order" in (order.get("tags") or [])
+                    or not unassigned or len(items) != 1):
+                raise EconomicEvidenceError("conditioned_modality_unsupported", "unsupported")
+            # A 404 is no evidence of a complete promotional population.
+            # Independent MP observations are mandatory for this exception.
+            if payment_observations is None:
+                raise EconomicEvidenceError("payment_observation_missing")
+        benefits = None if conditioned else _benefits(body, items)
+        if not conditioned:
+            result["promotional_status"] = "complete"
         commercial = sum((money(item["effective_total"]) for item in items), Decimal(0))
         if commercial != money(order.get("total_amount")):
             raise EconomicEvidenceError("commercial_total_mismatch", "contradictory")
@@ -289,7 +354,13 @@ def interpret_order_economics(order, discounts_observation, payment_observations
         buyer_paid = money(order.get("paid_amount"))
         if sum((money(p["buyer_paid"]) for p in payments), Decimal(0)) != buyer_paid:
             raise EconomicEvidenceError("payment_paid_total_mismatch", "contradictory")
-        coupon_total = sum((money(b["total"]) for b in benefits if b["type"] == "coupon"), Decimal(0))
+        mp_coupons = [p["coupon_amount"] for p in payments]
+        shipping_values = [p["shipping_amount"] for p in payments]
+        if conditioned and (any(value is None for value in mp_coupons)
+                            or any(value is None for value in shipping_values)):
+            raise EconomicEvidenceError("conditioned_payment_fields_missing")
+        coupon_total = (sum(map(money, mp_coupons), Decimal(0)) if conditioned else
+                        sum((money(b["total"]) for b in benefits if b["type"] == "coupon"), Decimal(0)))
         coupon = order.get("coupon")
         if coupon is not None:
             if not isinstance(coupon, dict) or "amount" not in coupon:
@@ -298,21 +369,20 @@ def interpret_order_economics(order, discounts_observation, payment_observations
                 coupon_id = _metadata(coupon["id"])
                 result["order_coupon_id_state"] = "unknown" if coupon_id is None else "confirmed"
                 result["order_coupon_id"] = coupon_id
-                if coupon_id is not None:
+                if coupon_id is not None and not conditioned:
                     identities = {benefit["id"] for benefit in benefits if benefit["type"] == "coupon"}
                     if coupon_id not in identities:
                         raise EconomicEvidenceError("coupon_identity_mismatch", "contradictory")
                     if len(identities) != 1:
                         raise EconomicEvidenceError("coupon_identity_ambiguous")
             if money(coupon["amount"]) != coupon_total:
-                raise EconomicEvidenceError("coupon_amount_mismatch", "contradictory")
-        mp_coupons = [p["coupon_amount"] for p in payments]
+                raise EconomicEvidenceError("payment_coupon_mismatch" if conditioned else
+                                            "coupon_amount_mismatch", "contradictory")
         if all(value is not None for value in mp_coupons) and sum(map(money, mp_coupons), Decimal(0)) != coupon_total:
             raise EconomicEvidenceError("payment_coupon_mismatch", "contradictory")
         financing = money(order["financing_fee_amount"]) if "financing_fee_amount" in order else Decimal(0)
         if financing:
             raise EconomicEvidenceError("financing_allocation_unsupported", "unsupported")
-        shipping_values = [p["shipping_amount"] for p in payments]
         shipping = (sum(map(money, shipping_values), Decimal(0))
                     if all(value is not None for value in shipping_values) else None)
         difference = buyer_paid + coupon_total - commercial
@@ -321,17 +391,23 @@ def interpret_order_economics(order, discounts_observation, payment_observations
             if shipping is None or difference != shipping:
                 raise EconomicEvidenceError("buyer_payment_difference_unexplained")
             included = True
-        result.update(status="validated", reason=None, items=items, benefits=benefits, payments=payments,
+        result.update(status="conditioned_draft" if conditioned else "validated", reason=None,
+                      commercial_status="verified", items=items, benefits=benefits, payments=payments,
                       commercial_total=decimal_text(commercial), invoice_product_basis=decimal_text(commercial),
                       buyer_paid=decimal_text(buyer_paid), shipping_amount=None if shipping is None else decimal_text(shipping),
                       shipping_in_buyer_paid=included if shipping is not None else None,
-                      seller_funded=decimal_text(sum((money(b["seller"]) for b in benefits), Decimal(0))),
-                      marketplace_funded=decimal_text(sum((money(b["marketplace"]) for b in benefits), Decimal(0))))
+                      seller_funded=None if conditioned else decimal_text(sum((money(b["seller"]) for b in benefits), Decimal(0))),
+                      marketplace_funded=None if conditioned else decimal_text(sum((money(b["marketplace"]) for b in benefits), Decimal(0))))
         # Reject unrepresentable identifier metadata rather than persisting SDK
         # objects or surprising non-JSON state. No API payload is mutated.
         json.dumps(result, allow_nan=False)
     except EconomicEvidenceError as error:
         result.update(status=error.status, reason=error.reason)
+        if error.status == "contradictory":
+            if error.reason.startswith(("benefit_", "reference_discount_", "coupon_identity_")):
+                result["promotional_status"] = "contradictory"
+            else:
+                result["commercial_status"] = "contradictory"
     except (TypeError, ValueError, KeyError, AttributeError, InvalidOperation):
         result.update(status="pending", reason="economic_observation_incomplete")
     return result

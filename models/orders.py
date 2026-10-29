@@ -31,7 +31,9 @@ from .meli_pack_admission import (
     AdmissionError, remote_id, verify_order, snapshot_response, enrich_buyer,
     pack_order_ids, verify_pack_commerce, fetch_pack_snapshot,
 )
-from .meli_order_economics import interpret_order_economics, money
+from .meli_order_economics import interpret_order_economics, merge_economic_evidence, money
+from .meli_economic_scope import (economic_projection_lifetime, activate_economic_projection,
+                                  economic_snapshot_writer)
 from .meli_oerp_config import *
 
 
@@ -42,7 +44,7 @@ def _meli_order_import_savepoint(method):
     """
     @wraps(method)
     def wrapped(self, data, context=None, config=None, meli=None):
-        with self.env.cr.savepoint():
+        with self.env.cr.savepoint(), economic_projection_lifetime():
             return method(self, data, context=context, config=config, meli=meli)
     return wrapped
 
@@ -516,6 +518,7 @@ class sale_order(models.Model):
     ],compute=_ml_shipping_status)
 
     def action_confirm(self):
+        self._meli_assert_commercial_effect()
         #_logger.info("meli order action_confirm: " + str(self.mapped("name")) )
         res = super(sale_order,self).action_confirm()
         try:
@@ -2028,7 +2031,9 @@ class mercadolibre_orders(models.Model):
         """Acquire once before mutation, then invoke the shared pure interpreter."""
         discounts = self._fetch_order_discounts(meli=meli, order_id=payload["id"])
         payments = {}
-        if discounts.get("status") == 200 and not discounts.get("missing"):
+        if (not discounts.get("missing") and (discounts.get("status") == 200
+                or (discounts.get("status") == 404 and isinstance(discounts.get("body"), dict)
+                    and discounts["body"].get("error") == "discount_not_found"))):
             try:
                 rows = payload.get("payments")
                 if not isinstance(rows, list) or not rows:
@@ -2056,10 +2061,19 @@ class mercadolibre_orders(models.Model):
         """Idempotent audit replacement inside the importer's existing savepoint."""
         self.ensure_one()
         if (not isinstance(result, dict) or result.get("schema") != "meli.order.economics/v1"
-                or result.get("status") != "validated" or result.get("order_id") != self.order_id
+                or result.get("status") not in ("validated", "conditioned_draft") or result.get("order_id") != self.order_id
                 or result.get("currency_id") != self.currency_id):
             raise ValidationError("Only validated economic evidence can be persisted")
-        return self.write({"economic_snapshot": result})
+        snapshot = merge_economic_evidence(getattr(self, "economic_snapshot", None), result)
+        if snapshot == getattr(self, "economic_snapshot", None):
+            return True
+        return self._meli_write_economic_snapshot(snapshot)
+
+    def _meli_write_economic_snapshot(self, snapshot):
+        """Private validated store, with normal ACLs and no caller context grant."""
+        self.ensure_one()
+        with economic_snapshot_writer(self) as writable:
+            return writable.write({"economic_snapshot": snapshot})
 
     def _set_product_unit_price(self, product_related_obj, Item, config=None, sale_order=None):
         # Remote unit_price already reflects item discounts. Never subtract an
@@ -3019,15 +3033,20 @@ class mercadolibre_orders(models.Model):
                     "verified_order_ids": [str(row["id"]) for row in admission["orders"]]}
 
         economics, payment_observations = self._meli_economic_preflight(order_json, meli)
-        if economics["status"] != "validated":
+        if economics["status"] not in ("validated", "conditioned_draft"):
             return {"error": "Economic evidence is not sufficient for commercial import",
                     "economic_pending": economics["reason"]}
-        if (any(b["type"] == "coupon" for b in economics["benefits"])
+        if ((any(b["type"] == "coupon" for b in (economics["benefits"] or []))
+                or economics["status"] == "conditioned_draft" and any(
+                    money(p["coupon_amount"]) for p in economics["payments"] if p["coupon_amount"] is not None))
                 and meli_resolve_coupon_invoice_mode(config) != "full"):
             # Do not silently reinterpret a separately configured fiscal policy
             # or reproduce its old, unverifiable percentage/proration fallback.
             return {"error": "Configured coupon invoice transformation requires separate validation",
                     "economic_pending": "coupon_invoice_policy_unsupported"}
+
+        # Mint authority only after admission and fresh shared interpretation.
+        self = activate_economic_projection(self, order_json["id"], company.id)
 
         saleorder_obj = self.env['sale.order']
         saleorderline_obj = self.env['sale.order.line']
@@ -4615,10 +4634,14 @@ class mercadolibre_orders(models.Model):
 
         order._meli_store_economic_snapshot(economics)
         # Funding is audit information, not an additional line discount.
-        order.discount_seller_amount = float(money(economics["seller_funded"]))
-        order.coupon_amount = float(sum((money(b["total"]) for b in economics["benefits"]
-                                        if b["type"] == "coupon"), money(0)))
-        meli_order_fields['meli_discount_seller_amount'] = order.discount_seller_amount
+        if economics["seller_funded"] is not None:
+            order.discount_seller_amount = float(money(economics["seller_funded"]))
+            meli_order_fields['meli_discount_seller_amount'] = order.discount_seller_amount
+        if economics["status"] == "conditioned_draft":
+            order.coupon_amount = float(sum((money(p["coupon_amount"]) for p in economics["payments"]), money(0)))
+        else:
+            order.coupon_amount = float(sum((money(b["total"]) for b in economics["benefits"]
+                                            if b["type"] == "coupon"), money(0)))
         meli_order_fields['meli_coupon_amount'] = order.coupon_amount
 
         if (sorder and sorder.id):
@@ -5199,7 +5222,8 @@ class mercadolibre_orders(models.Model):
                     pass;
 
             #if (config.mercadolibre_order_confirmation!="manual"):
-            sorder.confirm_ml( meli=meli, config=config )
+            if economics["status"] != "conditioned_draft":
+                sorder.confirm_ml( meli=meli, config=config )
 
             if (sorder.meli_status=="cancelled" and sorder.state in ["draft","sale","sent","done"]):
                 cancel_msg = "Orden cancelada por MercadoLibre."
@@ -5264,12 +5288,13 @@ class mercadolibre_orders(models.Model):
             if order:
                 meli_message_post(order, "Warning: sale order not created!", config=config)
 
-        try:
-            self.orders_get_invoice( meli=meli, config=config )
-        except:
-            pass;
+        if economics["status"] != "conditioned_draft":
+            try:
+                self.orders_get_invoice( meli=meli, config=config )
+            except:
+                pass;
 
-        return {}
+        return {"economic_outcome": "conditioned_draft"} if economics["status"] == "conditioned_draft" else {}
 
     def orders_import_order( self, order_id, context=None, meli=None, config=None ):
         if not order_id:

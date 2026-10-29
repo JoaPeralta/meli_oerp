@@ -153,7 +153,7 @@ class OrderEconomicsTests(unittest.TestCase):
             result = economics.interpret_order_economics(p,
                 observation({"error": "discount_not_found"}, 404))
             self.assertEqual((result["status"], result["reason"]),
-                             ("pending", "discount_not_found_evidence_incomplete"))
+                         ("pending", "payment_observation_missing"))
             self.assertIsNone(result["seller_funded"])
 
     def test_http_and_partial_observations_stay_strict(self):

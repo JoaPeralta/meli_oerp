@@ -26,6 +26,7 @@ def operation(name, namespace=None):
     node = methods()[name]
     node.decorator_list = []
     scope = dict(interpret_order_economics=economics.interpret_order_economics,
+                 merge_economic_evidence=economics.merge_economic_evidence,
                  ValidationError=ValueError, remote_id=admission.remote_id,
                  AdmissionError=admission.AdmissionError, **(namespace or {}))
     exec(compile(ast.fix_missing_locations(ast.Module([node], [])), "orders.py", "exec"), scope)
@@ -114,7 +115,7 @@ class EconomicImportTests(unittest.TestCase):
         self.assertEqual(result, economics.interpret_order_economics(order(), observation({"details": []}), payments))
 
     def test_transport_failure_has_no_estimate_or_payment_request(self):
-        for status, body in ((404, {"error": "discount_not_found"}), (401, {}), (500, {})):
+        for status, body in ((404, {"error": "other_not_found"}), (401, {}), (500, {})):
             model = self.producer(observation(body, status))
             result, payments = model._meli_economic_preflight(order(), object())
             self.assertEqual(result["status"], "pending")
@@ -127,7 +128,8 @@ class EconomicImportTests(unittest.TestCase):
         stop = next(i for i, stmt in enumerate(node.body) if isinstance(stmt, ast.Assign)
                     and any(isinstance(t, ast.Name) and t.id == "saleorder_obj" for t in stmt.targets))
         node.body = node.body[:stop] + ast.parse("raise AssertionError('commercial mutation reached')").body
-        model = self.producer(observation({"error": "discount_not_found"}, 404))
+        model = self.producer(observation({"error": "discount_not_found"}, 404),
+                              payment=observation({}, 503))
         model.env = SimpleNamespace(context={}, user=SimpleNamespace(company_id=SimpleNamespace(id=1)))
         model._meli_assert_order_admission_actor = lambda config: "7"
         model._meli_preflight_order_history = lambda *a, **kw: None
@@ -137,21 +139,25 @@ class EconomicImportTests(unittest.TestCase):
                  "ValidationError": ValueError}
         exec(compile(ast.fix_missing_locations(ast.Module([node], [])), "actual-import-prefix", "exec"), scope)
         result = scope[node.name](model, {"id": False, "order_json": order()}, config=config, meli=object())
-        self.assertEqual(result["economic_pending"], "discount_not_found_evidence_incomplete")
+        self.assertEqual(result["economic_pending"], "payment_http_503")
         self.assertNotIn("commercial mutation reached", str(result))
 
-    def test_snapshot_upsert_overwrites_identically_without_duplicate_records(self):
+    def test_snapshot_upsert_is_noop_for_identical_evidence_without_duplicate_records(self):
         result = economics.interpret_order_economics(order(), observation({"details": []}))
         record = SimpleNamespace(writes=[], ensure_one=lambda: None, order_id="123", currency_id="ARS")
-        record.write = lambda values: record.writes.append(copy.deepcopy(values)) or True
+        def write(values):
+            record.writes.append(copy.deepcopy(values))
+            record.economic_snapshot = copy.deepcopy(values["economic_snapshot"])
+            return True
+        record._meli_write_economic_snapshot = lambda snapshot: write({"economic_snapshot": snapshot})
         apply = operation("_meli_store_economic_snapshot")
         apply(record, result)
         apply(record, copy.deepcopy(result))
-        self.assertEqual(record.writes, [{"economic_snapshot": result}] * 2)
+        self.assertEqual(record.writes, [{"economic_snapshot": result}])
         invalid = dict(result, status="pending")
         with self.assertRaises(ValueError):
             apply(record, invalid)
-        self.assertEqual(len(record.writes), 2)
+        self.assertEqual(len(record.writes), 1)
 
     def test_unsafe_estimator_and_coupon_proration_are_absent(self):
         source = (ROOT / "models/orders.py").read_text(encoding="utf8")
