@@ -114,7 +114,7 @@ class EconomicImportTests(unittest.TestCase):
         self.assertEqual(result, economics.interpret_order_economics(order(), observation({"details": []}), payments))
 
     def test_transport_failure_has_no_estimate_or_payment_request(self):
-        for status, body in ((404, {"error": "discount_not_found"}), (401, {}), (500, {})):
+        for status, body in ((404, {"error": "other_not_found"}), (401, {}), (500, {})):
             model = self.producer(observation(body, status))
             result, payments = model._meli_economic_preflight(order(), object())
             self.assertEqual(result["status"], "pending")
@@ -127,7 +127,8 @@ class EconomicImportTests(unittest.TestCase):
         stop = next(i for i, stmt in enumerate(node.body) if isinstance(stmt, ast.Assign)
                     and any(isinstance(t, ast.Name) and t.id == "saleorder_obj" for t in stmt.targets))
         node.body = node.body[:stop] + ast.parse("raise AssertionError('commercial mutation reached')").body
-        model = self.producer(observation({"error": "discount_not_found"}, 404))
+        model = self.producer(observation({"error": "discount_not_found"}, 404),
+                              payment=observation({}, 503))
         model.env = SimpleNamespace(context={}, user=SimpleNamespace(company_id=SimpleNamespace(id=1)))
         model._meli_assert_order_admission_actor = lambda config: "7"
         model._meli_preflight_order_history = lambda *a, **kw: None
@@ -137,7 +138,7 @@ class EconomicImportTests(unittest.TestCase):
                  "ValidationError": ValueError}
         exec(compile(ast.fix_missing_locations(ast.Module([node], [])), "actual-import-prefix", "exec"), scope)
         result = scope[node.name](model, {"id": False, "order_json": order()}, config=config, meli=object())
-        self.assertEqual(result["economic_pending"], "discount_not_found_evidence_incomplete")
+        self.assertEqual(result["economic_pending"], "payment_http_503")
         self.assertNotIn("commercial mutation reached", str(result))
 
     def test_snapshot_upsert_overwrites_identically_without_duplicate_records(self):

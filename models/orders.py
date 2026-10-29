@@ -2028,7 +2028,9 @@ class mercadolibre_orders(models.Model):
         """Acquire once before mutation, then invoke the shared pure interpreter."""
         discounts = self._fetch_order_discounts(meli=meli, order_id=payload["id"])
         payments = {}
-        if discounts.get("status") == 200 and not discounts.get("missing"):
+        if (not discounts.get("missing") and (discounts.get("status") == 200
+                or (discounts.get("status") == 404 and isinstance(discounts.get("body"), dict)
+                    and discounts["body"].get("error") == "discount_not_found"))):
             try:
                 rows = payload.get("payments")
                 if not isinstance(rows, list) or not rows:

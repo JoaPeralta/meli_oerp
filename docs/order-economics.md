@@ -42,11 +42,18 @@ not invented or treated as a second ownership certificate.
 An observed HTTP 200 with explicit `details: []` still needs consistent order
 and payment evidence. It is not generalized into a universal no-discount API
 guarantee. Every other transport error or partial response remains explicit.
-Exact `404 discount_not_found` yields
-`discount_not_found_evidence_incomplete`: neither scalar gross equality nor
-missing/zero coupon or charge fields proves exhaustive absence of benefits.
-No successful 404 provider-contract fixture is invented. Independent sufficient
-official evidence is still required to implement that acceptance scenario.
+Exact `404 discount_not_found` does not establish promotional completeness.
+For an owned paid single-item individual without an assigned shipment, complete
+independent MP observations can verify its commercial price and produce
+`conditioned_draft`, `commercial_status=verified`, `promotional_status=unknown`.
+The versioned result retains the HTTP404/error and observed amounts, with
+`benefits`, `seller_funded` and `marketplace_funded` null. This is a local guarded
+quotation policy, not a claim that the provider contract defines404 as zero.
+Every payment ID must come from the admitted seller-owned order and match MP;
+any reported collector must corroborate that seller. Explicit MP coupon and
+shipping amounts are mandatory for this exception, and order coupons and buyer
+differences must reconcile. Unknown fields never become zero. Arbitrary404,
+other transport failures and malformed200 do not enter this exception.
 
 All new test fixtures are synthetic arithmetic examples. Unit/source tests do
 not establish native ORM atomicity, deployed effectiveness or HOMO readiness.
