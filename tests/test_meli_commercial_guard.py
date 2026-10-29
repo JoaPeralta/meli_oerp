@@ -59,8 +59,12 @@ class ProjectionGuardTests(unittest.TestCase):
         tree = ast.parse((ROOT / "models/meli_commercial_guard.py").read_bytes())
         nodes = [node for node in tree.body if isinstance(node, (ast.Assign, ast.FunctionDef, ast.ClassDef))]
         class Native:
+            def __iter__(self):
+                return iter((self,))
             def create(self, vals_list):
                 return "native-create"
+            def write(self, values):
+                return "native-write"
         namespace = {"models": SimpleNamespace(Model=Native), "ValidationError": ValueError,
                      "api": SimpleNamespace(model_create_multi=lambda method: method),
                      "economic_projection_allowed": scope.economic_projection_allowed}
@@ -69,6 +73,10 @@ class ProjectionGuardTests(unittest.TestCase):
 
     def unrelated_environment(self):
         class UnrelatedSources(Rows):
+            def browse(self, ids=None):
+                if ids:
+                    raise AssertionError("Unrelated native sale has no source IDs")
+                return Rows()
             def search(self, domain):
                 raise AssertionError("Unrelated native sale must not require MercadoLibre search access")
         return {"mercadolibre.orders": UnrelatedSources(), "sale.order.line": SimpleNamespace(_fields={})}
@@ -76,7 +84,7 @@ class ProjectionGuardTests(unittest.TestCase):
     def test_unrelated_native_root_with_false_remote_id_never_queries_ml_model(self):
         namespace = self.guard_namespace()
         root = SimpleNamespace(env=self.unrelated_environment(),
-            mapped=lambda name: Rows() if name == "meli_orders" else [False], ids=[1])
+            mapped=lambda name: [False] if name == "meli_order_id" else Rows(), ids=[1])
         self.assertFalse(namespace["_sources"](root))
 
     def test_unrelated_direct_native_sale_create_retains_native_acl_path(self):
@@ -86,6 +94,62 @@ class ProjectionGuardTests(unittest.TestCase):
         model = namespace["EconomicSale"]()
         model.env = Env(self.unrelated_environment())
         self.assertEqual(model.create([{"state": "sale"}]), "native-create")
+
+    def alias_fixture(self, namespace, *, current=False, defaults=None):
+        source = SimpleNamespace(id=77, order_id="123", economic_snapshot={"status": "conditioned_draft"})
+        class Sources(Rows):
+            def browse(self, ids=None):
+                return Sources([source]) if ids == 77 or ids == [77] else Sources()
+            def search(self, domain):
+                return Sources()
+        class Env(dict):
+            context = dict(defaults or {})
+        env = Env({"mercadolibre.orders": Sources(), "sale.order.line": SimpleNamespace(_fields={})})
+        env.cr, env.uid, env.company, env.su = self.env.cr, 7, self.env.company, False
+        source.env = env
+        root = namespace["EconomicSale"]()
+        root.env, root.ids = env, [88]
+        root.mapped = lambda name: [False] if name == "meli_order_id" else (
+            Sources([source]) if name == "meli_order" and current else Sources())
+        source.sale_order = root
+        return root, source
+
+    def test_singular_stored_alias_is_discovered_without_other_traceability(self):
+        namespace = self.guard_namespace()
+        root, source = self.alias_fixture(namespace, current=True)
+        self.assertIn(source, namespace["_sources"](root))
+
+    def test_singular_stored_alias_cannot_authorize_effects_as_unrelated_native(self):
+        namespace = self.guard_namespace()
+        root, _source = self.alias_fixture(namespace, current=True)
+        with self.assertRaisesRegex(ValueError, "Economic"):
+            namespace["_effects"](root)
+
+    def test_explicit_and_default_singular_alias_creation_are_guarded(self):
+        namespace = self.guard_namespace()
+        for values, defaults in (({"meli_order": 77}, {}), ({}, {"default_meli_order": 77})):
+            root, _source = self.alias_fixture(namespace, defaults=defaults)
+            with self.subTest(defaults=defaults), self.assertRaisesRegex(ValueError, "Economic"):
+                root.create([values])
+        root, _source = self.alias_fixture(namespace, defaults={"default_meli_order": 77})
+        self.assertEqual(root.create([{"meli_order": False}]), "native-create")
+
+    def test_singular_alias_attachment_and_clear_are_guarded(self):
+        namespace = self.guard_namespace()
+        for current, value in ((False, 77), (True, False)):
+            root, _source = self.alias_fixture(namespace, current=current)
+            with self.subTest(current=current), self.assertRaisesRegex(ValueError, "Economic"):
+                root.write({"meli_order": value})
+
+    def test_item_and_payment_create_cannot_use_default_parent_to_bypass_audit_guard(self):
+        namespace = self.guard_namespace()
+        for model_name in ("EconomicItem", "EconomicPayment"):
+            root, _source = self.alias_fixture(namespace, defaults={"default_order_id": 77})
+            model = namespace[model_name]()
+            model.env = root.env
+            with self.subTest(model=model_name), self.assertRaisesRegex(ValueError, "Economic"):
+                model.create([{}])
+            self.assertEqual(model.create([{"order_id": False}]), "native-create")
 
     def test_actual_snapshot_clear_forgery_and_identity_edits_are_denied_before_super(self):
         namespace = self.guard_namespace()

@@ -23,6 +23,7 @@ def _sources(roots):
     if not roots:
         return result
     result |= roots.mapped("meli_orders")
+    result |= roots.mapped("meli_order")
     identities = [value for value in roots.mapped("meli_order_id") if value]
     if SOURCE in roots.env["sale.order.line"]._fields:
         result |= roots.order_line.mapped(SOURCE + ".order_id")
@@ -144,7 +145,8 @@ class EconomicItem(models.Model):
     @api.model_create_multi
     def create(self, vals_list):
         for vals in vals_list:
-            _projection(self.env["mercadolibre.orders"].browse(vals.get("order_id")))
+            _projection(self.env["mercadolibre.orders"].browse(
+                vals.get("order_id", self.env.context.get("default_order_id"))))
         return super().create(vals_list)
 
     def write(self, vals):
@@ -168,7 +170,8 @@ class EconomicPayment(models.Model):
     @api.model_create_multi
     def create(self, vals_list):
         for vals in vals_list:
-            _projection(self.env["mercadolibre.orders"].browse(vals.get("order_id")))
+            _projection(self.env["mercadolibre.orders"].browse(
+                vals.get("order_id", self.env.context.get("default_order_id"))))
         return super().create(vals_list)
 
     def write(self, vals):
@@ -199,6 +202,7 @@ class EconomicSale(models.Model):
             remote = vals.get("meli_order_id", self.env.context.get("default_meli_order_id"))
             if remote:
                 incoming = incoming.search([("order_id", "=", remote)])
+            incoming |= incoming.browse(vals.get("meli_order", self.env.context.get("default_meli_order")))
             for command in vals.get("meli_orders", self.env.context.get("default_meli_orders", [])) or []:
                 if command[0] == 6:
                     incoming |= incoming.browse(command[2])
@@ -212,11 +216,12 @@ class EconomicSale(models.Model):
     def write(self, vals):
         if vals.get("state") in ("sale", "done"):
             _effects(self)
-        if set(vals).intersection({"meli_order_id", "meli_orders", "company_id", "currency_id",
+        if set(vals).intersection({"meli_order_id", "meli_orders", "meli_order", "company_id", "currency_id",
                                    "partner_id", "partner_invoice_id", "partner_shipping_id", "pricelist_id",
                                    "fiscal_position_id", "order_line", "meli_total_amount", "meli_paid_amount"}):
             _projection(_sources(self))
             incoming = self.env["mercadolibre.orders"]
+            incoming |= incoming.browse(vals.get("meli_order"))
             if vals.get("meli_order_id"):
                 incoming |= incoming.search([("order_id", "=", vals["meli_order_id"])])
             for command in vals.get("meli_orders", []) or []:

@@ -141,6 +141,13 @@ sale confirmation, invoicing/posting, procurement and stock effect entrypoints
 check the actual source evidence before calling inherited native operations.
 Unaudited unrelated native orders retain their existing behavior and ACL path.
 False/absent ML identities never trigger a source-model search on that path.
+The stored singular `sale.order.meli_order` alias is also a protected source
+reference, including explicit/default creation and later attachment/clearing.
+Item/payment creation resolves `default_order_id` just as native ORM creation
+does; omitting the explicit value cannot insert a child into an audited parent.
+The legacy synthetic negative-audit fixture seeds its prior JSON through explicit
+test-only SQL: normal ORM proof creation is intentionally forbidden. This does
+not expose an application bypass or change the negative preflight/audit oracles.
 
 Distinct sanitized observations are retained in a flat, deduplicated `history`.
 Exact retries are no-ops. A later complete observation reuses the same graph.
