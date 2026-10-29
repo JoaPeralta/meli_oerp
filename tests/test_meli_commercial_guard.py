@@ -12,6 +12,10 @@ spec.loader.exec_module(scope)
 
 
 class Rows(list):
+    def __ior__(self, other):
+        self.extend(row for row in other if row not in self)
+        return self
+
     def filtered(self, predicate):
         return Rows(row for row in self if predicate(row))
 
@@ -54,11 +58,34 @@ class ProjectionGuardTests(unittest.TestCase):
     def guard_namespace(self):
         tree = ast.parse((ROOT / "models/meli_commercial_guard.py").read_bytes())
         nodes = [node for node in tree.body if isinstance(node, (ast.Assign, ast.FunctionDef, ast.ClassDef))]
-        namespace = {"models": SimpleNamespace(Model=object), "ValidationError": ValueError,
+        class Native:
+            def create(self, vals_list):
+                return "native-create"
+        namespace = {"models": SimpleNamespace(Model=Native), "ValidationError": ValueError,
                      "api": SimpleNamespace(model_create_multi=lambda method: method),
                      "economic_projection_allowed": scope.economic_projection_allowed}
         exec(compile(ast.Module(nodes, []), "actual-commercial-guards", "exec"), namespace)
         return namespace
+
+    def unrelated_environment(self):
+        class UnrelatedSources(Rows):
+            def search(self, domain):
+                raise AssertionError("Unrelated native sale must not require MercadoLibre search access")
+        return {"mercadolibre.orders": UnrelatedSources(), "sale.order.line": SimpleNamespace(_fields={})}
+
+    def test_unrelated_native_root_with_false_remote_id_never_queries_ml_model(self):
+        namespace = self.guard_namespace()
+        root = SimpleNamespace(env=self.unrelated_environment(),
+            mapped=lambda name: Rows() if name == "meli_orders" else [False], ids=[1])
+        self.assertFalse(namespace["_sources"](root))
+
+    def test_unrelated_direct_native_sale_create_retains_native_acl_path(self):
+        namespace = self.guard_namespace()
+        class Env(dict):
+            context = {}
+        model = namespace["EconomicSale"]()
+        model.env = Env(self.unrelated_environment())
+        self.assertEqual(model.create([{"state": "sale"}]), "native-create")
 
     def test_actual_snapshot_clear_forgery_and_identity_edits_are_denied_before_super(self):
         namespace = self.guard_namespace()

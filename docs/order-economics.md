@@ -140,6 +140,7 @@ projection authority never permits irreversible effects: direct ORM state writes
 sale confirmation, invoicing/posting, procurement and stock effect entrypoints
 check the actual source evidence before calling inherited native operations.
 Unaudited unrelated native orders retain their existing behavior and ACL path.
+False/absent ML identities never trigger a source-model search on that path.
 
 Distinct sanitized observations are retained in a flat, deduplicated `history`.
 Exact retries are no-ops. A later complete observation reuses the same graph.

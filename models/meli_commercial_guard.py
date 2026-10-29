@@ -23,7 +23,7 @@ def _sources(roots):
     if not roots:
         return result
     result |= roots.mapped("meli_orders")
-    identities = roots.mapped("meli_order_id")
+    identities = [value for value in roots.mapped("meli_order_id") if value]
     if SOURCE in roots.env["sale.order.line"]._fields:
         result |= roots.order_line.mapped(SOURCE + ".order_id")
     if not result and not identities:
@@ -205,10 +205,8 @@ class EconomicSale(models.Model):
                 elif command[0] == 4:
                     incoming |= incoming.browse(command[1])
             _projection(incoming)
-            if vals.get("state") in ("sale", "done"):
-                sources = self.env["mercadolibre.orders"].search([("order_id", "=", vals.get("meli_order_id"))])
-                if _audited(sources):
-                    _deny()
+            if vals.get("state") in ("sale", "done") and _audited(incoming):
+                _deny()
         return super().create(vals_list)
 
     def write(self, vals):
