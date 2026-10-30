@@ -51,10 +51,11 @@ Renewal is not this method's job. The authenticated client already arrives from
 
 WHAT THIS FILE DOES NOT CLAIM
 -----------------------------
-``filter_meli_ids`` calls ``get_new_instance()`` on every page of the scroll,
-which crosses the authenticated boundary once per page. That is a separate
-finding, tracked as separate debt; the tests below neutralise it with a fake so
-they neither depend on it nor pin it in place.
+``fetch_list_meli_ids`` calls ``filter_meli_ids`` once, after the complete raw
+scan. The filter still obtains an authenticated client for its optional
+official-store item lookup. These tests replace that boundary with a synthetic
+client; they do not prove real API pagination, complete provider responses, or
+a live authenticated store lookup.
 """
 
 import hashlib
