@@ -42,7 +42,7 @@ def merge_economic_evidence(previous, current):
 
     def observation(row):
         return {key: deepcopy(value) for key, value in row.items()
-                if key not in ("history", "latest_observation", "projection")}
+                if key not in ("history", "latest_observation", "projection", "manual_approvals")}
 
     latest = previous.get("latest_observation", observation(previous))
     if latest == observation(current):
@@ -62,6 +62,10 @@ def merge_economic_evidence(previous, current):
     if keep_complete and incoming not in history:
         history.append(incoming)
     result.update(history=history, latest_observation=incoming)
+    # Human decisions are audit, never provider observations or completeness.
+    # Their exact snapshot binding must be checked independently by a consumer.
+    if "manual_approvals" in previous:
+        result["manual_approvals"] = deepcopy(previous["manual_approvals"])
     return result
 
 
