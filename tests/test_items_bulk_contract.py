@@ -60,6 +60,28 @@ class Client:
         return [(path, params) for path, params in self.calls if path.startswith("/items")]
 
 
+class SearchPages(Client):
+    """Script only SEARCH; existing bulk fake and correlation contracts stay intact."""
+    def __init__(self, pages):
+        super().__init__()
+        self.pages = list(pages)
+        self.search_count = 0
+
+    def get(self, path, params=None, **kwargs):
+        if not path.startswith("/users/123/items/search"):
+            return super().get(path, params=params, **kwargs)
+        self.calls.append((path, copy.deepcopy(params or {})))
+        index = min(self.search_count, len(self.pages) - 1)
+        self.search_count += 1
+        status, body = self.pages[index]
+        self.last_status_code = status
+        def decode():
+            if isinstance(body, Exception):
+                raise body
+            return copy.deepcopy(body)
+        return SimpleNamespace(status_code=status, headers={}, json=decode)
+
+
 def fixture(ids=()):
     path = ROOT / "models/company.py"
     tree = ast.parse(path.read_bytes())
@@ -133,6 +155,128 @@ class ExistingItemReadBaseline(unittest.TestCase):
             company.filter_meli_ids(["MLA1"], 99)
         self.assertEqual((client.access_token, client.refresh_token), before)
         self.assertEqual(client.calls, [])
+
+
+class CatalogueScanCompleteness(unittest.TestCase):
+    @staticmethod
+    def page(ids, total, cursor=None, **paging):
+        body = {"results": ids, "paging": {"total": total, **paging}}
+        if cursor is not None:
+            body["scroll_id"] = cursor
+        return 200, body
+
+    def arrange(self, pages, limit=75):
+        company, _, writes = fixture()
+        client = SearchPages(pages)
+        company.env["meli.util"].get_new_instance.return_value = client
+        config = company.env["ir.config_parameter"]
+        original = config.get_param
+        config.get_param = lambda key: str(limit) if key == "meli_local_products_search_range" else original(key)
+        return company, client, writes
+
+    def test_later_non_auth_scan_failure_never_delivers_a_prefix(self):
+        company, client, _ = self.arrange([
+            self.page(["MLA1"], 3, "cursor-1"), (500, {"error": "unavailable"})])
+        consume = Mock()
+        with self.assertRaises(ContractError):
+            consume(company.fetch_list_meli_ids(meli=client))
+        consume.assert_not_called()
+        self.assertEqual(client.search_count, 2)
+        self.assertEqual(client.bulk_calls(), [])
+        self.assertEqual((client.access_token, client.refresh_token), ("SYNTHETIC-ONLY", "UNCHANGED-SYNTHETIC"))
+
+    def test_scan_uncertainty_and_contradiction_never_deliver_a_prefix(self):
+        variants = [(200, {}), (200, {"results": ["MLA2"], "paging": {"total": 4}}),
+                    self.page(["MLA2"], 3), self.page([], 3, "cursor-2"),
+                    self.page(["MLA1"], 3, "cursor-1"), self.page([None], 3, "cursor-2"),
+                    (206, {"results": ["MLA2"], "paging": {"total": 3}, "scroll_id": "cursor-2"}),
+                    (200, ValueError("unparseable later page"))]
+        for page in variants:
+            with self.subTest(page=page):
+                company, client, _ = self.arrange([self.page(["MLA1"], 3, "cursor-1"), page,
+                                                  (500, {"error": "scripted final stop"})])
+                with self.assertRaises(ContractError):
+                    company.fetch_list_meli_ids(meli=client)
+                self.assertEqual(client.search_count, 2)
+                self.assertEqual(client.bulk_calls(), [])
+
+    def test_scan_iteration_exhaustion_never_delivers_collected_ids(self):
+        # Enough valid scripted pages for the old limit to return its prefix.
+        pages = [self.page(["MLA" + str(i)], 2000, "cursor-" + str(i)) for i in range(1002)]
+        company, client, _ = self.arrange(pages)
+        with self.assertRaises(ContractError):
+            company.fetch_list_meli_ids(meli=client)
+        self.assertLessEqual(client.search_count, 1001)
+        self.assertEqual(client.bulk_calls(), [])
+
+    def test_complete_scan_counts_raw_ids_then_filters_store_once(self):
+        for client_status_only in (False, True):
+            with self.subTest(client_status_only=client_status_only):
+                company, client, _ = self.arrange([
+                    self.page(["MLA1"], 3, "cursor-1"), self.page(["MLA2"], 3, "cursor-1"),
+                    self.page(["MLA3"], 3, ""), (500, {"error": "scripted final stop"})])
+                if client_status_only:
+                    original_get = client.get
+                    def without_response_status(*args, **kwargs):
+                        response = original_get(*args, **kwargs)
+                        if args[0].startswith("/users"):
+                            del response.status_code
+                        return response
+                    client.get = without_response_status
+                company.mercadolibre_official_store_id = 99
+                client.reply = lambda batch: [Client.row(id_, 98) for id_ in batch]
+                self.assertEqual(company.fetch_list_meli_ids(meli=client), [])
+                self.assertEqual(client.search_count, 3)
+                self.assertEqual(len(client.bulk_calls()), 1)
+                self.assertTrue(all(path.startswith("/users") for path, _ in client.calls[:3]))
+
+    def test_later_search_failure_never_bulk_reads_or_advances_configured_slice(self):
+        first = self.page(["MLA" + str(i) for i in range(50)], 120)
+        later_ids = ["MLA" + str(i) for i in range(50, 100)]
+        variants = [(200, {}), (500, {"error": "unavailable"}),
+                    self.page(later_ids, 119), self.page([], 120),
+                    self.page(["MLA50"], 120), self.page(later_ids, 120, offset=999),
+                    (206, {"results": later_ids, "paging": {"total": 120}}),
+                    (200, ValueError("unparseable later page"))]
+        for page in variants:
+            with self.subTest(page=page):
+                company, client, writes = self.arrange([first, page, (200, {})])
+                with self.assertRaises(ContractError):
+                    company.get_all_items_from_ML()
+                self.assertEqual(client.search_count, 2)
+                self.assertEqual(client.bulk_calls(), [])
+                self.assertEqual(writes, [])
+
+    def test_configured_range_is_only_a_slice_not_whole_catalogue(self):
+        for limit, count in ((50, 50), (75, 100)):
+            with self.subTest(limit=limit):
+                ids = ["MLA" + str(i) for i in range(count)]
+                pages = [self.page(ids[offset:offset + 50], 120, offset=offset)
+                         for offset in range(0, count, 50)]
+                company, client, writes = self.arrange(pages, limit=limit)
+                self.assertEqual([row["id"] for row in company.get_all_items_from_ML()], ids)
+                self.assertEqual(client.search_count, count // 50)
+                self.assertEqual(writes, [("meli_local_products_search_last_offset", count),
+                                          ("meli_local_products_search_total", 120)])
+
+    def test_legitimate_empty_catalogue_is_complete_for_both_callers(self):
+        for method in ("fetch_list_meli_ids", "get_all_items_from_ML"):
+            company, client, _ = self.arrange([self.page([], 0)])
+            self.assertEqual(getattr(company, method)(), [])
+            self.assertEqual(client.search_count, 1)
+            self.assertEqual(client.bulk_calls(), [])
+
+    def test_later_range_auth_failure_keeps_credentials_and_offset(self):
+        for status in (401, 403):
+            company, client, writes = self.arrange([
+                self.page(["MLA" + str(i) for i in range(50)], 120),
+                (status, {"error": "forbidden"})])
+            with self.assertRaises(ContractError):
+                company.get_all_items_from_ML()
+            self.assertEqual((client.access_token, client.refresh_token), ("SYNTHETIC-ONLY", "UNCHANGED-SYNTHETIC"))
+            self.assertEqual(client.bulk_calls(), [])
+            self.assertEqual(writes, [])
+
 
 class BulkItemContracts(unittest.TestCase):
     def test_actual_fetch_list_search_and_official_store_caller_remain_compatible(self):
