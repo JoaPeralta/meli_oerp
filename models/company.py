@@ -800,89 +800,70 @@ class res_company(models.Model):
             "Reconnect the MercadoLibre account to continue.") % detail)
 
     #Toma y lista los ids de las publicaciones del sitio de MercadoLibre, filtrados por official_store_id
-    def fetch_list_meli_ids( self, params=None, meli=None ):
-        """Devuelve SIEMPRE una lista de meli_ids.
-
-        Si la sesion no sirve, corta con UserError en vez de devolver una
-        accion de redirect: los callers hacen len() del resultado y lo iteran,
-        asi que un dict no era un redirect seguro sino tres ids falsos.
-        """
-
+    def fetch_list_meli_ids(self, params=None, meli=None):
+        """Return filtered IDs only after the complete raw scan is verified."""
         company = self or self.env.user.company_id
-
-        if not params:
-            params = {}
-
-        config = company
-
+        params = params or {}
         if not meli:
-            meli = self.env['meli.util'].get_new_instance( company )
+            meli = self.env['meli.util'].get_new_instance(company)
             if meli.need_login():
                 self._meli_ids_auth_stop("the connector is not logged in")
 
-        official_store_id = config.mercadolibre_official_store_id or None
-        seller_id = config.mercadolibre_seller_id
-
-        url_search = "/users/"+str(seller_id)+"/items/search"
-        _logger.info("fetch_list_meli_ids > url_search:"+str(url_search))
-        response = meli.get( url_search,
-                            {'access_token':meli.access_token,
-                            'search_type': 'scan',
-                            'limit': 100, #max paging limit is always 100
-                            **params })
-
-        rjson = response.json()
-        if self._meli_ids_auth_failed(meli, rjson):
-            self._meli_ids_auth_stop("the item search was rejected")
-
-        scroll_id = ""
-        results = []
-        ofresults = (rjson and "results" in rjson and rjson["results"]) or []
-        filt_results = self.filter_meli_ids(  ofresults, official_store_id  )
-        results+= filt_results or []
-        condition_last_off = True
-        total = (rjson and "paging" in rjson and "total" in rjson["paging"] and rjson["paging"]["total"]) or 0
-        #_logger.info("fetch_list_meli_ids: params:"+str(params)+" total:"+str(total))
-
-        if (rjson and 'scroll_id' in rjson and rjson["scroll_id"]):
-            scroll_id = rjson['scroll_id']
-            condition_last_off = False
-
+        url_search = "/users/" + str(company.mercadolibre_seller_id) + "/items/search"
+        search_params = {
+            'access_token': meli.access_token,
+            'search_type': 'scan',
+            'limit': 100,
+            **params,
+        }
+        results, seen = [], set()
+        total = None
         max_iterations = 1000
-        ite = 0
-        while (condition_last_off!=True):
-            ite+= 1;
-
-            if (ite>max_iterations):
-                condition_last_off = True
-
+        for iteration in range(max_iterations + 1):
+            response = meli.get(url_search, search_params)
+            if self._meli_ids_auth_failed(meli, None):
+                self._meli_ids_auth_stop("the item scan was rejected")
+            try:
+                page, metadata = snapshot_response(response)
+            except (ValueError, TypeError):
+                raise UserError("MercadoLibre item scan response is not valid JSON") from None
+            if (metadata["status"] in (401, 403)
+                    or self._meli_ids_auth_failed(meli, page)):
+                self._meli_ids_auth_stop("the item scan was rejected")
+            status = metadata["status"]
+            if status is None:
+                status = getattr(meli, 'last_status_code', None)
+            if (type(status) is not int or status != 200 or metadata["missing"]
+                    or not isinstance(page, dict) or page.get('error')):
+                raise UserError("MercadoLibre item scan is incomplete or unavailable")
+            paging, ids = page.get('paging'), page.get('results')
+            if (not isinstance(paging, dict) or type(paging.get('total')) is not int
+                    or paging['total'] < 0 or not isinstance(ids, list)
+                    or any(not isinstance(id_, str) or not id_ or id_.strip() != id_
+                           or "," in id_ for id_ in ids)
+                    or len(set(ids)) != len(ids) or seen.intersection(ids)):
+                raise UserError("MercadoLibre item scan has invalid or duplicated results")
+            if total is None:
+                total = paging['total']
+            if paging['total'] != total or len(results) + len(ids) > total:
+                raise UserError("MercadoLibre item scan total changed or is contradictory")
+            results.extend(ids)
+            seen.update(ids)
+            if len(results) == total:
+                return self.filter_meli_ids(
+                    results, company.mercadolibre_official_store_id or None) or []
+            cursor = page.get('scroll_id')
+            if not ids or not isinstance(cursor, str) or not cursor.strip():
+                raise UserError("MercadoLibre item scan ended before all results were read")
+            if iteration == max_iterations:
+                raise UserError("MercadoLibre item scan exceeded its iteration limit")
             search_params = {
                 'access_token': meli.access_token,
                 'search_type': 'scan',
                 'limit': 100,
-                'scroll_id': scroll_id,
-                **params
+                'scroll_id': cursor,
+                **params,
             }
-            response = meli.get("/users/"+str(seller_id)+"/items/search", search_params )
-            rjson2 = response.json()
-            if self._meli_ids_auth_failed(meli, rjson2):
-                self._meli_ids_auth_stop("a page of the item scan was rejected")
-
-            if (rjson2 and 'error' in rjson2):
-                # Solo el error y el mensaje: el cuerpo entero no se vuelca.
-                _logger.error("fetch_list_meli_ids: error=%s message=%s",
-                              rjson2.get('error'), rjson2.get('message'))
-                condition_last_off = True
-            else:
-                #results+= (rjson2 and "results" in rjson2 and rjson2["results"]) or []
-
-                ofresults = (rjson2 and "results" in rjson2 and rjson2["results"]) or None
-                scroll_id = rjson2 and 'scroll_id' in rjson2 and rjson2["scroll_id"] or ""
-                filt_results = self.filter_meli_ids(  ofresults, official_store_id  )
-                results+= filt_results or []
-                condition_last_off = (total>0 and len(results)>=total)
-
-        return results
 
     def _meli_items_bulk(self, meli, ids, attributes=()):
         """Read complete batches, correlating root and body IDs, never positions."""
@@ -1647,45 +1628,62 @@ class res_company(models.Model):
 
     @api.model
     def get_all_items_from_ML(self):
+        """Read one configured slice; never advance its offset on uncertainty."""
         ICP = self.env['ir.config_parameter'].sudo()
         company = self.env.company
         limit_parameter = int(ICP.get_param('meli_local_products_search_range'))
         offset_parameter = int(ICP.get_param('meli_local_products_search_last_offset'))
-        total_items_parameter = int(ICP.get_param('meli_local_products_search_total'))
         meli = self.env['meli.util'].get_new_instance(company)
         params = {
-            'access_token': meli.access_token, 
+            'access_token': meli.access_token,
             'include_attributes': 'all',
-            #'offset': 0,
             'offset': offset_parameter,
             'limit': 50,
         }
-        meli_ids = []
-        total = total_items_parameter
+        meli_ids, seen = [], set()
+        total = None
         while True:
             params['access_token'] = meli.access_token
             response = meli.get(
-                f"/users/{str(meli.seller_id)}/items/search?search_type=scan", 
+                f"/users/{str(meli.seller_id)}/items/search?search_type=scan",
                 params=params
             )
-            data = response.json()
+            if self._meli_ids_auth_failed(meli, None):
+                self._meli_ids_auth_stop("the item search was rejected")
             try:
-                total = data['paging']['total']
-                difference = total - offset_parameter
-                meli_ids.extend(data['results'])
-                if total < limit_parameter:
-                    limit_parameter = total
-                if limit_parameter <= len(meli_ids):
-                    break
-                if difference < limit_parameter and difference <= len(meli_ids):
-                    break
-                params['offset'] += params['limit']
-            except:
-                _logger.error(f"Error al obtener productos: {data}")
+                data, metadata = snapshot_response(response)
+            except (ValueError, TypeError):
+                raise UserError("MercadoLibre item search response is not valid JSON") from None
+            if (metadata["status"] in (401, 403)
+                    or self._meli_ids_auth_failed(meli, data)):
+                self._meli_ids_auth_stop("the item search was rejected")
+            status = metadata["status"]
+            if status is None:
+                status = getattr(meli, 'last_status_code', None)
+            if (type(status) is not int or status != 200 or metadata["missing"]
+                    or not isinstance(data, dict) or data.get('error')):
+                raise UserError("MercadoLibre item search is incomplete or unavailable")
+            paging, ids = data.get('paging'), data.get('results')
+            if (not isinstance(paging, dict) or type(paging.get('total')) is not int
+                    or paging['total'] < 0 or not isinstance(ids, list)
+                    or any(not isinstance(id_, str) or not id_ or id_.strip() != id_
+                           or "," in id_ for id_ in ids)
+                    or len(set(ids)) != len(ids) or seen.intersection(ids)
+                    or ('offset' in paging and (type(paging['offset']) is not int
+                                               or paging['offset'] != params['offset']))):
+                raise UserError("MercadoLibre item search has invalid or duplicated results")
+            if total is None:
+                total = paging['total']
+            expected = min(params['limit'], max(total - params['offset'], 0))
+            if paging['total'] != total or len(ids) != expected:
+                raise UserError("MercadoLibre item search total or page is incomplete")
+            meli_ids.extend(ids)
+            seen.update(ids)
+            if len(meli_ids) >= min(limit_parameter, max(total - offset_parameter, 0)):
                 break
-        
-        # Do not advance the catalogue cursor or return a partial list when
-        # any item/batch is unavailable, malformed or belongs to another ID.
+            params['offset'] += params['limit']
+
+        # Bulk correlation must also succeed before either cursor write.
         all_items = self._meli_items_bulk(meli, meli_ids)
         new_offset = offset_parameter + len(meli_ids)
         if new_offset >= total:

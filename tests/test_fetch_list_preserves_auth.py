@@ -58,6 +58,7 @@ they neither depend on it nor pin it in place.
 """
 
 import hashlib
+from unittest import TestCase
 from unittest.mock import patch
 
 from odoo.exceptions import UserError
@@ -438,3 +439,96 @@ class TestFetchListPreservesAuth(TransactionCase):
         self.assertEqual(
             offenders, [],
             "fetch_list_meli_ids still writes credentials: %s" % offenders)
+
+
+    def test_later_scan_uncertainty_delivers_no_prefix_or_item_reads(self):
+        """A valid first page must not become a delivered partial catalogue."""
+        self.company.mercadolibre_official_store_id = "99"
+        util = type(self.env["meli.util"])
+        for status, payload, parseable in (
+                (500, {"error": "internal_error"}, True),
+                (200, {}, True),
+                (200, None, False),
+                (206, {"results": ["MLA2"], "paging": {"total": 2}}, True)):
+            with self.subTest(status=status, parseable=parseable):
+                fake = self._scan_then(payload, status=status)
+                fake._responses[-1]._parseable = parseable
+                before = self._auth_row()
+                delivered = []
+                with patch.object(util, "get_new_instance", return_value=fake), \
+                        patch.object(util, "_meli_refresh_credentials",
+                                     side_effect=AssertionError("No implicit renewal")) as renewal, \
+                        patch.object(fake, "get", wraps=fake.get) as reads:
+                    # Plain unittest: no Odoo assertRaises savepoint may erase a
+                    # forbidden write before the controlled exception is checked.
+                    with TestCase.assertRaises(self, UserError):
+                        delivered.extend(self.company.fetch_list_meli_ids(meli=fake))
+                self.assertEqual(delivered, [])
+                self.assertEqual(fake.get_count, 2, "Reach the valid prefix AND later failure")
+                self.assertEqual([call.args[0] for call in reads.call_args_list],
+                                 ["/users/%s/items/search" % _SELLER] * 2)
+                renewal.assert_not_called()
+                self.env.flush_all()
+                self.env.invalidate_all()
+                self._assert_auth_untouched(before, fake, "later uncertain scan")
+
+    def test_later_range_uncertainty_preserves_cursor_and_caller(self):
+        """Refusing a later SEARCH must preserve real config rows and caller work."""
+        config = self.env["ir.config_parameter"]
+        settings = {
+            "meli_local_products_search_range": "75",
+            "meli_local_products_search_last_offset": "0",
+            "meli_local_products_search_total": "120",
+        }
+        for key, value in settings.items():
+            config.set_param(key, value)
+        sentinel = self.env["res.partner"].create({"name": "MAN4 caller sentinel"})
+        self.env.flush_all()
+        self.env.cr.execute(
+            "SELECT id, key, value, write_uid, write_date FROM ir_config_parameter "
+            "WHERE key = ANY(%s) ORDER BY key", (list(settings),))
+        before_config = self.env.cr.fetchall()
+        self.assertEqual(len(before_config), 3)
+        self.env.cr.execute("SELECT id, name FROM res_partner WHERE id = %s", (sentinel.id,))
+        before_sentinel = self.env.cr.fetchone()
+        before_actor = (self.env.uid, self.env.su, self.company.id)
+        util = type(self.env["meli.util"])
+        for status, payload, parseable in (
+                (500, {"error": "internal_error"}, True),
+                (200, {}, True),
+                (200, None, False),
+                (200, {"results": [], "paging": {"total": 120}}, True)):
+            with self.subTest(status=status, parseable=parseable):
+                fake = _FakeMeli([
+                    _Resp({"results": ["MLA%s" % i for i in range(50)],
+                           "paging": {"total": 120, "offset": 0, "limit": 50}}),
+                    _Resp(payload, parseable=parseable, status=status),
+                ])
+                before_auth = self._auth_row()
+                delivered = []
+                with patch.object(util, "get_new_instance", return_value=fake), \
+                        patch.object(util, "_meli_refresh_credentials",
+                                     side_effect=AssertionError("No implicit renewal")) as renewal, \
+                        patch.object(type(config), "set_param",
+                                     side_effect=AssertionError("No cursor writes on uncertainty")) as writes, \
+                        patch.object(fake, "get", wraps=fake.get) as reads:
+                    # Do not roll back here: a caller-owned sentinel and any
+                    # accidental early config write must remain observable.
+                    with TestCase.assertRaises(self, UserError):
+                        delivered.extend(self.company.get_all_items_from_ML())
+                writes.assert_not_called()
+                renewal.assert_not_called()
+                self.assertEqual(delivered, [])
+                self.assertEqual(fake.get_count, 2, "Reach the valid 50-ID prefix and later failure")
+                self.assertEqual([call.args[0] for call in reads.call_args_list],
+                                 ["/users/%s/items/search?search_type=scan" % _SELLER] * 2)
+                self.env.flush_all()
+                self.env.invalidate_all()
+                self.env.cr.execute(
+                    "SELECT id, key, value, write_uid, write_date FROM ir_config_parameter "
+                    "WHERE key = ANY(%s) ORDER BY key", (list(settings),))
+                self.assertEqual(self.env.cr.fetchall(), before_config)
+                self.env.cr.execute("SELECT id, name FROM res_partner WHERE id = %s", (sentinel.id,))
+                self.assertEqual(self.env.cr.fetchone(), before_sentinel)
+                self.assertEqual((self.env.uid, self.env.su, self.company.id), before_actor)
+                self._assert_auth_untouched(before_auth, fake, "later uncertain range")
