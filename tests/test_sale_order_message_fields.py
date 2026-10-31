@@ -24,7 +24,7 @@ import ast
 import inspect
 
 from odoo.tests import tagged
-from odoo.tests.common import TransactionCase
+from odoo.tests.common import TransactionCase, new_test_user
 
 import odoo.addons.meli_oerp.models.orders as orders_module
 
@@ -158,6 +158,36 @@ class TestSaleOrderMessageFields(TransactionCase):
             ("id", "=", self.sale.id), ("meli_unread_messages", ">", 0),
         ])
         self.assertEqual(found, self.sale, "meli_unread_messages is not searchable")
+
+    def test_sales_user_without_ml_roles_can_web_read_common_banners(self):
+        """Common sale fields must not grant or require restricted ML access."""
+        user = new_test_user(self.env, login="sale_banner_reader",
+            groups="base.group_user,sales_team.group_sale_salesman",
+            company_id=self.env.company.id, company_ids=[(6, 0, self.env.company.ids)])
+        self.assertFalse(user.has_group("sales_team.group_sale_manager"))
+        self.assertFalse(user.has_group("meli_oerp.group_mercadolibre_manager"))
+        self.assertFalse(user.has_group("meli_oerp.group_mercadolibre_reader"))
+        for remote_id, status, state in ((False, False, "draft"), ("ORD-UI", "paid", "draft"),
+                                        ("ORD-FINAL", "cancelled", "cancel"),
+                                        ("ORD-PENDING", "cancelled", "draft")):
+            with self.subTest(remote_id=remote_id, state=state):
+                sale = self.env["sale.order"].create({"partner_id": self.partner.id,
+                    "user_id": user.id, "company_id": self.env.company.id,
+                    "meli_order_id": remote_id, "meli_status": status, "state": state,
+                    "meli_status_detail": "buyer_cancel: restricted reason" if status == "cancelled" else False})
+                if remote_id:
+                    sale.meli_orders = [(6, 0, self._ml_order(remote_id).ids)]
+                human = sale.with_user(user)
+                self.assertEqual(human.env.uid, user.id)
+                self.assertFalse(human.env.su)
+                self.assertFalse(human.env["mercadolibre.orders"].has_access("read"))
+                human.invalidate_recordset(["meli_cancel_banner", "meli_cancel_pending_banner"])
+                result = human.web_read({"id": {}, "meli_cancel_banner": {},
+                                         "meli_cancel_pending_banner": {}})
+                self.assertEqual(result[0]["id"], sale.id)
+                self.assertFalse(result[0]["meli_cancel_banner"])
+                self.assertFalse(result[0]["meli_cancel_pending_banner"])
+                self.assertFalse(human.env["mercadolibre.orders"].has_access("read"))
 
     # ------------------------------------------------------------------
     # merge guard

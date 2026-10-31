@@ -1290,12 +1290,17 @@ class sale_order(models.Model):
     @api.depends('meli_status_detail', 'state')
     def _compute_meli_cancel_banner(self):
         for order in self:
-            if (str(order.meli_order_id or "").startswith("pack:")
-                    or len(order.meli_orders) > 1 or any(child.pack_id for child in order.meli_orders)):
-                order.meli_cancel_banner = False
-                continue  # A local final-own cancellation is not official pack cancellation.
             detail = (order.meli_status_detail or '').strip().lstrip('|').strip()
             if not detail or order.state != 'cancel':
+                order.meli_cancel_banner = False
+                continue
+            try:
+                if (str(order.meli_order_id or "").startswith("pack:")
+                        or len(order.meli_orders) > 1 or any(child.pack_id for child in order.meli_orders)):
+                    order.meli_cancel_banner = False
+                    continue  # A local final-own cancellation is not official pack cancellation.
+            except AccessError:
+                # Common sale reads must not expose restricted ML members.
                 order.meli_cancel_banner = False
                 continue
 
@@ -1386,12 +1391,17 @@ class sale_order(models.Model):
                  'invoice_ids.state', 'picking_ids.state')
     def _compute_meli_cancel_pending_banner(self):
         for order in self:
-            if (str(order.meli_order_id or "").startswith("pack:")
-                    or len(order.meli_orders) > 1 or any(child.pack_id for child in order.meli_orders)):
-                order.meli_cancel_pending_banner = False
-                continue
             # Solo mostrar cuando ML canceló pero Odoo NO está cancelado
             if order.meli_status != 'cancelled' or order.state == 'cancel':
+                order.meli_cancel_pending_banner = False
+                continue
+            try:
+                if (str(order.meli_order_id or "").startswith("pack:")
+                        or len(order.meli_orders) > 1 or any(child.pack_id for child in order.meli_orders)):
+                    order.meli_cancel_pending_banner = False
+                    continue
+            except AccessError:
+                # Common sale reads must not expose restricted ML members.
                 order.meli_cancel_pending_banner = False
                 continue
 

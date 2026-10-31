@@ -390,5 +390,74 @@ class ControlledPriceBoundaryTests(unittest.TestCase):
         self.assertIn("price_unit", names, "QTY_ZERO_SCHEDULES_INHERITED_REPRICING")
 
 
+class CancellationBannerAccessTests(unittest.TestCase):
+    """Run the actual computes; native web_read/ACL proof is separate."""
+    def sale(self, restricted=False, **values):
+        class Sale(SimpleNamespace):
+            @property
+            def meli_orders(self):
+                self.relation_reads += 1
+                if restricted:
+                    raise PermissionError("mercadolibre.orders read denied")
+                return self.children
+        class Documents(LocalVisibilityRegressionTests.Rows):
+            def __sub__(self, other):
+                return type(self)(row for row in self if row not in other)
+        fields = dict(meli_order_id=False, meli_status=False, meli_status_detail=False,
+                      state="draft", children=[], relation_reads=0,
+                      picking_ids=Documents(), invoice_ids=Documents())
+        fields.update(values)
+        return Sale(**fields)
+
+    def compute(self, sale, field):
+        from html import escape
+        import re
+        scope = {"AccessError": PermissionError, "re": re, "Markup": str,
+                 "html_escape": escape, "_MELI_CANCEL_CODES_ES": {},
+                 "_MELI_REQUESTED_BY_ES": {}}
+        try:
+            method("_compute_" + field, extra_scope=scope)([sale])
+        except PermissionError:
+            self.fail("COMMON_BANNER_READ_REQUIRES_RESTRICTED_ML_RELATION: " + field)
+        return getattr(sale, field)
+
+    def test_unrelated_sale_without_ml_access_short_circuits(self):
+        sale = self.sale(restricted=True)
+        for field in ("meli_cancel_banner", "meli_cancel_pending_banner"):
+            with self.subTest(field=field):
+                self.assertFalse(self.compute(sale, field))
+        self.assertEqual(sale.relation_reads, 0)
+
+    def test_active_ml_sale_without_ml_access_short_circuits(self):
+        sale = self.sale(restricted=True, meli_order_id="101", meli_status="paid")
+        for field in ("meli_cancel_banner", "meli_cancel_pending_banner"):
+            with self.subTest(field=field):
+                self.assertFalse(self.compute(sale, field))
+        self.assertEqual(sale.relation_reads, 0)
+
+    def test_unreadable_cancellation_members_hide_only_the_banner(self):
+        for field, state in (("meli_cancel_banner", "cancel"),
+                             ("meli_cancel_pending_banner", "draft")):
+            with self.subTest(field=field):
+                sale = self.sale(restricted=True, state=state, meli_order_id="101",
+                    meli_status="cancelled", meli_status_detail="buyer_cancel: private reason")
+                self.assertFalse(self.compute(sale, field))
+                self.assertEqual(sale.relation_reads, 1)
+
+    def test_authorized_individual_rendering_and_pack_suppression_remain(self):
+        child = SimpleNamespace(pack_id=False)
+        for field, state, label in (("meli_cancel_banner", "cancel", "CANCELADO ML"),
+                                   ("meli_cancel_pending_banner", "draft", "ACCIÓN REQUERIDA")):
+            with self.subTest(field=field):
+                values = dict(state=state, meli_order_id="101", meli_status="cancelled",
+                              meli_status_detail="buyer_cancel: <reason>", children=[child])
+                banner = self.compute(self.sale(**values), field)
+                self.assertIn(label, banner)
+                self.assertIn("&lt;reason&gt;", banner)
+                for changes in ({"meli_order_id": "pack:900"}, {"children": [child, child]},
+                                {"children": [SimpleNamespace(pack_id="900")]}):
+                    self.assertFalse(self.compute(self.sale(**{**values, **changes}), field))
+
+
 if __name__ == "__main__":
     unittest.main()
