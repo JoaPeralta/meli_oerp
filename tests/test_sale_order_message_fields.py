@@ -181,7 +181,8 @@ class TestSaleOrderMessageFields(TransactionCase):
                 self.assertEqual(human.env.uid, user.id)
                 self.assertFalse(human.env.su)
                 self.assertFalse(human.env["mercadolibre.orders"].has_access("read"))
-                human.invalidate_recordset(["meli_cancel_banner", "meli_cancel_pending_banner"])
+                # Match an HTTP request: discard privileged fixture field caches.
+                self.env.invalidate_all(flush=True)
                 result = human.web_read({"id": {}, "meli_cancel_banner": {},
                                          "meli_cancel_pending_banner": {}})
                 self.assertEqual(result[0]["id"], sale.id)
