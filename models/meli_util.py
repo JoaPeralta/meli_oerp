@@ -2092,7 +2092,7 @@ class MeliUtil(models.AbstractModel):
             _logger.error(e)
 
         for comp in company:
-            if (last_token!=comp.mercadolibre_access_token):#comp.mercadolibre_state!=api_rest_client.needlogin_state:
+            if (last_token!=api_rest_client.access_token):#comp.mercadolibre_state!=api_rest_client.needlogin_state:
                 _logger.info("mercadolibre_state : "+str(api_rest_client.needlogin_state))
                 comp.mercadolibre_state = api_rest_client.needlogin_state
             #else:
