@@ -27,9 +27,11 @@ locking around the renewal itself, are separate changes.
 
 from datetime import datetime, timedelta
 
+from unittest import TestCase as UnitTestCase
 from unittest.mock import patch
 
 from odoo import fields as odoo_fields
+from odoo.exceptions import AccessError
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
@@ -54,14 +56,23 @@ class _Resp:
 
 
 class _Session:
-    def __init__(self, post_payload):
+    def __init__(self, post_payload, identity=None):
         self.post_payload = post_payload
+        self.identity = identity
+        self.get_calls = []
+        self.post_calls = []
 
     def get(self, url, **kwargs):
+        self.get_calls.append(url)
+        if self.identity is not None:
+            if not url.endswith("/users/" + _SELLER):
+                raise AssertionError("Unexpected synthetic identity request")
+            return _Resp(200, self.identity)
         return _Resp(401, {"error": "invalid_token",
                            "message": "invalid or expired token", "status": 401})
 
     def post(self, url, **kwargs):
+        self.post_calls.append(url)
         return _Resp(200, self.post_payload)
 
     def put(self, url, **kwargs):
@@ -86,15 +97,36 @@ class TestTokenExpiryMetadata(TransactionCase):
             "mercadolibre_cron_refresh": True,
         })
 
-    def _refresh_with(self, payload):
-        session = _Session(payload)
+    def _refresh_with(self, payload, company=None, identity=None):
+        company = self.company if company is None else company
+        session = _Session(payload, identity=identity)
         self.env.flush_all()
         self.auth_cr = AmbientAuthCursor(self.env.cr)
         with patch.object(MeliConfiguration, "get_session", return_value=session),                 patch.object(type(self.env["meli.util"]), "_meli_auth_cursor",
                              return_value=self.auth_cr):
-            self.env["meli.util"].get_new_instance(self.company)
+            client = company.env["meli.util"].get_new_instance(company)
+        state = company.env.cache.get(company, company._fields["mercadolibre_state"], None)
         # The AUTH transaction persists with raw SQL, so the ORM cache is stale.
         self.env.invalidate_all()
+        return client, session, state
+
+    def _plain_company(self):
+        user = self.env["res.users"].create({
+            "name": "Plain token expiry operator",
+            "login": "plain.token.expiry." + str(self.company.id),
+            "company_id": self.company.id,
+            "company_ids": [(6, 0, self.company.ids)],
+            "group_ids": [(6, 0, [self.env.ref("base.group_user").id])],
+        })
+        company = self.company.with_user(user).with_context(
+            allowed_company_ids=self.company.ids)
+        self.assertFalse(company.env.su)
+        self.assertFalse(user.has_group("base.group_system"))
+        self.assertEqual(company.env.company, company)
+        self.assertEqual(company.env.companies, company)
+        with UnitTestCase.assertRaises(self, AccessError):
+            company.mercadolibre_access_token
+        return company
 
     def _payload(self, **over):
         p = {
@@ -172,6 +204,48 @@ class TestTokenExpiryMetadata(TransactionCase):
         self.assertFalse(
             self.company.mercadolibre_token_expires_at,
             "an expiry was invented for a response without expires_in")
+
+    def test_nonadmin_refresh_uses_client_without_reading_secret_facade(self):
+        company = self._plain_company()
+        self.company.write({
+            "mercadolibre_token_expires_at": odoo_fields.Datetime.now() - timedelta(seconds=1),
+            "mercadolibre_user_product_seller": False,
+            "mercadolibre_multiwarehouse": False,
+        })
+        company.env.cache.set(company, company._fields["mercadolibre_state"], True)
+
+        # Keep the real factory, private credential loading and notification close.
+        # Only HTTP and the already-established AUTH cursor seam are synthetic.
+        client, session, state = self._refresh_with(
+            self._payload(), company=company,
+            identity={"id": int(_SELLER), "tags": []})
+
+        self.assertTrue(self.auth_cr.posted_and_persisted())
+        self.assertEqual(len(session.post_calls), 1)
+        self.assertEqual(len(session.get_calls), 1)
+        self.assertEqual(client.access_token, _NEW_ACCESS)
+        self.assertFalse(client.needlogin_state)
+        self.assertIs(state, False)
+        with UnitTestCase.assertRaises(self, AccessError):
+            company.mercadolibre_access_token
+
+    def test_nonadmin_refused_refresh_keeps_token_and_secret_facade_denied(self):
+        company = self._plain_company()
+        self.company.mercadolibre_token_expires_at = (
+            odoo_fields.Datetime.now() - timedelta(seconds=1))
+
+        client, session, _ = self._refresh_with(
+            {"error": "invalid_grant", "message": "refresh token expired"},
+            company=company, identity={"id": int(_SELLER), "tags": []})
+
+        self.assertFalse(self.auth_cr.posted_and_persisted())
+        self.assertEqual(len(session.post_calls), 1)
+        self.assertFalse(session.get_calls)
+        self.assertEqual(client.access_token, _OLD_ACCESS)
+        self.assertTrue(client.needlogin_state)
+        self.assertEqual(self.company.mercadolibre_access_token, _OLD_ACCESS)
+        with UnitTestCase.assertRaises(self, AccessError):
+            company.mercadolibre_access_token
 
     # ------------------------------------------------------------------
     # the metadata must not survive a failed refresh
