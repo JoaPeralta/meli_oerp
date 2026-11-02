@@ -105,9 +105,10 @@ class TestTokenExpiryMetadata(TransactionCase):
         with patch.object(MeliConfiguration, "get_session", return_value=session),                 patch.object(type(self.env["meli.util"]), "_meli_auth_cursor",
                              return_value=self.auth_cr):
             client = company.env["meli.util"].get_new_instance(company)
+        state = company.env.cache.get(company, company._fields["mercadolibre_state"], None)
         # The AUTH transaction persists with raw SQL, so the ORM cache is stale.
         self.env.invalidate_all()
-        return client, session
+        return client, session, state
 
     def _plain_company(self):
         user = self.env["res.users"].create({
@@ -211,10 +212,11 @@ class TestTokenExpiryMetadata(TransactionCase):
             "mercadolibre_user_product_seller": False,
             "mercadolibre_multiwarehouse": False,
         })
+        company.env.cache.set(company, company._fields["mercadolibre_state"], True)
 
         # Keep the real factory, private credential loading and notification close.
         # Only HTTP and the already-established AUTH cursor seam are synthetic.
-        client, session = self._refresh_with(
+        client, session, state = self._refresh_with(
             self._payload(), company=company,
             identity={"id": int(_SELLER), "tags": []})
 
@@ -223,6 +225,7 @@ class TestTokenExpiryMetadata(TransactionCase):
         self.assertEqual(len(session.get_calls), 1)
         self.assertEqual(client.access_token, _NEW_ACCESS)
         self.assertFalse(client.needlogin_state)
+        self.assertIs(state, False)
         with UnitTestCase.assertRaises(self, AccessError):
             company.mercadolibre_access_token
 
@@ -231,7 +234,7 @@ class TestTokenExpiryMetadata(TransactionCase):
         self.company.mercadolibre_token_expires_at = (
             odoo_fields.Datetime.now() - timedelta(seconds=1))
 
-        client, session = self._refresh_with(
+        client, session, _ = self._refresh_with(
             {"error": "invalid_grant", "message": "refresh token expired"},
             company=company, identity={"id": int(_SELLER), "tags": []})
 

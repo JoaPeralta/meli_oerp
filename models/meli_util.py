@@ -2094,7 +2094,8 @@ class MeliUtil(models.AbstractModel):
         for comp in company:
             if (last_token!=api_rest_client.access_token):#comp.mercadolibre_state!=api_rest_client.needlogin_state:
                 _logger.info("mercadolibre_state : "+str(api_rest_client.needlogin_state))
-                comp.mercadolibre_state = api_rest_client.needlogin_state
+                # Cache the derived flag without invoking the company write pipeline.
+                comp.env.cache.set(comp, comp._fields["mercadolibre_state"], api_rest_client.needlogin_state)
             #else:
             #    _logger.info("mercadolibre_state already set: "+str(api_rest_client.needlogin_state))
 
