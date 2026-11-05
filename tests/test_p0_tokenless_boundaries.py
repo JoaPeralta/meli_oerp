@@ -82,7 +82,8 @@ class TestLabelTransport(unittest.TestCase):
 
     def shipments(self, count=2):
         return Group([NS(shipping_id=str(100 + i),
-                         _meli_check_label_scope=lambda config=None: self.company)
+                         _meli_check_label_scope=lambda config=None: self.company,
+                         can_print_label=lambda: (True, ""))
                       for i in range(count)])
 
     def test_batch_uses_fixed_host_bearer_and_no_token_query(self):
@@ -110,9 +111,10 @@ class TestLabelTransport(unittest.TestCase):
             (self.shipments(51), self.meli),
             (self.shipments(), NS(seller_id="452", access_token=TOKEN,
                                    need_login=lambda: False)),
-            (Group([NS(shipping_id="123", _meli_check_label_scope=lambda config=None: self.company),
+            (Group([NS(shipping_id="123", _meli_check_label_scope=lambda config=None: self.company,
+                      can_print_label=lambda: (True, "")),
                     NS(shipping_id="124", _meli_check_label_scope=lambda config=None: NS(
-                        mercadolibre_seller_id="999"))]), self.meli),
+                        mercadolibre_seller_id="999"), can_print_label=lambda: (True, ""))]), self.meli),
         ]:
             with self.subTest(case=len(source)):
                 transport = Transport()
@@ -143,6 +145,28 @@ def label_scope():
     return actual("models/shipment.py", "mercadolibre_shipment",
                   "_meli_check_label_scope",
                   {"AccessError": AccessError, "ValidationError": ValidationError})
+
+
+class TestOfficialPrintableStates(unittest.TestCase):
+    def test_me2_logistics_state_and_print_reprints(self):
+        method = actual("models/shipment.py", "mercadolibre_shipment",
+                        "can_print_label", {})
+        for logistics in ("drop_off", "xd_drop_off", "cross_docking", "self_service"):
+            for substatus in ("ready_to_print", "printed"):
+                allowed, _ = method(NS(mode="me2", logistic_type=logistics,
+                                       status="ready_to_ship", substatus=substatus))
+                self.assertTrue(allowed)
+        for row in [
+            ("custom", "drop_off", "ready_to_ship", "ready_to_print"),
+            ("me2", "fulfillment", "ready_to_ship", "ready_to_print"),
+            ("me2", "drop_off", "shipped", "printed"),
+            ("me2", "drop_off", "ready_to_ship", "pending"),
+        ]:
+            with self.subTest(row=row):
+                allowed, reason = method(NS(mode=row[0], logistic_type=row[1],
+                                            status=row[2], substatus=row[3]))
+                self.assertFalse(allowed)
+                self.assertTrue(reason)
 
 
 class TestLabelRecordAuthorization(unittest.TestCase):
