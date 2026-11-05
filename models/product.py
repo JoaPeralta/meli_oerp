@@ -3406,7 +3406,7 @@ class product_product(models.Model):
                     ML_status = rjson["status"]
                 if "permalink" in rjson:
                     ML_permalink_edit = company.get_ML_LINK_URL(meli=meli)+str("publicaciones/")+str(product.meli_id)+str("/modificar")
-                    ML_permalink_api = str("https://api.mercadolibre.com/items/")+str(product.meli_id)+str("?include_attributes=all&access_token="+str(meli and meli.access_token))
+                    ML_permalink_api = "https://api.mercadolibre.com/items/%s?include_attributes=all" % product.meli_id
                 if "error" in rjson:
                     ML_status = rjson["error"]
                 if "sub_status" in rjson:
