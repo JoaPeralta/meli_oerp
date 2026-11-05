@@ -26,13 +26,13 @@ Authority: the full user mandate in attachment `8fb4c920-9831-4e7b-ae8a-409faf38
 
 ## Stable tasks and acceptance
 
-- [ ] **A — Products and predictor:** make API links, predictor paths, returned values and diagnostics credential-free; use existing server-side Bearer authentication where needed and preserve legitimate product query behavior. Observe causal failing token/URL/log tests before the minimal correction; retain OAuth regressions.
-- [ ] **B — All label flows:** authorize each shipment/company/seller/account before fetching; use fixed-endpoint backend Bearer and private authorized binary downloads. Preserve individual, batch and automatic flows, PDF/ZPL/ZPL2 formats and printable-state behavior. Split requests at the documented maximum of 50 shipments; no mixed company/seller operation, arbitrary URL, token-keyed exposed dictionary or download-triggered commercial update. Cover denied ownership/access before network, provider failures/incomplete responses, safe errors and idempotence/no unnecessary writes.
-- [ ] **C — Image authorization:** prove actual public and authenticated access using native ORM/HTTP behavior; bind image to the specified variant/template/product and apply company/access rules. Permit anonymous access only for a legitimately public resource, refuse private/unrelated/missing/ambiguous resources conservatively, avoid identifier disclosure and preserve public `source` and multipart compatibility. No blanket login requirement or indiscriminate elevation.
-- [ ] **D — Prepared targeted sanitation:** inventory actual persistent/transient fields, wizard results and stored messages; prepare explicit administrator-only dry-run and idempotent targeted cleanup with value-safe counts and verification. Do not execute persistent writes or auto-run cleanup on install/upgrade. Preserve legitimate URLs/data/attachments/filestore and all commercial/fiscal history. Classify restart versus module upgrade versus separately authorized data operation; document residual historical log/backup exposure and a separate rotation proposal only if actual exposure is established.
+- [x] **A — Products and predictor:** make API links, predictor paths, returned values and diagnostics credential-free; use existing server-side Bearer authentication where needed and preserve legitimate product query behavior. Observe causal failing token/URL/log tests before the minimal correction; retain OAuth regressions.
+- [x] **B — All label flows:** authorize each shipment/company/seller/account before fetching; use fixed-endpoint backend Bearer and private authorized binary downloads. Preserve individual, batch and automatic flows, PDF/ZPL/ZPL2 formats and printable-state behavior. Split requests at the documented maximum of 50 shipments; no mixed company/seller operation, arbitrary URL, token-keyed exposed dictionary or download-triggered commercial update. Cover denied ownership/access before network, provider failures/incomplete responses, safe errors and idempotence/no unnecessary writes.
+- [x] **C — Image authorization:** prove actual public and authenticated access using native ORM/HTTP behavior; bind image to the specified variant/template/product and apply company/access rules. Permit anonymous access only for a legitimately public resource, refuse private/unrelated/missing/ambiguous resources conservatively, avoid identifier disclosure and preserve public `source` and multipart compatibility. No blanket login requirement or indiscriminate elevation.
+- [x] **D — Prepared targeted sanitation:** inventory actual persistent/transient fields, wizard results and stored messages; prepare explicit administrator-only dry-run and idempotent targeted cleanup with value-safe counts and verification. Do not execute persistent writes or auto-run cleanup on install/upgrade. Preserve legitimate URLs/data/attachments/filestore and all commercial/fiscal history. Classify restart versus module upgrade versus separately authorized data operation; document residual historical log/backup exposure and a separate rotation proposal only if actual exposure is established.
 - [ ] **E — Regression, native proof and review delivery:** run new causal RED/GREEN and relevant existing connector regressions; fresh disposable Odoo19/PostgreSQL tests with synthetic credentials and mocked external transport, effective public/normal-user access and exact discovery/counts. Preserve OAuth, imports, economics, A/B and stock contracts; independently review the complete candidate and record exact SHAs/modes/results/limits. Parent may commit, push and open one connector PR to the integration branch; NEVER merge without the user's approval. Odoo stage 2 stays pending until connector acceptance and merge.
 
-Checkboxes close only on observed applicable evidence, never because source exists or CI was skipped. Current A-D status: implemented/prepared locally, **not fully closed**: native ORM/HTTP acceptance and final reviewed work-unit commit are pending. E remains partial. No persistent cleanup or operational effectiveness is claimed.
+Checkboxes close only on observed applicable evidence, never because source exists or CI was skipped. **Current A-D status: complete within implemented/prepared scope and disposable native acceptance** on source commit `6875a993d9d138b628b71e045c1e78c1a11b72fd`. D means cleanup preparation and synthetic acceptance only, not persistent cleanup. **E: source verification/publication complete as draft PR77; this final documentation checkpoint still requires the parent's documentation commit and new-HEAD CI readback**, so E remains unchecked. No merge, deployed effectiveness or optional bridge integration is certified.
 
 ## TDD and exact verification routes
 
@@ -57,7 +57,7 @@ odoo -c /etc/odoo/odoo.conf -d meli_oerp_test_pr2 \
   --without-demo=all --log-level=test --stop-after-init
 ```
 
-The database/password above belong only to that disposable CI service, not HOMO. Mock every relevant external connection; a workflow comment is not a measured network fence. No usable local Odoo/PostgreSQL runtime has been established; `wsl.exe` presence alone is not runtime proof. Native RED/GREEN remains NOT_RUN until actual execution and readback.
+The database/password above belong only to that disposable CI service, not HOMO. Mock every relevant external connection; a workflow comment is not a measured network fence. No usable local Odoo/PostgreSQL runtime has been established; `wsl.exe` presence alone is not runtime proof. Local native RED remains NOT_RUN. Actual source-commit native GREEN was later observed in disposable CI; see the final publication evidence below.
 
 ## Official API constraints
 
@@ -72,11 +72,11 @@ Parent consulted these five official DevSite pages live before implementation; t
 ## Delivery, rollback and evidence
 
 - Delivery strategy: **single-pr**, explicitly requested. Forecast: approximately 1,200-1,800 authored changed lines including focused tests/docs; actual count pending. The units are cohesive security behavior with corresponding proof. 400 lines is advisory in verified VIARENGO scope, not permission to omit tests, minify, split artificially or ask a size-only approval question. Actual CI/hooks remain binding.
-- Future work-unit commits: Conventional Commits, parent-verified JoaPeralta identity; no AI attribution or Co-Authored-By. Commit/push/PR evidence is currently NOT_RUN. Repository issues are disabled and no approved issue record or absent PR template is invented.
-- Parent reports effective RDD ON/global on this root; candidate risk has NOT been assessed. This is neither review consent nor approval/receipt; no automatic grant or lifecycle execution is authorized by this tracker.
+- Work-unit source commit: `6875a993d9d138b628b71e045c1e78c1a11b72fd`, parent `bd9c10c06321d80343a41b75a6aa2268ce43b355`, tree `099c5e80c7372075f75004088c8dede01ae90b9a`; author and committer `JoaPeralta <peralta.joaquin@hotmail.com>`. Published in draft PR77; no merge. Conventional Commit, no AI attribution or Co-Authored-By. Repository issues are disabled and no approved issue record or absent PR template is invented.
+- Extra native review was explicitly declined by the user for this candidate. The exact decline invocation ran once and was validated as `action: declined`, `consent: declined_this_candidate`. There is no native review receipt or approval; the user-owned switch remains unchanged (previously ON/global). Independent functional verification and CI evidence below are not native-review authority.
 - Rollback: revert only this feature's reviewed behavior/tests/docs; retain credential-free sanitized values and existing binary/history data. Do not restore leaked tokens or execute persistent rollback/migrations without separate authority.
 - Stage 2: after accepted connector merge, obtain the final merge SHA and create a separate Odoo pin/contract PR; test the exact pair and classify rebuild/restart, module upgrade and any separately authorized sanitation. No Odoo pin/source changes now.
-- Evidence ledger: measured local cohort results are below; native fresh/HTTP/ORM NOT_RUN (7 registered native tests); independent review NOT_RUN; CI/push/PR/merge NOT_RUN; persistent cleanup NOT_RUN; no deployed runtime acceptance claimed.
+- Current evidence ledger: final independent local cohorts **89 passed, 0 failed, 0 skipped**; source-commit CI successful with all seven P0 native methods observed and zero P0 skips. Overall Odoo summary: **0 failed, 0 errors of 456 tests**, with one explicitly documented optional-bridge global skip. Source commit pushed and draft PR77 published; this documentation commit/new-HEAD CI remain pending. Extra native review declined, no receipt/approval. Merge, persistent cleanup, HOMO/production and deployed acceptance NOT_EXECUTED. Historical checkpoints below retain their original failures and pending states.
 
 ## Implementation and evidence checkpoint
 
@@ -158,6 +158,34 @@ The fresh independent verifier reproduced the optional-field defect, then rechec
 
 The parent also directly spot-checked the pre-correction 21-test cohort: **21 passed**, 11.634s. Final staged normalization/identity checks, native RDD consent, work-unit commit, PR-triggered native CI and delivery remain pending. No local runtime or deployed effectiveness is claimed.
 
+## Final source publication and CI evidence
+
+This section supersedes pending-delivery/native-GREEN statements in the historical checkpoints above without rewriting their observations. Evidence was supplied and read back by the parent; this passive documentation update performs no remote operation or runtime test.
+
+| Identity or boundary | Observed evidence |
+| --- | --- |
+| Source commit | [`6875a993d9d138b628b71e045c1e78c1a11b72fd`](https://github.com/JoaPeralta/meli_oerp/commit/6875a993d9d138b628b71e045c1e78c1a11b72fd) |
+| Parent / exact source tree | `bd9c10c06321d80343a41b75a6aa2268ce43b355` / `099c5e80c7372075f75004088c8dede01ae90b9a` |
+| Author and committer | `JoaPeralta <peralta.joaquin@hotmail.com>` |
+| Publication | [Draft PR77](https://github.com/JoaPeralta/meli_oerp/pull/77), target `codex/meli-bulk-contract`; not merged |
+| Source-commit CI | [Run42085481681, job127449301886](https://github.com/JoaPeralta/meli_oerp/actions/runs/42085481681/job/127449301886): **SUCCESS** |
+| Final independent local rerun | **89 passed, 0 failed, 0 skipped**: P0 23, multipart 17, payment 6, shipment-format 33, economic-import 10 |
+| Candidate extra native review | User declined; exact decline executed once and validated `action: declined`, `consent: declined_this_candidate`; **no receipt or approval**, switch unchanged |
+
+### Actual disposable native acceptance
+
+The source-commit CI used **Odoo19/PostgreSQL16**. Its explicit standalone cohorts passed **23 + 17 + 6**. The parent observed `Starting` lines for **all seven P0 native methods**, **zero P0 skips**, and the overall Odoo summary **`0 failed, 0 error(s) of 456 tests`**. These are actual native executions, not AST doubles or registered-but-unrun counts.
+
+There was exactly one global skip: `TestLegacyOrderNotificationResults.test_technical_actor_still_cannot_process_legacy_outcomes`, because the optional bridge actor was not installed. The skip is **not PASS**, and this CI does **not certify the optional bridge integration**. The separate statistics value **568 includes auxiliary counts** and must not be described as 568 passing test cases. Local cohort counts and CI/native summaries are separate executions, not additional distinct tests to sum.
+
+The cleanup apply test ran **only on synthetic disposable CI rows**. No persistent cleanup was executed. CI does not certify deployed database effectiveness, production/HOMO, live credentials, real API behavior or a module upgrade.
+
+### Remaining publication boundary
+
+This evidence belongs to source commit `6875a993d9d138b628b71e045c1e78c1a11b72fd`, not an unverified later HEAD. The parent still needs to mirror/read back this full task document, commit the two passive documentation updates and verify the new-HEAD CI rerun before closing E. No further functional test is required merely for writing these passive documents; structural readback and link/scope checks are the applicable local checks.
+
+The PR remains **draft and unmerged**. No Odoo pin update, stage2 implementation, persistent cleanup, HOMO or production change occurred. Stage2 waits for explicit connector acceptance and merge; real cleanup requires its separate authorization, backup/rollback and operational proof.
+
 ## Immediate next step
 
-Parent reads back this full document and candidate, refreshes/readbacks the Engram mirror, and requests the same independent verifier's focused correction recheck. Retain A-D unchecked until actual native proof/final commit acceptance; E stays partial. Follow existing native RDD consent/bindings without granting on the user's behalf. One connector PR only, never merge; stage2 remains blocked on connector acceptance/merge.
+Parent refreshes and reads back the full Engram task mirror, commits only these two publication-evidence documents, and verifies the new-HEAD CI rerun. Then reconcile E without treating draft publication or a candidate-scoped review decline as merge authority. Keep PR77 unmerged; Odoo stage2 and persistent cleanup remain outside this publication checkpoint.

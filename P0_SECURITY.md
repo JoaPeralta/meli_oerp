@@ -7,7 +7,7 @@ The connector now uses token-free product links and local, authenticated label U
 1. `models/product.py`: credential-free API permalink and predictor parameters; existing SDK translates the access-token parameter to Bearer. Reflected predictor/product responses use the existing redactor.
 2. `models/shipment.py` and `controllers/main.py`: validate the complete selection before identity/refresh/network; fixed label endpoint, private HTTP downloads, no download-triggered commercial import.
 3. `models/meli_link_cleanup.py`: prepared, narrowly scoped cleanup; no install/upgrade hook.
-4. `tests/test_p0_token_label_image.py`: source-bound synthetic evidence, **not ORM/HTTP proof**. `tests/test_p0_native_security.py`: registered native Odoo19/PostgreSQL acceptance, pending actual CI execution.
+4. `tests/test_p0_token_label_image.py`: source-bound synthetic evidence, **not ORM/HTTP proof**. `tests/test_p0_native_security.py`: all seven native Odoo19/PostgreSQL methods were actually observed in the successful source-commit CI, with zero P0 skips; see publication evidence below.
 
 ## Compatibility and conservative boundaries
 
@@ -17,7 +17,7 @@ The connector now uses token-free product links and local, authenticated label U
 - Label authorization checks native shipment/order access, active allowed company, configured Odoo seller user, stored remote seller identity, matching shipping IDs and any recorded sender. Missing/contradictory ownership fails closed before OAuth. The existing trusted identity snapshot must match the account after `get_new_instance`.
 - Supported logistics: ME2 `cross_docking`, `xd_drop_off`, `drop_off`; status `ready_to_ship`, substatus `printed` or explicitly included `ready_to_print`. Fulfillment, shipped, pending and unknown logistics are not printable through this endpoint. PDF, provider ZPL2 ZIP, plain ZPL and extracted ZPL text remain supported. ZIP content and response size are bounded; JSON/errors/truncated labels/redirects are rejected with neutral errors.
 - The existing shipment/company record rules remain unchanged. No global ACL or credential-facade privilege is granted. No `sudo()` is introduced. This correction does not certify uninstalled account extensions or unproved historical ownership; those records are rejected rather than guessed.
-- Public image reads still use native permissions without elevation. A publication flag alone never overrides an ACL denial. Template images can serve its variants; a variant-specific image cannot serve a sibling variant, even on the same template. Private/foreign/missing/unrelated resources return the same 404. Public source-URL publication and multipart uploads are retained subject to native website access; native tests must establish their effective behavior.
+- Public image reads still use native permissions without elevation. A publication flag alone never overrides an ACL denial. Template images can serve its variants; a variant-specific image cannot serve a sibling variant, even on the same template. Private/foreign/missing/unrelated resources return the same 404. Public source-URL publication and multipart uploads are retained subject to native website access. Source-commit disposable native HTTP/ORM tests passed; this does not establish behavior in a deployed database.
 
 ## Storage inventory
 
@@ -31,7 +31,7 @@ The connector now uses token-free product links and local, authenticated label U
 | Odoo `/web/content?...access_token=` capabilities | Deliberately untouched: these are unrelated attachment capabilities, not MercadoLibre OAuth credentials. |
 | Logs, backups, browser history, exports, old notifications or copied messages | Not certified clean by this operation. Investigate separately under explicit real-data authorization, without printing secrets. |
 
-## Prepared administrative operation — NOT EXECUTED
+## Prepared administrative operation — PERSISTENT CLEANUP NOT EXECUTED
 
 No persistent database was inspected or changed. Choose an explicit administrator operation, **not an automatic migration**, because remediation must be scoped, reviewed and separately authorized. There are no schema, ACL, view or manifest changes in this correction, so the new code itself requires a rebuild/restart, not an inferred module upgrade. A module upgrade does **not** run this cleanup. If later integration adds declarative/schema changes, classify those separately and require the appropriate upgrade proof.
 
@@ -52,9 +52,22 @@ Historical logs/backups are not removed. No real credential exposure has been es
 
 ## Verification and rollback
 
-Exact local commands and measured RED/GREEN counts live in `odd/tasks/p0-token-label-image.md`. Local source-bound tests intercept transport and do not certify actual ACLs, PostgreSQL, native HTTP registration or deployed behavior. The existing PR CI retains its fresh Odoo19/PostgreSQL16 installation and full module test command; a separate step explicitly discovers the standalone security cohorts. Native tests, CI and real cleanup remain pending until their actual results are read back.
+Exact local commands and measured RED/GREEN counts live in `odd/tasks/p0-token-label-image.md`. Local source-bound tests intercept transport and do not certify actual ACLs, PostgreSQL, native HTTP registration or deployed behavior. The existing PR CI retains its fresh Odoo19/PostgreSQL16 installation and full module test command; a separate step explicitly discovers the standalone security cohorts. Actual source-commit native CI evidence is recorded below. Persistent cleanup remains unexecuted, and CI for the subsequent documentation HEAD must still be read back separately.
 
-Rollback the reviewed feature code/tests/docs as one coherent unit; do not restore exposed credentials into sanitized links. Preserve existing binaries/history. No Odoo pin changes, push/PR/merge, HOMO or production operation is part of this writer's work. Stage 2 waits for connector acceptance/merge and tests the exact Odoo/connector pair.
+Rollback the reviewed feature code/tests/docs as one coherent unit; do not restore exposed credentials into sanitized links. Preserve existing binaries/history. The parent published the source commit in draft PR77. No merge, Odoo pin change, persistent cleanup, HOMO or production operation has been performed. Stage 2 waits for connector acceptance/merge and tests the exact Odoo/connector pair.
+
+## Source publication and measured acceptance
+
+- **Source:** [`6875a993d9d138b628b71e045c1e78c1a11b72fd`](https://github.com/JoaPeralta/meli_oerp/commit/6875a993d9d138b628b71e045c1e78c1a11b72fd), parent `bd9c10c06321d80343a41b75a6aa2268ce43b355`, exact tree `099c5e80c7372075f75004088c8dede01ae90b9a`. Author and committer: `JoaPeralta <peralta.joaquin@hotmail.com>`.
+- **Publication:** [Draft PR77](https://github.com/JoaPeralta/meli_oerp/pull/77) targets `codex/meli-bulk-contract`; **not merged**. Odoo stage2/pin changes remain pending connector acceptance and merge.
+- **Independent local verification:** **89 passed, 0 failed, 0 skipped**, cohorts **23/17/6/33/10**. Preserve earlier RED and fixture failures in the task ledger rather than rewriting them.
+- **Actual source-commit CI:** [Run42085481681, job127449301886](https://github.com/JoaPeralta/meli_oerp/actions/runs/42085481681/job/127449301886) **SUCCESS**. Standalone cohorts **23 + 17 + 6** passed. Odoo19/PostgreSQL16 logs showed all **seven P0 native methods** starting, **zero P0 skips**, and overall **`0 failed, 0 error(s) of 456 tests`**.
+- **One global skip:** `TestLegacyOrderNotificationResults.test_technical_actor_still_cannot_process_legacy_outcomes`; its optional bridge actor was not installed. This is not PASS and does not certify the optional bridge integration. Statistics value **568 includes auxiliary counts**, not 568 passing test cases; do not add separate local/CI executions into a distinct-test total.
+- **Review authority:** the user declined extra native review; the exact decline ran once and validated `action: declined`, `consent: declined_this_candidate`. No native receipt or approval was produced, and the review switch was unchanged.
+
+Cleanup apply acceptance used **synthetic disposable CI data only**. No persistent cleanup, deployment, HOMO/production operation or real-credential rotation was executed. Passing CI does not prove deployed database effectiveness or an upgrade. Historical protected API links still need authorized Print/local-binary regeneration after sanitation, as described above.
+
+The successful CI belongs to the identified **source commit**. The parent must commit these passive documentation updates and verify the **new-HEAD CI rerun** before final publication bookkeeping is complete. This update itself requires only structural readback/link/scope checks, not another application test run.
 
 ## Official references
 
