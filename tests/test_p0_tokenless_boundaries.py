@@ -234,12 +234,17 @@ class FakeRecord:
             raise AccessError("not readable")
 
 
+class EmptyRecord:
+    def exists(self):
+        return False
+
+
 class Lookup:
     def __init__(self, records):
         self.records = records
 
     def browse(self, rid):
-        return self.records.get(rid)
+        return self.records.get(rid) or EmptyRecord()
 
 
 class ImageRequest:
