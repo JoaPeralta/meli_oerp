@@ -859,9 +859,8 @@ class product_template(models.Model):
             'price': self.get_price_for_category_predictor(),
         }]
         #response = meli.post("/sites/"+self.env.user.company_id._get_ML_sites()+"/category_predictor/predict", vals)
-        url = "/sites/"+self.env.user.company_id._get_ML_sites()+"/domain_discovery/search?q="+self.get_title_for_category_predictor()+"&access_token="+str(meli.access_token)
-        _logger.info(url)
-        response = meli.get(url)
+        url = "/sites/" + self.env.user.company_id._get_ML_sites() + "/domain_discovery/search"
+        response = meli.get(url, {"access_token": meli.access_token, "q": self.get_title_for_category_predictor()})
         rjson = response.json()
         meli_categ = self.env['mercadolibre.category'].sudo()
         _logger.info(rjson)
