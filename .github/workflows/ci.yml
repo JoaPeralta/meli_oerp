@@ -70,6 +70,11 @@ jobs:
           ln -sfn "$GITHUB_WORKSPACE/meli_oerp" /mnt/extra-addons/meli_oerp
           ls -l /mnt/extra-addons/
 
+      - name: Test tokenless P0 boundaries (hermetic, no credentials)
+        run: |
+          python3 -m unittest discover -s meli_oerp/tests \
+            -p test_p0_tokenless_boundaries.py -v
+
       # Fresh disposable database, install the module and run its tests.
       # Odoo returns a non-zero exit code on test failure with --stop-after-init,
       # so a failing test turns the CI red.
