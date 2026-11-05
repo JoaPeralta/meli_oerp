@@ -545,7 +545,6 @@ class mercadolibre_shipment(models.Model):
     ], compute='_compute_handling_limit_status', store=False,
        string="Estado límite despacho")
 
-    @api.depends('estimated_handling_limit', 'estimated_buffering_date')
     def _meli_check_label_scope(self, config=None):
         """Read-only scope check before acquiring tokens or shipping labels."""
         self.ensure_one()
@@ -621,6 +620,7 @@ class mercadolibre_shipment(models.Model):
             raise ValidationError("MercadoLibre devolvió un formato de etiqueta inesperado.")
         return response.content
 
+    @api.depends('estimated_handling_limit', 'estimated_buffering_date')
     def _compute_handling_limit_status(self):
         now = fields.Datetime.now()
         for rec in self:
