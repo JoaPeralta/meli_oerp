@@ -256,9 +256,14 @@ class ImageRequest:
             self.image.product_tmpl_id = FakeRecord()
         env = {"product.product": Lookup({10: self.product}),
                "product.image": Lookup({22: self.image})}
-        self.env = NS(**{"_map": env, "user": NS(_is_public=lambda: public),
-                         "companies": [self.company]})
-        self.env.__class__.__getitem__ = lambda that, key: that._map[key]
+        class Environment:
+            user = NS(_is_public=lambda: public)
+            companies = [self.company]
+
+            def __getitem__(self, name):
+                return env[name]
+
+        self.env = Environment()
         self.website = None
         self.make_response = lambda content, headers: NS(status_code=200, content=content,
                                                           headers=headers)
