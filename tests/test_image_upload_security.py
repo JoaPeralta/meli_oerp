@@ -380,9 +380,9 @@ class TestImageUploadSecurity(unittest.TestCase):
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ("upload", "uploadfiles"):
                     if not (path.name == "meli_util.py" and isinstance(node.func.value, ast.Name) and node.func.value.id == "self"):
                         calls.append((path.relative_to(ROOT).as_posix(), node.lineno, node.func.attr))
-        self.assertEqual(sorted(calls), [("models/product.py", 573, "upload"),
-                                ("models/product.py", 3204, "upload"),
-                                ("models/product.py", 3311, "upload")])
+        # A harmless import or earlier edit must not invalidate the inventory oracle.
+        self.assertEqual([(path, operation) for path, line, operation in sorted(calls)],
+                         [("models/product.py", "upload")] * 3)
 
 
 if __name__ == "__main__":

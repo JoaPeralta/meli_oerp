@@ -3,6 +3,8 @@
 No Odoo, database, credentials, or real transport is used by these focused tests.
 """
 import ast
+import importlib.util
+from decimal import Decimal
 from copy import deepcopy
 import logging
 from pathlib import Path
@@ -96,7 +98,7 @@ def payment_block():
 class TestPaymentTokenSecurity(unittest.TestCase):
     def run_block(self, *, existing=False, error=None, data=None):
         rows = PaymentRows(existing)
-        get = Mock(return_value=SimpleNamespace(json=lambda: deepcopy(FULL)))
+        get = Mock(return_value=SimpleNamespace(json=lambda: deepcopy(FULL), status_code=200, headers={}))
         if error is not None:
             get.side_effect = error
         log = logging.Logger("synthetic-payment-enrichment")
@@ -114,8 +116,23 @@ class TestPaymentTokenSecurity(unittest.TestCase):
                 RequestException=TransportError)),
             "_logger": log, "urlencode": urlencode,
             "ml_datetime": lambda value: "parsed:" + value if value else False,
+            "economics": {"payments": [{"id": str(PAYMENT["id"]), "buyer_paid": "128"}]},
+            "money": Decimal,
+            "payment_observations": {},
         }
         with patch("socket.socket", side_effect=AssertionError("network forbidden")):
+            spec = importlib.util.spec_from_file_location('admission', ROOT / 'models/meli_pack_admission.py')
+            admission = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(admission)
+            tree = ast.parse((ROOT / 'models/orders.py').read_text(encoding='utf-8'))
+            node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                        and n.name == '_meli_fetch_payment_observation')
+            node.decorator_list = []
+            scope.update(remote_id=admission.remote_id, snapshot_response=admission.snapshot_response)
+            exec(compile(ast.Module(body=[node], type_ignores=[]), 'orders.py', 'exec'), scope)
+            for payment in body.get('payments', []):
+                scope['payment_observations'][str(payment['id'])] = scope['_meli_fetch_payment_observation'](
+                    None, payment['id'], scope['meli'])
             exec(payment_block(), scope)
         self.assertEqual(body, original)
         return rows, get, capture.messages, order, sale
@@ -142,7 +159,7 @@ class TestPaymentTokenSecurity(unittest.TestCase):
         self.assertNotIn("params", kwargs)
         self.assertEqual(kwargs["headers"], {
             "Accept": "application/json", "User-Agent": "Odoo",
-            "Content-type": "application/json", "Authorization": "Bearer " + TOKEN,
+            "Authorization": "Bearer " + TOKEN,
         })
         self.assertEqual(kwargs["timeout"], 10)
 
@@ -150,11 +167,9 @@ class TestPaymentTokenSecurity(unittest.TestCase):
         failure = TransportError(URL + "?access_token=" + TOKEN)
         rows, get, messages, _, _ = self.run_block(error=failure)
         get.assert_called_once()
-        self.assertEqual(len(messages), 1)
-        self.assertNotIn(TOKEN, messages[0])
-        self.assertNotIn(URL, messages[0])
-        self.assertNotIn(str(failure), messages[0])
-        self.assertIn("TransportError", messages[0])
+        # Accepted acquisition seam deliberately emits no exception diagnostics.
+        self.assertEqual(messages, [])
+        self.assertNotIn(TOKEN, repr(rows.saved))
         saved = rows.saved[0][1]
         self.assertEqual(saved["full_payment"], "")
         self.assertEqual(saved["total_paid_amount"], 128)

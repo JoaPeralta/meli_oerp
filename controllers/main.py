@@ -7,7 +7,7 @@ from odoo import http, api
 
 from odoo import fields, http
 from odoo.http import Controller, Response, request, route
-from odoo.exceptions import AccessError
+from odoo.exceptions import AccessError, MissingError, ValidationError
 from werkzeug.exceptions import ClientDisconnected, RequestEntityTooLarge
 try:
     from odoo.http import content_disposition
@@ -144,27 +144,67 @@ class MercadoLibre(http.Controller):
         #else:
         return ""
 
-    @http.route('/meli/image/<int:product_id>', type='http', auth="public")
-    @http.route('/meli/image/<int:product_id>/<int:image_id>', type='http', auth="public")
+    def _authorized_image(self, product_id, image_id=None):
+        product = request.env["product.product"].browse(product_id).exists()
+        if not product:
+            raise AccessError("Image unavailable")
+        product.check_access("read")
+        template = product.product_tmpl_id
+        template.check_access("read")
+        if template.company_id and template.company_id not in request.env.companies:
+            raise AccessError("Image unavailable")
+        # Anonymous and portal callers require proven website publication, not just ACLs.
+        if not request.env.user._is_internal():
+            website = request.env["website"].get_current_website()
+            if (not template.is_published or not template.sale_ok
+                    or (template.website_id and template.website_id != website)
+                    or (template.company_id and template.company_id != website.company_id)):
+                raise AccessError("Image unavailable")
+        image = product
+        if image_id is not None:
+            image = request.env["product.image"].browse(image_id).exists()
+            if not image:
+                raise AccessError("Image unavailable")
+            image.check_access("read")
+            # Variant images belong ONLY to that variant, even on the same template.
+            if ((image.product_variant_id and image.product_variant_id != product)
+                    or (not image.product_variant_id and image.product_tmpl_id != template)
+                    or (image.product_tmpl_id and image.product_tmpl_id != template)):
+                raise AccessError("Image unavailable")
+        return image
+
+    @http.route(['/meli/image/<int:product_id>', '/meli/image/<int:product_id>/<int:image_id>'],
+                type='http', auth="public", methods=['GET'])
     def meli_image(self, product_id, image_id=None, **kw):
+        try:
+            image = self._authorized_image(product_id, image_id)
+            encoded = get_image_full(image)
+            if not encoded:
+                return request.not_found()
+            filecontent = base64.b64decode(encoded)
+        except (AccessError, MissingError):
+            return request.not_found()
+        return request.make_response(filecontent, [
+            ('Content-Type', 'application/octet-stream'),
+            ('Content-Disposition', content_disposition('meli_image_%s' % product_id)),
+            ('Cache-Control', 'private, no-store'), ('X-Content-Type-Options', 'nosniff')])
 
-        #browse and read image data to browser
-        product = request.env["product.product"].browse(int(product_id))
-
-        if image_id:
-            filename = '%s_%s' % ("product.image".replace('.', '_'), str(product_id)+str("_")+str(image_id))
-            product_image = request.env["product.image"].browse( int(image_id) )
-            if product_image:
-                filecontent = base64.b64decode( get_image_full( product_image ) )
-            else:
-                return ""
-        else:
-            filename = '%s_%s' % ("meli.image".replace('.', '_'), product_id)
-            filecontent = base64.b64decode( get_image_full( product ) )
-
-        return request.make_response(filecontent,
-                                     [('Content-Type', 'application/octet-stream'),
-                                      ('Content-Disposition', content_disposition(filename))])
+    @http.route('/meli/labels/<string:shipment_ids>', type='http', auth='user', methods=['GET'])
+    def meli_labels(self, shipment_ids, mode='pdf', **kw):
+        # Only local shipment IDs and an enumerated format; no model/method/URL proxy.
+        try:
+            ids = shipment_ids.split(',')
+            if (not ids or len(ids) > 50 or any(not value.isascii() or not value.isdecimal()
+                    or len(value) > 10 or not 0 < int(value) <= 2147483647 for value in ids)):
+                return request.not_found()
+            records = request.env['mercadolibre.shipment'].browse(list(dict.fromkeys(int(value) for value in ids)))
+            data, filename, mimetype = records._label_binary(mode)
+        except (AccessError, MissingError):
+            return request.not_found()
+        except ValidationError:
+            return Response("Label download unavailable", status=502, content_type='text/plain',
+                            headers=[('Cache-Control', 'no-store')])
+        return request.make_response(data, _get_headers(filename, mimetype, data) + [('Cache-Control', 'private, no-store')])
 
 
 class MercadoLibreLogin(http.Controller):

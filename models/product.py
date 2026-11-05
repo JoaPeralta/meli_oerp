@@ -42,6 +42,7 @@ MELI_IMAGE_DOWNLOAD_TIMEOUT = 20
 from datetime import datetime
 
 from .meli_oerp_config import *
+from .meli_util import _meli_upload_payload
 
 #from ..melisdk.meli import Meli
 import string
@@ -859,13 +860,11 @@ class product_template(models.Model):
             'price': self.get_price_for_category_predictor(),
         }]
         #response = meli.post("/sites/"+self.env.user.company_id._get_ML_sites()+"/category_predictor/predict", vals)
-        url = "/sites/"+self.env.user.company_id._get_ML_sites()+"/domain_discovery/search?q="+self.get_title_for_category_predictor()+"&access_token="+str(meli.access_token)
-        _logger.info(url)
-        response = meli.get(url)
-        rjson = response.json()
+        url = "/sites/" + self.env.user.company_id._get_ML_sites() + "/domain_discovery/search"
+        response = meli.get(url, {"q": self.get_title_for_category_predictor(),
+                                  "access_token": meli.access_token})
+        rjson = _meli_upload_payload(response.json(), meli.access_token)
         meli_categ = self.env['mercadolibre.category'].sudo()
-        _logger.info(rjson)
-        _logger.info(isinstance(rjson, list))
         # FIX #532 (perf): SÓLO sugerir. Limitamos a las 3 primeras opciones de domain_discovery
         # e importamos en modo LIVIANO (predict_only=True): id+nombre, sin atributos ni árbol.
         # La hidratación completa (atributos/chart) se hace al SELECCIONAR (wizard.apply_category).
@@ -3401,12 +3400,12 @@ class product_product(models.Model):
         for product in self:
             if product.meli_id and meli and not meli.need_login():
                 response = meli.get("/items/"+product.meli_id, {'access_token':meli.access_token} )
-                rjson = response.json()
+                rjson = _meli_upload_payload(response.json(), meli.access_token)
                 if "status" in rjson:
                     ML_status = rjson["status"]
                 if "permalink" in rjson:
                     ML_permalink_edit = company.get_ML_LINK_URL(meli=meli)+str("publicaciones/")+str(product.meli_id)+str("/modificar")
-                    ML_permalink_api = str("https://api.mercadolibre.com/items/")+str(product.meli_id)+str("?include_attributes=all&access_token="+str(meli and meli.access_token))
+                    ML_permalink_api = str("https://api.mercadolibre.com/items/")+str(product.meli_id)+str("?include_attributes=all")
                 if "error" in rjson:
                     ML_status = rjson["error"]
                 if "sub_status" in rjson:
