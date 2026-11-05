@@ -147,6 +147,69 @@ def label_scope():
                   {"AccessError": AccessError, "ValidationError": ValidationError})
 
 
+class TestGroupedLabelWorkflows(unittest.TestCase):
+    def test_split_into_50_and_respect_printed_and_ready_filter(self):
+        company = NS(id=3, mercadolibre_seller_user=NS(id=7))
+        config = NS(
+            mercadolibre_shipment_print_guide_mode="pdf",
+            _fields={"mercadolibre_shipment_print_guide_mode"},
+        )
+        shipments = {}
+        for i in range(53):
+            status = "printed" if i < 51 else "ready_to_print"
+            row = NS(
+                id=i + 1, shipping_id=str(i + 100),
+                status="ready_to_ship", substatus=status,
+                _meli_check_label_scope=lambda config, co=company: co,
+                can_print_label=lambda: (True, ""),
+            )
+            shipments[row.id] = row
+
+        fetched, exports = [], []
+
+        class Batch(Group):
+            def _meli_fetch_label_bytes(self, **kwargs):
+                fetched.append((len(self.shipments), kwargs["print_mode"]))
+                return b"%PDF-1.4\nsynthetic"
+
+        class Model:
+            def browse(self, identity):
+                if isinstance(identity, list):
+                    return Batch([shipments[i] for i in identity])
+                return shipments[identity]
+
+        model = Model()
+        wizard = NS(
+            env={"mercadolibre.shipment": model},
+            _meli_export_label_batch=lambda data, fmt, ids: (
+                exports.append((data, fmt, tuple(ids)))
+                or "/web/content?batch=" + ids[0]
+            ),
+        )
+        method = actual("models/shipment.py", "mercadolibre_shipment_print",
+                        "_get_shipment_labels_data",
+                        {"AccessError": AccessError, "ValidationError": ValidationError})
+        result = method(
+            wizard, shipment_ids=list(shipments), config=config,
+            include_ready_to_print=False
+        )
+        self.assertEqual(fetched, [(50, "pdf"), (1, "pdf")])
+        self.assertEqual(len(result["shipments_status"]["not_ready"]), 2)
+        self.assertEqual(len(exports), 2)
+        self.assertEqual(len(result["by_account"]["3:7"]["urls"]), 2)
+
+        fetched.clear()
+        exports.clear()
+        result = method(
+            wizard, shipment_ids=list(shipments), config=config,
+            include_ready_to_print=True
+        )
+        self.assertEqual(fetched, [(50, "pdf"), (3, "pdf")])
+        self.assertEqual(len(result["shipments_status"]["ready"]), 53)
+        self.assertEqual(len(exports), 2)
+        self.assertNotIn(TOKEN, json.dumps(result))
+
+
 class TestOfficialPrintableStates(unittest.TestCase):
     def test_me2_logistics_state_and_print_reprints(self):
         method = actual("models/shipment.py", "mercadolibre_shipment",
