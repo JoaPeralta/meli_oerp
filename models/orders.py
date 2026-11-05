@@ -6008,8 +6008,9 @@ class mercadolibre_orders(models.Model):
                 url = "https://api.mercadopago.com/v1/payments/" + str(pay.payment_id)
                 try:
                     resp = requests.get(
-                        url, params=urlencode({'access_token': _meli.access_token}),
-                        headers={'Accept': 'application/json', 'User-Agent': 'Odoo'}, timeout=10)
+                        url,
+                        headers={'Accept': 'application/json', 'User-Agent': 'Odoo',
+                                 'Authorization': 'Bearer ' + _meli.access_token}, timeout=10)
                 except Exception as e:
                     _logger.warning("MELI _ensure_payment_shipping_amounts: re-consulta MP del pago %s falló: %s", pay.payment_id, e)
                     continue
