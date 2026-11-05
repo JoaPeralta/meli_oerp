@@ -7,7 +7,7 @@ The connector now uses token-free product links and local, authenticated label U
 1. `models/product.py`: credential-free internal API resource URL and predictor parameters; existing SDK translates the access-token parameter to Bearer. Reflected responses use the existing redactor. `views/product_view.xml` removes the two unusable protected API URL widgets and retains the existing public `meli_permalink` Link; no new proxy or commercial import action.
 2. `models/shipment.py` and `controllers/main.py`: validate the complete selection before identity/refresh/network; fixed label endpoint, private HTTP downloads, no download-triggered commercial import.
 3. `models/meli_link_cleanup.py`: prepared, narrowly scoped cleanup; no install/upgrade hook.
-4. `tests/test_p0_token_label_image.py`: source-bound synthetic evidence, **not ORM/HTTP proof**. The previous seven native methods passed on the prior source commit. The human-reviewed compatibility correction expands this to **11 registered native methods**, including default-wizard and returned-auto-URL HTTP downloads and effective product views; new-candidate native CI is **PENDING**, not covered by the older result.
+4. `tests/test_p0_token_label_image.py`: source-bound synthetic evidence, **not ORM/HTTP proof**. The previous seven native methods passed on the prior source commit. The compatibility code commit now has actual successful CI evidence for **all 11 P0 native methods**, including default-wizard and returned-auto-URL HTTP downloads, Flex/Full and effective product views; see the committed-code acceptance checkpoint below. Older seven-method results remain historical.
 
 ## Compatibility and conservative boundaries
 
@@ -26,7 +26,7 @@ The connector returns **relative URLs**, not anonymous MercadoLibre download lin
 
 Before printing, the consumer must handle login-required responses (redirect or 401/403) without treating login HTML as label data, and handle a neutral 404 as denied/unavailable rather than retrying anonymously. Validate the expected PDF or ZPL/ZIP content; use existing approved session renewal/login handling. Never put provider tokens in URLs, pass them to JavaScript/RPC, or forward Odoo cookies/provider credentials to another origin.
 
-A bounded scan of readable connector `.py`, `.js` and `.xml` sources found only the wrapper/helper and local label route; the same-name/URL scan of the canonical local Odoo source found **no actual automatic print consumer**. No uninstalled external extension/service was inspected or changed, and historical worktrees with unavailable access are not certified. Native tests now exercise `_get_labels_urls_auto_print()` output through real authenticated local HTTP for PDF/ZPL, with anonymous/unauthorized denial; these new tests are **PENDING CI**. Even a passing connector HTTP test does not certify an absent external consumer. Its origin/session/login-response integration remains an explicit external dependency requiring separate evidence/authorization, not an assumed compatibility claim.
+A bounded scan of readable connector `.py`, `.js` and `.xml` sources found only the wrapper/helper and local label route; the same-name/URL scan of the canonical local Odoo source found **no actual automatic print consumer**. No uninstalled external extension/service was inspected or changed, and historical worktrees with unavailable access are not certified. Native tests now exercise `_get_labels_urls_auto_print()` output through real authenticated local HTTP for PDF/ZPL, with anonymous/unauthorized denial; all these connector tests passed on the identified compatibility commit CI. Even a passing connector HTTP test does not certify an absent external consumer. Its origin/session/login-response integration remains an explicit external dependency requiring separate evidence/authorization, not an assumed compatibility claim.
 
 ## Storage inventory
 
@@ -69,7 +69,7 @@ Rollback the reviewed feature code/tests/docs as one coherent unit; do not resto
 
 ## Prior candidate publication and measured acceptance
 
-The evidence below is historical and belongs to the earlier security candidate. It does **not** certify the new compatibility edits, their XML upgrade or an absent automatic consumer. New-candidate verification/publication remains parent-owned and pending.
+The evidence below is historical and belongs to the earlier security candidate. It does **not** certify the new compatibility edits, their XML upgrade or an absent automatic consumer. Compatibility-commit verification/publication is recorded separately below; historical counts are not inherited.
 
 - **Source:** [`6875a993d9d138b628b71e045c1e78c1a11b72fd`](https://github.com/JoaPeralta/meli_oerp/commit/6875a993d9d138b628b71e045c1e78c1a11b72fd), parent `bd9c10c06321d80343a41b75a6aa2268ce43b355`, exact tree `099c5e80c7372075f75004088c8dede01ae90b9a`. Author and committer: `JoaPeralta <peralta.joaquin@hotmail.com>`.
 - **Publication:** [Draft PR77](https://github.com/JoaPeralta/meli_oerp/pull/77) targets `codex/meli-bulk-contract`; **not merged**. Odoo stage2/pin changes remain pending connector acceptance and merge.
@@ -81,6 +81,17 @@ The evidence below is historical and belongs to the earlier security candidate. 
 Cleanup apply acceptance used **synthetic disposable CI data only**. No persistent cleanup, deployment, HOMO/production operation or real-credential rotation was executed. Passing CI does not prove deployed database effectiveness or an upgrade. Historical protected API links still need authorized Print/local-binary regeneration after sanitation, as described above.
 
 The successful CI above belongs only to the identified historical source commit. The later reviewed baseline was `4f95ad35dc594da236afe714be707dbae2154368`. The new compatibility correction requires its own local regression evidence, independent verification, same-draft-PR commit/push and final-HEAD native CI before acceptance; none is inherited from an earlier green run. Merge, Odoo pin changes and deployed upgrade/cleanup remain separate decisions.
+
+## Compatibility code-commit acceptance checkpoint
+
+- **Identity:** [`ae0c2d5de0c6954664b66c6fb71457d430028a4c`](https://github.com/JoaPeralta/meli_oerp/commit/ae0c2d5de0c6954664b66c6fb71457d430028a4c), parent `4f95ad35dc594da236afe714be707dbae2154368`, tree `049bb0713d64dd1b83eb9ac8454ffebbbe3f100d`; author and committer `JoaPeralta <peralta.joaquin@hotmail.com>`. Same [draft PR77](https://github.com/JoaPeralta/meli_oerp/pull/77), unmerged.
+- **Observed acceptance:** writer and independent verifier **94 passed, 0 failed, 0 skipped** (28/17/6/33/10); parent spot check **28 passed**, 12.252s. [CI42094445398/job127480715979](https://github.com/JoaPeralta/meli_oerp/actions/runs/42094445398/job/127480715979) **SUCCESS**, 3m36s, on that exact code commit: standalone **28/17/6**, all **11 P0 native methods** starting with **zero P0 skips**, Odoo19/PostgreSQL16 summary **`0 failed, 0 error(s) of 460 tests`**. Local/CI executions are not additive distinct cases.
+- **One global skip:** `TestLegacyOrderNotificationResults.test_technical_actor_still_cannot_process_legacy_outcomes`, absent optional bridge actor; **not PASS**, no optional-extension certification. The real external automatic consumer remains unlocated/unverified; no outside integration was implemented or certified.
+- **Native review unavailable, not approved:** committed assessment/status failed `pre_native` with temporary-index Access denied, `mutation_not_started` / `authority_not_evaluated`. No START, consent envelope, approval or receipt; no ACL/config/permission bypass. The previous candidate's decline was never reused. Explicitly authorized draft publication and independent verification are ordinary evidence, not native PASS.
+
+Fresh-install CI verifies combined views only in a disposable database: **MODULE UPGRADE REQUIRED** and real deployed-view proof remain mandatory. Synthetic cleanup acceptance is not persistent cleanup. No merge, pin, HOMO/production, deployed upgrade or live credential operation occurred. F/G and code publication/CI close in this bounded scope; automatic-consumer integration remains partial.
+
+This checkpoint records the tested **code commit**. The parent will commit these passive evidence updates and check the documentation HEAD's CI separately; that later result is **not yet claimed PASS**. No additional application test is required for this passive reconciliation, only structural readback/link/scope checks; do not generate an endless chain of self-stamping documents.
 
 ## Official references
 
