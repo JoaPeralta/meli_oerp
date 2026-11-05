@@ -70,6 +70,14 @@ jobs:
           ln -sfn "$GITHUB_WORKSPACE/meli_oerp" /mnt/extra-addons/meli_oerp
           ls -l /mnt/extra-addons/
 
+      # Source-bound cohorts are ordinary unittest classes, not native tagged cases.
+      - name: Run focused standalone security regressions
+        run: |
+          cd meli_oerp
+          python3 -I -B -X utf8 -m unittest discover -s tests -p 'test_p0_token_label_image.py' -v
+          python3 -I -B -X utf8 -m unittest discover -s tests -p 'test_image_upload_security.py' -v
+          python3 -I -B -X utf8 -m unittest discover -s tests -p 'test_payment_token_security.py' -v
+
       # Fresh disposable database, install the module and run its tests.
       # Odoo returns a non-zero exit code on test failure with --stop-after-init,
       # so a failing test turns the CI red.
