@@ -6011,8 +6011,8 @@ class mercadolibre_orders(models.Model):
                         url,
                         headers={'Accept': 'application/json', 'User-Agent': 'Odoo',
                                  'Authorization': 'Bearer ' + _meli.access_token}, timeout=10)
-                except Exception as e:
-                    _logger.warning("MELI _ensure_payment_shipping_amounts: re-consulta MP del pago %s falló: %s", pay.payment_id, e)
+                except requests.exceptions.RequestException:
+                    _logger.warning("MELI _ensure_payment_shipping_amounts: fallo de transporte en reconsulta del pago %s (sin detalles sensibles)", pay.payment_id)
                     continue
                 if resp is not None and resp.ok:
                     try:
