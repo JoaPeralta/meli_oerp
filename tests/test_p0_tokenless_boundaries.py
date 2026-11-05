@@ -163,6 +163,7 @@ class TestGroupedLabelWorkflows(unittest.TestCase):
                 _meli_check_label_scope=lambda config, co=company: co,
                 can_print_label=lambda: (True, ""),
             )
+            row.exists = lambda rec=row: rec
             shipments[row.id] = row
 
         fetched, exports = [], []
