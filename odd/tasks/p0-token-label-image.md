@@ -189,3 +189,85 @@ The PR remains **draft and unmerged**. No Odoo pin update, stage2 implementation
 ## Immediate next step
 
 Parent refreshes and reads back the full Engram task mirror, commits only these two publication-evidence documents, and verifies the new-HEAD CI rerun. Then reconcile E without treating draft publication or a candidate-scoped review decline as merge authority. Keep PR77 unmerged; Odoo stage2 and persistent cleanup remain outside this publication checkpoint.
+
+## PR77 human compatibility review (2026-11-05)
+
+Authority: the user reviewed final HEAD `4f95ad35dc594da236afe714be707dbae2154368` and authorized bounded corrections, causal RED/GREEN, relevant local tests, full native CI, commit and push to this same draft PR. No merge, Odoo pin, HOMO, production, live credentials, permission expansion or outside integration changes. The earlier final-HEAD CI succeeded (run42086894338); historical E publication was completed, with the optional bridge case explicitly skipped. Earlier native-review decline covered only the previous candidate, not new code.
+
+Resume baseline: clean `codex/p0-token-label-image` at the reviewed SHA; verified common directory matches canonical connector. TDD remains ON by explicit human request. Runner remains the exact Python3.12 `-I -B -X utf8 -m unittest discover -s tests -p '<cohort>' -v` recorded above. Native Odoo/PostgreSQL proof uses existing disposable PR CI, not HOMO. Local unavailable-native evidence remains valid.
+
+- [ ] **F — Label compatibility:** causal tests for official ME2 `self_service` and rejected Fulfillment; restore default wizard first-print `ready_to_ship/ready_to_print` and preserve reprints without blindly inverting the distinct automatic-selection flag. Add actual native default wizard creation/button-to-download test with a normal authorized user. Official source: [Mercado Envios2](https://developers.mercadolibre.com.ar/es_ar/mercadoenvios-modo-2), fetched today, includes self_service and first/reprint states. Keep all account/access/Bearer/max50 constraints.
+- [ ] **G — Product browser link:** prove why a credential-free protected API URL is not a usable URL-widget action and reuse the existing public permalink or a minimal authenticated equivalent. Do not reuse an import action that mutates commercial data or expose credentials in URLs/JS/RPC. Declare XML/module upgrade impact if the correction changes a view.
+- [ ] **H — Automatic consumer boundary:** identify real callers in the connector and authorized local related source, preserve legacy selection semantics, and exercise returned URLs through authenticated native HTTP (including unauthenticated/unauthorized denial). Record any unavailable extension/service, origin/session dependency and required external changes precisely; do not certify absent consumers or broaden their authority.
+- [ ] **I — Verification and same-PR publication:** run relevant local cohorts, independent scope/security regression verification, and full native CI on final HEAD; Conventional Commit(s) with JoaPeralta identity and no attribution. Keep PR77 draft. Record skipped/unavailable proof, actual SHAs, upgrade classification and external dependencies; no merge/pin/runtime operations.
+
+One cohesive compatibility correction to the existing security unit, tests and docs together. Size remains advisory; no artificial chain/refactor. Rollback only the new bounded compatibility commit(s), never reintroduce URL credentials. Initial evidence: concrete default-report first-print regression confirmed by comparing bd9c10c; current native test passes True explicitly and misses the actual default wizard. API resource link utility not demonstrated; existing public permalink is available. No actual auto-print consumer found in initially inspected connector/Odoo roots; some historical related worktrees were unreadable, so consumer compatibility is not yet certified. Parent must mirror/read back this updated tracker before application source writes.
+
+
+## Human compatibility correction implementation checkpoint
+
+Baseline `4f95ad35dc594da236afe714be707dbae2154368`; same draft PR77 and verified linked root. Parent mirrored F-I before the first application edit. Earlier A-E implementation/publication evidence and all historical RED/failures above remain intact; they do not certify this new candidate.
+
+### F — Implemented locally; new native acceptance pending
+
+The actual eligibility predicate now includes official ME2 `self_service` (Flex) alongside `drop_off`, `xd_drop_off` and `cross_docking`, and still rejects Fulfillment, non-ME2, unavailable states and unknown logistics. The parent fetched the official [Mercado Envios2](https://developers.mercadolibre.com.ar/es_ar/mercadoenvios-modo-2) page on 2026-11-05 (page updated 2026-07-06) and supplied that constraint; this writer made no external API/documentation request.
+
+Availability is separated from selection. Explicit manual Print (including the actual default false-valued wizard) and individual printing permit valid `ready_to_print` first prints and `printed` reprints. Automatic selection preserves the distinct legacy meaning: unprinted first prints by default, printed only when `include_ready_to_print=True`. No flag was blindly inverted globally. Complete selection authorization still precedes any client/network work; Bearer, neutral errors, identity/company/seller checks, max50 batches, private binaries and no commercial update remain unchanged.
+
+### G — Existing public link retained; XML upgrade required
+
+Removed exactly two `meli_permalink_api` URL-widget declarations from `views/product_view.xml`; the existing public `meli_permalink` Link remains in both views. The token-free resource URL can remain internal, but a protected API requiring Bearer is no longer offered as a browser action. No import/commercial action, authenticated proxy, OAuth protocol, RPC/JavaScript credential or permission expansion was introduced.
+
+**MODULE UPGRADE REQUIRED:** these are installed `ir.ui.view` record changes. Rebuild/restart alone is insufficient; an authorized `meli_oerp` module upgrade and real-user effective-view readback are required. The new native test checks both effective combined product views and the existing public permalink on a disposable installed database; it has not run locally and does not prove a deployed database upgrade. No schema/ACL/dependency/migration hook changed, and no upgrade or persistent cleanup was executed.
+
+### H — Connector contract exercised in tests; absent consumer not certified
+
+The bounded `.py`/`.js`/`.xml` scan found only the connector wrapper/helper and local label route; no actual automatic-print caller was found in readable connector or canonical local Odoo sources. Unavailable historical worktrees and uninstalled external extensions/services remain uninspected. There is no authorized outside-consumer source change.
+
+`P0_SECURITY.md` now states the required external contract: resolve relative URLs against the configured trusted Odoo origin, use an authorized Odoo session/active company, and handle login redirects/401/403 and neutral 404 without printing HTML or retrying anonymously. Cross-origin/separate agents do not inherit a browser session. Existing approved login/session handling must be integrated by that consumer; never forward provider tokens or Odoo cookies to another origin. This is a documented dependency, **not a fabricated overall compatibility claim**.
+
+Four new native methods are registered in the existing native test file (11 total): Flex positive/Full negative, default normal-Sales-Manager wizard button -> produced link -> actual session HTTP download for first print and reprint, automatic helper result -> session HTTP PDF/ZPL with anonymous/unauthorized denial and default/reprint filtering, and effective product views/public link without OAuth. They intercept provider transport but retain actual local Odoo HTTP/ORM. **New-candidate native methods: NOT_RUN locally; final CI pending.** Older seven-test CI evidence remains historical, not proof for these edits or absent consumers.
+
+### Observed RED before application correction
+
+Exact command from this root:
+
+```powershell
+& 'C:/Users/peral/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe' -I -B -X utf8 -m unittest discover -s tests -p 'test_p0_token_label_image.py' -v
+```
+
+Result: **28 tests, 8 assertion failures, 0 errors**, 12.776s. Five new methods produced these failures (subtests counted separately by unittest): auto default/false selected the printed shipment instead of the unprinted shipment (2); actual default wizard report omitted the first-print link (1); Flex eligibility rejected `self_service` (1); default individual first print returned no download URL (1); both product views retained protected API widgets (2); documentation lacked the required upgrade declaration (1). The original 23 tests passed. No fixture/environment exception was counted as causal RED; the documentation assertion is acceptance metadata, not a runtime security exploit. Local native RED is unavailable and is not invented.
+
+After the minimal application/view correction and upgrade declaration, the same command was **28/28 GREEN**, 12.236s. No broad refactor or additional framework was needed.
+
+### Final relevant local GREEN
+
+All five exact runner commands were rerun on the final application/test/XML bytes:
+
+```powershell
+& 'C:/Users/peral/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe' -I -B -X utf8 -m unittest discover -s tests -p 'test_p0_token_label_image.py' -v
+& 'C:/Users/peral/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe' -I -B -X utf8 -m unittest discover -s tests -p 'test_image_upload_security.py' -v
+& 'C:/Users/peral/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe' -I -B -X utf8 -m unittest discover -s tests -p 'test_payment_token_security.py' -v
+& 'C:/Users/peral/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe' -I -B -X utf8 -m unittest discover -s tests -p 'test_shipment_format.py' -v
+& 'C:/Users/peral/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe' -I -B -X utf8 -m unittest discover -s tests -p 'test_meli_economic_import.py' -v
+```
+
+| Cohort | Observed result |
+| --- | --- |
+| P0 source-bound security/compatibility | 28 passed, 0 failed, 0 skipped; 13.489s |
+| Existing multipart uploads | 17 passed, 0 failed, 0 skipped; 4.858s |
+| Existing payment-token security | 6 passed, 0 failed, 0 skipped; 0.865s |
+| Existing shipment format/headers | 33 passed, 0 failed, 0 skipped; 0.114s |
+| Existing economic importer | 10 passed, 0 failed, 0 skipped; 9.404s |
+
+**Total: 94 passed, 0 failed, 0 skipped**, distinct from the older 89-pass snapshot. Three changed Python files parsed; `views/product_view.xml` parsed. Eleven registered native methods confirmed structurally only, not native PASS. The first diff check reported an extra EOF blank line in the parent's tracker append; this final evidence append ends with one newline; the subsequent `git -c core.whitespace=cr-at-eol diff --check` passed (exit0), with only Git LF-to-CRLF informational warnings. No application/source normalization or other worktree change was performed to evade a check.
+
+### Current task boundary and next step
+
+F/G are implemented with causal source-bound GREEN; H's connector contract and native tests are prepared, with the real external consumer unavailable/unverified. F-I remain unchecked because their required new-candidate native acceptance and publication have not been observed. **I is not complete.** Parent must mirror/read back the full tracker, independently verify the six-path candidate, handle any new-candidate native consent without reusing the earlier decline, create the authorized work-unit commit, update the same draft PR77 and read back final-HEAD CI. Preserve any actual global skip as SKIP, not PASS. No merge, pin, HOMO, production, live MercadoLibre/credential call, persistent cleanup, upgrade or commercial/stock/invoice write was executed by this writer.
+
+Rollback boundary: revert only this human-review compatibility unit (shipment selection/Flex, two widget removals and corresponding tests/docs), while preserving credential-free links/private label authorization and the earlier security fixes. A deployed view rollback also requires its separately authorized database upgrade; do not restore token-bearing URLs.
+
+### Independent compatibility verification
+
+A fresh read-only verifier reran the same five exact cohorts against the six-path candidate: **94 passed, 0 failed, 0 skipped** (28/17/6/33/10). It found no concrete candidate blocker, new credential-pattern finding, permission expansion or sudo call. Three Python files and the XML parsed; CR-at-EOL-aware whitespace check passed. It confirmed actual default normal-user wizard and returned-URL HTTP coverage in the prepared native tests, without misrepresenting those eleven methods as executed locally. All new native acceptance, final commit/push/CI and external consumer compatibility remain pending. Native assessment reports high risk; prior candidate decline is not consent for this new candidate.

@@ -5,6 +5,9 @@ import logging
 import io
 import zipfile
 import importlib.util
+import json
+from html import escape
+import xml.etree.ElementTree as ET
 from urllib.parse import urlencode
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -57,7 +60,7 @@ class TestVulnerableProductionPaths(unittest.TestCase):
                       ensure_one=lambda: None,
                       _label_authorize=lambda **kw: NS(mercadolibre_shipment_print_guide_mode='pdf'),
                       _label_print_mode=lambda config: 'pdf',
-                      _label_check_mode=lambda mode: None, _label_is_printable=lambda flag: False)
+                      _label_check_mode=lambda mode: None, _label_is_printable=lambda: False)
         shipment.env = type('Env', (), {'context': {}, 'company': company, 'user': NS(company_id=company),
             '__getitem__': lambda self, key: NS(get_new_instance=lambda *a: client)})()
         result = method('models/shipment.py', 'shipment_print', owner='mercadolibre_shipment')(shipment, meli=client)
@@ -78,6 +81,18 @@ class TestVulnerableProductionPaths(unittest.TestCase):
         })(NS(_authorized_image=Mock(side_effect=PermissionError())), 1, 2)
         self.assertEqual(result, 'NOT_FOUND')
         get_image.assert_not_called()
+
+
+class TestProductBrowserLink(unittest.TestCase):
+    def test_views_use_existing_public_link_not_protected_api_widget(self):
+        tree = ET.parse(ROOT / 'views/product_view.xml')
+        for view_id in ('product_tpl_ml_form_view', 'product_normal_ml_form_view'):
+            record = tree.find(".//record[@id='%s']" % view_id)
+            with self.subTest(view=view_id):
+                self.assertIsNotNone(record)
+                self.assertIsNotNone(record.find(".//field[@name='meli_permalink'][@widget='url']"))
+                self.assertEqual(record.findall(".//field[@name='meli_permalink_api'][@widget='url']"), [])
+        self.assertIn('MODULE UPGRADE REQUIRED', (ROOT / 'P0_SECURITY.md').read_text())
 
 
 class TestPredictor(unittest.TestCase):
@@ -282,6 +297,52 @@ class TestLabelSecurity(unittest.TestCase):
         self.assertEqual(result['url'], '/meli/labels/1?mode=pdf')
         self.assertEqual(rows.pdf_filename, 'Shipment_10.pdf')
         get.assert_called_once()
+
+    def test_flex_me2_is_printable_and_full_is_denied(self):
+        rows, util, get, _ = self.fixture()
+        rows.rows[0].logistic_type = 'self_service'
+        self.assertTrue(rows._label_is_printable())
+        rows.rows[0].logistic_type = 'fulfillment'
+        self.assertFalse(rows._label_is_printable())
+        with self.assertRaises(PermissionError): rows._label_binary('pdf')
+        get.assert_not_called(); util.get_new_instance.assert_not_called()
+
+    def test_default_manual_wizard_offers_first_print_and_reprint(self):
+        rows, util, get, _ = self.fixture()
+        info = Mock(side_effect=lambda **kwargs: kwargs)
+        env = type('WizardEnv', (), {'company': rows.env.company,
+            'context': {'active_model': 'mercadolibre.shipment', 'active_ids': [1]},
+            '__getitem__': lambda self, key: NS(info=info) if key == 'meli.warning' else rows})()
+        wizard = NS(env=env, include_ready_to_print=False)
+        wizard._get_shipment_labels_data = lambda *args, **kw: method(
+            'models/shipment.py', '_get_shipment_labels_data')(wizard, *args, **kw)
+        wizard.shipment_print_report = lambda *args, **kw: method(
+            'models/shipment.py', 'shipment_print_report', {'json': json, 'escape': escape})(wizard, *args, **kw)
+        button = method('models/shipment.py', 'shipment_print', owner='mercadolibre_shipment_print')
+        for status in ('ready_to_print', 'printed'):
+            rows.rows[0].substatus = status
+            with self.subTest(substatus=status):
+                result = button(wizard)
+                self.assertIn('/meli/labels/1?mode=pdf', result['message_html'])
+        get.assert_not_called(); util.get_new_instance.assert_not_called()
+
+    def test_individual_default_first_print_is_downloaded(self):
+        rows, _, get, _ = self.fixture()
+        result = rows.shipment_print()
+        self.assertEqual(result['url'], '/meli/labels/1?mode=pdf')
+        get.assert_called_once()
+        rows.update.assert_not_called()
+
+    def test_auto_defaults_to_unprinted_and_printed_is_opt_in(self):
+        rows, util, get, _ = self.fixture(2)
+        rows.rows[1].substatus = 'printed'
+        wizard = NS(env=rows.env)
+        data_method = method('models/shipment.py', '_get_shipment_labels_data')
+        for include, expected in ((None, ['10']), (False, ['10']), (True, ['10', '11'])):
+            with self.subTest(include_printed=include):
+                data = data_method(wizard, [1, 2], include_ready_to_print=include)
+                self.assertEqual(data['batches'][0]['shipment_ids'], expected)
+        get.assert_not_called(); util.get_new_instance.assert_not_called()
 
     def test_fixed_endpoint_bearer_binary_pdf(self):
         rows, util, get, _ = self.fixture()

@@ -1,5 +1,10 @@
 """Native Odoo ORM/HTTP acceptance; synthetic data and intercepted transport only."""
 import base64
+import io
+import re
+import zipfile
+from html import unescape
+import xml.etree.ElementTree as ET
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -34,6 +39,18 @@ class TestP0NativeSecurity(HttpCase):
             'name': 'P0 no connector permissions', 'login': 'p0_unprivileged', 'password': 'synthetic-only',
             'company_id': cls.company.id, 'company_ids': [(6, 0, [cls.company.id])],
             'group_ids': [(6, 0, [cls.env.ref('base.group_user').id])],
+        })
+        cls.sales_manager = cls.env['res.users'].create({
+            'name': 'P0 normal Sales Manager', 'login': 'p0_sales_manager', 'password': 'synthetic-only',
+            'company_id': cls.company.id, 'company_ids': [(6, 0, [cls.company.id])],
+            'group_ids': [(6, 0, [cls.env.ref('base.group_user').id,
+                                    cls.env.ref('sales_team.group_sale_manager').id])],
+        })
+        cls.catalog_manager = cls.sales_manager.copy({
+            'name': 'P0 existing-role catalog manager', 'login': 'p0_catalog_manager',
+            'group_ids': [(6, 0, [cls.env.ref('base.group_user').id,
+                                    cls.env.ref('sales_team.group_sale_manager').id,
+                                    cls.env.ref('meli_oerp.group_mercadolibre_manager').id])],
         })
         cls.company.write({'mercadolibre_seller_id': '700',
                            'mercadolibre_seller_user': cls.env.user.id})
@@ -179,3 +196,113 @@ class TestP0NativeSecurity(HttpCase):
                 self.assertEqual(auto['urls'],[entry['url'] for entry in batch['batches']])
                 self.assertEqual(auto['count'],1)
                 self.assertNotIn(_TOKEN,repr(batch))
+
+    @contextmanager
+    def label_transport(self, mode='pdf'):
+        """Intercept only provider transport; local HttpCase requests remain real."""
+        plain = b'^XA synthetic compatibility ^XZ'
+        if mode == 'pdf':
+            body = b'%PDF-1.4 synthetic compatibility\n%%EOF'
+        else:
+            stream = io.BytesIO()
+            with zipfile.ZipFile(stream, 'w') as archive:
+                archive.writestr('label.zpl', plain)
+            body = stream.getvalue()
+        client = SimpleNamespace(access_token=_TOKEN, seller_id='700', need_login=lambda: False,
+            _meli_stock_seller_snapshot={'status': 200, 'seller_id': '700', 'company_id': self.company.id})
+        response = Mock(status_code=200)
+        response.iter_content.return_value = [body]
+        response.__enter__ = Mock(return_value=response); response.__exit__ = Mock(return_value=False)
+        with patch.object(type(self.env['meli.util']), 'get_new_instance', return_value=client) as capability, \
+                patch.object(shipment_module.requests, 'get', return_value=response) as get, \
+                patch.object(shipment_module, 'PDF2IMAGE_AVAILABLE', False), \
+                patch.object(shipment_module, 'mercadolibre_shipment_print_guide_mode', mode), \
+                patch.object(type(self.shipment), 'update', side_effect=AssertionError('commercial update forbidden')), \
+                self.no_external():
+            yield get, capability, plain if mode == 'zpl_txt' else body
+
+    def test_native_flex_labels_allowed_and_fulfillment_denied(self):
+        self.shipment.logistic_type = 'self_service'
+        record = self.shipment.with_user(self.operator).with_context(allowed_company_ids=[self.company.id])
+        with self.label_transport() as (get, capability, expected):
+            for state in ('ready_to_print', 'printed'):
+                self.shipment.substatus = state
+                self.assertTrue(record._label_is_printable())
+                self.assertEqual(record._label_binary('pdf')[0], expected)
+            get.reset_mock(); capability.reset_mock()
+            self.shipment.logistic_type = 'fulfillment'
+            self.assertFalse(record._label_is_printable())
+            with self.assertRaises(AccessError): record._label_binary('pdf')
+            get.assert_not_called(); capability.assert_not_called()
+
+    def test_native_default_sales_manager_wizard_button_to_http_first_and_reprint(self):
+        self.authenticate('p0_sales_manager', 'synthetic-only')
+        self.shipment.logistic_type = 'self_service'
+        model = self.env['mercadolibre.shipment.print'].with_user(self.sales_manager).with_context(
+            allowed_company_ids=[self.company.id], active_model='mercadolibre.shipment',
+            active_ids=[self.shipment.id])
+        self.assertFalse(model.env.su)
+        self.assertFalse(self.sales_manager.has_group('base.group_system'))
+        with self.label_transport() as (get, capability, expected):
+            for state in ('ready_to_print', 'printed'):
+                self.shipment.substatus = state
+                wizard = model.create({})
+                self.assertFalse(wizard.include_ready_to_print)
+                action = wizard.shipment_print()
+                warning = self.env['meli.warning'].with_user(self.sales_manager).browse(action['res_id'])
+                urls = [unescape(url) for url in re.findall(r'href="([^"]+)"', warning.message_html)]
+                self.assertEqual(len(urls), 1)
+                self.assertTrue(urls[0].startswith('/meli/labels/'))
+                self.assertNotIn(_TOKEN, urls[0])
+                result = self.url_open(urls[0], allow_redirects=False)
+                self.assertEqual(result.status_code, 200)
+                self.assertEqual(result.content, expected)
+            self.assertEqual(get.call_count, 2)
+            self.assertEqual(get.call_args.kwargs['headers'], {'Authorization': 'Bearer ' + _TOKEN})
+
+    def test_native_auto_result_urls_download_with_session_not_anonymous_or_denied(self):
+        self.authenticate('p0_sales_manager', 'synthetic-only')
+        self.shipment.logistic_type = 'self_service'
+        wizard = self.env['mercadolibre.shipment.print'].with_user(self.sales_manager).with_context(
+            allowed_company_ids=[self.company.id]).create({})
+        for mode in ('pdf', 'zpl'):
+            self.shipment.substatus = 'ready_to_print'
+            with self.label_transport(mode) as (get, capability, expected):
+                data = wizard._get_labels_urls_auto_print([self.shipment.id])
+                self.assertEqual(data['count'], 1)
+                url = data['urls'][0]
+                result = self.url_open(url, allow_redirects=False)
+                self.assertEqual(result.status_code, 200)
+                self.assertEqual(result.content, expected)
+                self.assertNotIn(_TOKEN, repr(data))
+                self.shipment.substatus = 'printed'
+                self.assertEqual(wizard._get_labels_urls_auto_print([self.shipment.id])['count'], 0)
+                reprint = wizard._get_labels_urls_auto_print([self.shipment.id], include_ready_to_print=True)
+                self.assertEqual(reprint['count'], 1)
+                self.assertEqual(self.url_open(reprint['urls'][0]).content, expected)
+        # Reuse a produced URL, not a separately constructed syntax-only surrogate.
+        with self.label_transport(mode) as (get, capability, expected):
+            self.authenticate('p0_unprivileged', 'synthetic-only')
+            denied = self.url_open(url, allow_redirects=False)
+            self.assertEqual(denied.status_code, 404)
+            self.assertNotEqual(denied.content, expected)
+            self.authenticate(None, None)
+            anonymous = self.url_open(url, allow_redirects=False)
+            self.assertIn(anonymous.status_code, (302, 303, 401, 403))
+            self.assertNotEqual(anonymous.content, expected)
+            get.assert_not_called(); capability.assert_not_called()
+
+    def test_native_effective_product_views_keep_public_link_without_api_widget(self):
+        self.product.meli_id = 'MLA123456789'
+        with self.no_external(), patch.object(type(self.env['meli.util']), 'get_new_instance',
+                side_effect=AssertionError('public permalink/view must not use OAuth')):
+            for model_name, view_id in (('product.template', 'product.product_template_only_form_view'),
+                                         ('product.product', 'product.product_normal_form_view')):
+                model = self.env[model_name].with_user(self.catalog_manager)
+                result = model.get_view(view_id=self.env.ref(view_id).id, view_type='form')
+                arch = ET.fromstring(result['arch'])
+                self.assertIsNotNone(arch.find(".//field[@name='meli_permalink'][@widget='url']"))
+                self.assertEqual(arch.findall(".//field[@name='meli_permalink_api'][@widget='url']"), [])
+            public_url = self.product.with_user(self.catalog_manager).meli_permalink
+            self.assertEqual(public_url, 'https://articulo.mercadolibre.com.ar/MLA-123456789')
+            self.assertNotIn(_TOKEN, public_url)

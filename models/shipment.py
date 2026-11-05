@@ -209,7 +209,9 @@ class mercadolibre_shipment_print(models.TransientModel):
         company = shipments._label_authorize(config=config)
         mode = shipments._label_print_mode(company)
         shipments._label_check_mode(mode)
-        ready = shipments.filtered(lambda ship: ship._label_is_printable(include_ready_to_print))
+        # Legacy automatic selection: unprinted by default; printed only on opt-in.
+        ready = shipments.filtered(lambda ship: ship._label_is_printable()
+                                   and (ship.substatus != "printed" or include_ready_to_print))
         batches = []
         for offset in range(0, len(ready), 50):
             batch = ready[offset:offset + 50]
@@ -262,8 +264,9 @@ class mercadolibre_shipment_print(models.TransientModel):
         return self.shipment_print_report(shipment_ids=shipment_ids,meli=meli,config=config,include_ready_to_print=self.include_ready_to_print)
 
     def shipment_print_report(self, shipment_ids=None, meli=None, config=None, include_ready_to_print=None):
+        # An explicit manual Print includes both first prints and reprints.
         data = self._get_shipment_labels_data(shipment_ids, config=config,
-                                             include_ready_to_print=include_ready_to_print)
+                                             include_ready_to_print=True)
         links = [batch["url"] for batch in data["batches"]]
         self.full_links = json.dumps(data["batches"])
         html = "<br>".join('<a href="%s" target="_blank">Download PDF/ZPL</a>' % escape(url) for url in links)
@@ -2051,13 +2054,12 @@ class mercadolibre_shipment(models.Model):
         if mode not in ("pdf", "zpl", "zpl_txt"):
             raise ValidationError("Unsupported label format")
 
-    def _label_is_printable(self, include_ready_to_print=True):
+    def _label_is_printable(self):
         self.ensure_one()
         return (self.mode == "me2" and self.logistic_type in (
-                    "cross_docking", "xd_drop_off", "drop_off")
+                    "cross_docking", "xd_drop_off", "drop_off", "self_service")
                 and self.status == "ready_to_ship"
-                and (self.substatus == "printed"
-                     or (include_ready_to_print and self.substatus == "ready_to_print")))
+                and self.substatus in ("ready_to_print", "printed"))
 
     def _label_download_url(self, mode):
         self._label_check_mode(mode)
@@ -2104,7 +2106,7 @@ class mercadolibre_shipment(models.Model):
         company = self._label_authorize(config=config)
         mode = self._label_print_mode(company)
         self._label_check_mode(mode)
-        if not self._label_is_printable(include_ready_to_print):
+        if not self._label_is_printable():
             return {"message": "No printable label", "url": False}
         # Keep existing individual binary/preview consumers, but never import/update orders.
         self.check_access("write")
