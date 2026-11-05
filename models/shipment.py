@@ -20,7 +20,7 @@
 ##############################################################################
 
 from odoo import fields, models, api
-from odoo.exceptions import ValidationError
+from odoo.exceptions import ValidationError, AccessError
 import ast
 from .meli_pack_admission import (
     AdmissionError, collect_membership, remote_id, verify_order, snapshot_response,
@@ -81,7 +81,6 @@ from .versions import _meli_guard_delivery_write
 
 
 #
-# https://api.mercadolibre.com/shipment_labels?shipment_ids=20178600648,20182100995&response_type=pdf&access_token=
 class mercadolibre_shipment_print(models.TransientModel):
     _name = "mercadolibre.shipment.print"
     _description = "Impresión de etiquetas"
@@ -370,7 +369,6 @@ class mercadolibre_shipment_print(models.TransientModel):
             if full_link:
                 full_links+= '<a href="'+full_link+'" target="_blank"><strong><u>Descargar PDF/ZPL</u></strong></a>'
 
-        # full_url_link_pdf = {'otken': {'full_link': "https://api.mercadolibre.com/shipment_labels?shipment_ids=43272588025&amp;response_type=pdf&amp;access_token=APP_USR-6866649250908201-040908-e22cf17b7005c0ee37b953b972c7c53b-1682539048"}}
         self.full_links= json.dumps(full_url_link_pdf)
         if (full_links):
             return warningobj.info( title='Impresión de etiquetas', message="Abrir links para descargar PDF/ZPL", message_html=""+full_ids+'<br><br>'+full_links+"<br><br>Reporte de no impresas:<br>"+reporte )
@@ -574,6 +572,81 @@ class mercadolibre_shipment(models.Model):
        string="Estado límite despacho")
 
     @api.depends('estimated_handling_limit', 'estimated_buffering_date')
+    def _meli_check_label_scope(self, config=None):
+        """Read-only scope check before acquiring tokens or shipping labels."""
+        self.ensure_one()
+        self.check_access("read")
+        company = (
+            config.company_id
+            if config and "company_id" in config._fields else
+            (config or self.env.company)
+        )
+        # The active company must match the order and the explicitly selected
+        # MercadoLibre account. Permitted companies alone are not enough.
+        if not company or company != self.env.company or self.company_id != company:
+            raise AccessError("No autorizado para descargar esta etiqueta.")
+        seller_user = company.mercadolibre_seller_user
+        if not seller_user or self.seller_id != seller_user:
+            raise AccessError("No autorizado para descargar esta etiqueta.")
+        related = self.order | self.orders
+        if not related:
+            raise AccessError("No se pudo comprobar el pedido de la etiqueta.")
+        for order in related:
+            order.check_access("read")
+            if (order.company_id != company or order.seller_id != seller_user
+                    or (order.shipping_id and str(order.shipping_id) != str(self.shipping_id))):
+                raise AccessError("No autorizado para descargar esta etiqueta.")
+        shipping_id = str(self.shipping_id or "")
+        if not shipping_id.isascii() or not shipping_id.isdigit() or len(shipping_id) > 32:
+            raise ValidationError("El identificador del envío no es válido.")
+        return company
+
+    def _meli_fetch_label_bytes(self, print_mode="pdf", config=None, meli=None):
+        """One bounded, server-only Bearer GET. Never return a token or provider URL."""
+        if not self or len(self) > 50:
+            raise ValidationError("Las etiquetas se descargan en lotes de 1 a 50 envíos.")
+        if print_mode not in ("pdf", "zpl", "zpl_txt"):
+            raise ValidationError("Formato de impresión no admitido.")
+        company = False
+        for shipment in self:
+            scope_company = shipment._meli_check_label_scope(config=config)
+            if company and scope_company != company:
+                raise AccessError("No está permitido combinar vendedores o compañías.")
+            company = scope_company
+
+        if meli is None:
+            meli = self.env["meli.util"].get_new_instance(company)
+        if (not meli or meli.need_login()
+                or not getattr(meli, "access_token", None)
+                or meli.access_token == "PASIVA"
+                or str(getattr(meli, "seller_id", "")) != str(company.mercadolibre_seller_id)):
+            raise AccessError("La cuenta de MercadoLibre no está autorizada para estos envíos.")
+
+        response_type = "pdf" if print_mode == "pdf" else "zpl2"
+        ids = [str(shipment.shipping_id) for shipment in self]
+        try:
+            response = requests.get(
+                "https://api.mercadolibre.com/shipment_labels",
+                params={"shipment_ids": ",".join(ids), "response_type": response_type},
+                headers={"Authorization": "Bearer " + meli.access_token,
+                         "Accept": "application/octet-stream"},
+                timeout=30,
+                allow_redirects=False,
+            )
+        except requests.exceptions.RequestException:
+            raise ValidationError("No se pudo descargar la etiqueta de MercadoLibre.") from None
+        # Never include the response body, URL, headers or exception in errors.
+        if (response.status_code != 200 or not response.content
+                or len(response.content) > 50 * 1024 * 1024):
+            raise ValidationError("MercadoLibre no entregó una etiqueta válida.")
+        content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
+        if content_type not in (
+            "application/octet-stream", "application/pdf", "application/zip",
+            "application/x-zip-compressed", "application/zpl", "text/plain",
+        ):
+            raise ValidationError("MercadoLibre devolvió un formato de etiqueta inesperado.")
+        return response.content
+
     def _compute_handling_limit_status(self):
         now = fields.Datetime.now()
         for rec in self:
@@ -2080,8 +2153,6 @@ class mercadolibre_shipment(models.Model):
 
         #orders_query = "/orders/search?seller="+config.mercadolibre_seller_id+"&sort=date_desc"
 
-        # https://api.mercadolibre.com/shipment_labels?shipment_ids=20178600648,20182100995&response_type=pdf&access_token=
-        # https://api.mercadolibre.com/shipments/27693158904?access_token=APP_USR-3069131366650174-120509-8746c1a831468e99f84105cd631ff206-246057399
 
 
         return {}
