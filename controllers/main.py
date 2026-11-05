@@ -7,7 +7,7 @@ from odoo import http, api
 
 from odoo import fields, http
 from odoo.http import Controller, Response, request, route
-from odoo.exceptions import AccessError
+from odoo.exceptions import AccessError, MissingError
 from werkzeug.exceptions import ClientDisconnected, RequestEntityTooLarge
 try:
     from odoo.http import content_disposition
@@ -144,28 +144,74 @@ class MercadoLibre(http.Controller):
         #else:
         return ""
 
-    @http.route('/meli/image/<int:product_id>', type='http', auth="public")
-    @http.route('/meli/image/<int:product_id>/<int:image_id>', type='http', auth="public")
+    @http.route('/meli/image/<int:product_id>', type='http', auth="public", methods=["GET"])
+    @http.route('/meli/image/<int:product_id>/<int:image_id>', type='http', auth="public", methods=["GET"])
     def meli_image(self, product_id, image_id=None, **kw):
+        """Serve only an image bound to the requested, readable product.
 
-        #browse and read image data to browser
-        product = request.env["product.product"].browse(int(product_id))
+        A public Odoo route is not permission to browse arbitrary product.image
+        ids. Never use sudo; record rules and publication must both permit the
+        request. All refusals use the same 404 without disclosing ownership.
+        """
+        def not_found():
+            return Response("", status=404, content_type="text/plain")
 
-        if image_id:
-            filename = '%s_%s' % ("product.image".replace('.', '_'), str(product_id)+str("_")+str(image_id))
-            product_image = request.env["product.image"].browse( int(image_id) )
-            if product_image:
-                filecontent = base64.b64decode( get_image_full( product_image ) )
+        try:
+            product = request.env["product.product"].browse(product_id).exists()
+            if not product:
+                return not_found()
+            product.check_access("read")
+            template = product.product_tmpl_id
+            template.check_access("read")
+
+            company = template.company_id
+            if company and company not in request.env.companies:
+                return not_found()
+
+            if request.env.user._is_public():
+                # The website's publication state is independent of ORM read ACL.
+                if "is_published" not in template._fields or not template.is_published:
+                    return not_found()
+                if "website_id" in template._fields and template.website_id:
+                    website = getattr(request, "website", None)
+                    if not website or template.website_id != website:
+                        return not_found()
+
+            if image_id is not None:
+                product_image = request.env["product.image"].browse(image_id).exists()
+                if not product_image:
+                    return not_found()
+                product_image.check_access("read")
+                # A variant image cannot be served through a sibling variant.
+                if product_image.product_variant_id:
+                    if product_image.product_variant_id != product:
+                        return not_found()
+                elif product_image.product_tmpl_id != template:
+                    return not_found()
+                if (product_image.product_tmpl_id
+                        and product_image.product_tmpl_id != template):
+                    return not_found()
+                if ("company_id" in product_image._fields
+                        and product_image.company_id
+                        and product_image.company_id != company):
+                    return not_found()
+                filename = "product_image_%s_%s" % (product_id, image_id)
+                payload = get_image_full(product_image)
             else:
-                return ""
-        else:
-            filename = '%s_%s' % ("meli.image".replace('.', '_'), product_id)
-            filecontent = base64.b64decode( get_image_full( product ) )
+                filename = "meli_image_%s" % product_id
+                payload = get_image_full(product)
 
-        return request.make_response(filecontent,
-                                     [('Content-Type', 'application/octet-stream'),
-                                      ('Content-Disposition', content_disposition(filename))])
+            if not payload:
+                return not_found()
+            filecontent = base64.b64decode(payload)
+            if not filecontent:
+                return not_found()
+        except (AccessError, MissingError, TypeError, ValueError):
+            return not_found()
 
+        return request.make_response(
+            filecontent, _get_headers(filename, "application/octet-stream", filecontent)
+        )
 
 class MercadoLibreLogin(http.Controller):
 
