@@ -248,9 +248,12 @@ class mercadolibre_shipment_print(models.TransientModel):
             if scope_key is not None and current_scope != scope_key:
                 raise AccessError("No está permitido combinar vendedores o compañías.")
             scope_key = current_scope
+            can_print, _reason = shipment.can_print_label()
             printable = (
-                shipment.status in ("ready_to_ship", "shipped")
-                and (shipment.substatus != "printed" or include_ready_to_print)
+                can_print
+                and (shipment.substatus == "printed"
+                     or (include_ready_to_print
+                         and shipment.substatus == "ready_to_print"))
             )
             status = {"shipment_id": shipment.shipping_id,
                       "status": shipment.status, "substatus": shipment.substatus}
@@ -583,6 +586,9 @@ class mercadolibre_shipment(models.Model):
         company = False
         for shipment in self:
             scope_company = shipment._meli_check_label_scope(config=config)
+            allowed, _reason = shipment.can_print_label()
+            if not allowed:
+                raise ValidationError("El envío no tiene una etiqueta ME2 imprimible.")
             if company and scope_company != company:
                 raise AccessError("No está permitido combinar vendedores o compañías.")
             company = scope_company
@@ -638,14 +644,15 @@ class mercadolibre_shipment(models.Model):
     #  Gate: ¿se puede imprimir la etiqueta?                              #
     # ------------------------------------------------------------------ #
     def can_print_label(self):
-        """Returns (can_print: bool, reason: str).
-        Fulfillment orders are managed by ML; all others require ready_to_ship.
-        estimated_handling_limit is a dispatch DEADLINE, not a printing gate.
+        """Enforce ML's ME2 logistic and ready-to-print/printed state matrix.
+        The handling deadline does not grant label availability.
         """
-        if self.logistic_type == 'fulfillment':
-            return False, "ME Full (Fulfillment): ML gestiona el envío, no se imprime etiqueta."
-        if self.status not in ('ready_to_ship', 'shipped'):
-            return False, "El envío aún no está listo para despachar (estado: %s)." % (self.status or 'sin estado')
+        if self.mode != "me2" or self.logistic_type not in (
+                "drop_off", "xd_drop_off", "cross_docking", "self_service"):
+            return False, "La logística de este envío no permite imprimir etiquetas ME2."
+        if self.status != "ready_to_ship" or self.substatus not in (
+                "ready_to_print", "printed"):
+            return False, "El envío no está en estado imprimible."
         return True, ""
 
     # ------------------------------------------------------------------ #
@@ -2145,10 +2152,9 @@ class mercadolibre_shipment(models.Model):
         self.update(meli=meli, config=config)
 
         report = {"message": "", "file_url": None}
-        if self.status not in ("ready_to_ship", "shipped"):
-            report["message"] = "%s - Status: %s - SubStatus: %s" % (
-                self.shipping_id, self.status, self.substatus
-            )
+        allowed, _reason = self.can_print_label()
+        if not allowed:
+            report["message"] = "El envío no tiene una etiqueta ME2 imprimible."
             return report
         if self.substatus != "printed" and not include_ready_to_print:
             return report
