@@ -396,6 +396,57 @@ class TestImageAccess(unittest.TestCase):
         self.assertEqual(method(None, 99).status_code, 404)
 
 
+class TestIndividualLabelWorkflow(unittest.TestCase):
+    def method(self):
+        return actual(
+            "models/shipment.py", "mercadolibre_shipment", "shipment_print",
+            {"AccessError": AccessError, "ValidationError": ValidationError,
+             "PDF2IMAGE_AVAILABLE": False, "base64": base64,
+             "io": io, "zipfile": zipfile}
+        )
+
+    def specimen(self, *, mode="pdf", substatus="ready_to_print"):
+        company = NS(mercadolibre_seller_id="451",
+                     mercadolibre_shipment_print_guide_mode=mode,
+                     _fields={"mercadolibre_shipment_print_guide_mode"})
+        writes = []
+        record = NS(
+            id=14, shipping_id="123", status="ready_to_ship", substatus=substatus,
+            ensure_one=lambda: None,
+            _meli_check_label_scope=lambda config=None: company,
+            update=Mock(),
+            can_print_label=lambda: (True, ""),
+            _meli_fetch_label_bytes=lambda **kwargs: b"%PDF-1.4\nsynthetic" if mode == "pdf" else b"^XA^XZ",
+            write=lambda values: writes.append(values),
+        )
+        meli = NS(seller_id="451", access_token=TOKEN, need_login=lambda: False)
+        return record, company, meli, writes
+
+    def test_pdf_and_zpl_persist_existing_binary_without_external_url(self):
+        for mode, extension in (("pdf", "pdf"), ("zpl", "zpl")):
+            with self.subTest(mode=mode):
+                record, company, meli, writes = self.specimen(mode=mode)
+                result = self.method()(
+                    record, meli=meli, config=company, include_ready_to_print=True
+                )
+                self.assertEqual(len(writes), 1)
+                self.assertIs(writes[0]["pdf_link"], False)
+                self.assertEqual(writes[0]["pdf_filename"], "Shipment_123." + extension)
+                self.assertNotIn(TOKEN, repr(result) + repr(writes))
+                self.assertIn("/web/content?model=mercadolibre.shipment", result["file_url"])
+                record.update.assert_called_once_with(meli=meli, config=company)
+
+    def test_missing_printable_status_does_not_fetch_or_write(self):
+        record, company, meli, writes = self.specimen()
+        record.can_print_label = lambda: (False, "invalid")
+        fetch = Mock()
+        record._meli_fetch_label_bytes = fetch
+        result = self.method()(record, meli=meli, config=company)
+        self.assertIn("no tiene una etiqueta", result["message"])
+        self.assertEqual(writes, [])
+        fetch.assert_not_called()
+
+
 class TestSourceContracts(unittest.TestCase):
     def test_tokenless_visible_routes_and_model_version(self):
         product = (ROOT / "models/product.py").read_text(encoding="utf-8")
