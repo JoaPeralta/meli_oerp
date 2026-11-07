@@ -113,10 +113,14 @@ def fixture(ids=()):
     config = SimpleNamespace(get_param=lambda key: parameters[key],
                              set_param=lambda key, value: writes.append((key, value)))
     config.sudo = lambda: config
+    postings = SimpleNamespace(
+        search_count=Mock(return_value=0),
+        _meli_find_exact_posting=Mock(return_value=SimpleNamespace(product_id=False)),
+    )
     class Env:
         user = SimpleNamespace(company_id=company)
         def __getitem__(self, name):
-            return {"meli.util": util, "ir.config_parameter": config}[name]
+            return {"meli.util": util, "ir.config_parameter": config, "mercadolibre.posting": postings}[name]
     company.env = Env()
     company.env.company = company
     for name in names:
@@ -140,7 +144,7 @@ class ExistingItemReadBaseline(unittest.TestCase):
 
     def test_sku_without_matches_preserves_product_and_single_search(self):
         company, client, _ = fixture()
-        product = SimpleNamespace(default_code="SKU-1", meli_id=False, product_meli_get_product=Mock())
+        product = SimpleNamespace(id=17, default_code="SKU-1", meli_id=False, product_meli_get_product=Mock())
         company.get_all_items_from_existing_sku([product])
         self.assertFalse(product.meli_id)
         product.product_meli_get_product.assert_not_called()
@@ -339,7 +343,7 @@ class BulkItemContracts(unittest.TestCase):
     def test_sku_import_correlates_first_search_id_not_first_response_position(self):
         company, client, _ = fixture(["MLA1", "MLA2"])
         client.reply = lambda batch: [Client.row(id_) for id_ in reversed(batch)]
-        product = SimpleNamespace(default_code="SKU-1", meli_id=False, product_meli_get_product=Mock())
+        product = SimpleNamespace(id=17, default_code="SKU-1", meli_id=False, product_meli_get_product=Mock())
         company.get_all_items_from_existing_sku([product])
         self.assertEqual(product.meli_id, "MLA1")
         self.assertEqual(product.product_meli_get_product.call_args.kwargs["meli_rjson"]["id"], "MLA1")
@@ -347,7 +351,7 @@ class BulkItemContracts(unittest.TestCase):
 
     def test_sku_twenty_one_results_are_chunked_and_do_not_guess_include_attributes(self):
         company, client, _ = fixture(["MLA" + str(i) for i in range(21)])
-        product = SimpleNamespace(default_code="SKU-1", meli_id=False, product_meli_get_product=Mock())
+        product = SimpleNamespace(id=17, default_code="SKU-1", meli_id=False, product_meli_get_product=Mock())
         company.get_all_items_from_existing_sku([product])
         calls = client.bulk_calls()
         self.assertEqual([path for path, _ in calls], ["/items/bulk", "/items/bulk"])
@@ -390,7 +394,7 @@ class BulkItemContracts(unittest.TestCase):
             with self.subTest(row=row):
                 company, client, _ = fixture(["MLA1"])
                 client.reply = lambda batch: [row]
-                product = SimpleNamespace(default_code="SKU-1", meli_id=False, product_meli_get_product=Mock())
+                product = SimpleNamespace(id=17, default_code="SKU-1", meli_id=False, product_meli_get_product=Mock())
                 try:
                     company.get_all_items_from_existing_sku([product])
                 except ContractError:

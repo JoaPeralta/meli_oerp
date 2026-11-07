@@ -20,7 +20,7 @@
 ##############################################################################
 
 from odoo import fields, models, api
-from odoo.exceptions import AccessError, UserError
+from odoo.exceptions import AccessError, UserError, ValidationError
 from odoo.tools.translate import _
 from markupsafe import Markup
 import logging
@@ -1082,12 +1082,45 @@ class res_company(models.Model):
             return []
         return [ mid.strip() for mid in str(raw_meli_ids).split(',') if mid.strip() ]
 
+    def _meli_catalogue_matches(self, postings, company, item_id, item):
+        def reference(payload):
+            if payload.get("seller_custom_field") or payload.get("seller_sku"):
+                return payload.get("seller_custom_field") or payload["seller_sku"]
+            for attribute in payload.get("attributes") or []:
+                if attribute.get("id") == "SELLER_SKU":
+                    values = attribute.get("values") or []
+                    return (values[0].get("name") if values else None) or attribute.get("value_name")
+            return False
+
+        variations = item.get("variations") or []
+        identities = [(postings._meli_variation_key(row.get("id")), reference(row)) for row in variations]
+        if variations and (not all(key for key, _ in identities) or len({key for key, _ in identities}) != len(identities)):
+            raise postings._meli_binding_error()
+        matches = []
+        seen = {}
+        for variation_id, sku in identities or [(False, reference(item))]:
+            posting = postings._meli_find_exact_posting(item_id, variation_id, company)
+            product = posting.product_id
+            explicit = bool(product)
+            if not product:
+                product = postings._meli_find_direct_product(item_id, variation_id, company)
+            reference_used = False
+            if not product and company.mercadolibre_import_search_sku:
+                reference_used = sku
+                product = postings._meli_find_reference_product(sku, company)
+                postings._meli_check_fallback_variant(product, item_id, variation_id)
+            if product and product.id in seen and not (seen[product.id] and explicit):
+                raise postings._meli_binding_error()
+            if product:
+                seen[product.id] = explicit
+            matches.append((variation_id, reference_used, posting, product))
+        return matches
+
     def product_meli_get_products( self, context=None, import_images=True ):
         context = context or self.env.context
         #_logger.info('company.product_meli_get_products() context: '+str(context))
         company = self.env.user.company_id
-        company_domain = ['|',('company_id','=',False),('company_id','=',company.id)]
-        product_obj = self.env['product.product']
+        postings = self.env['mercadolibre.posting']
         warningobj = self.env['meli.warning']
 
         post_state = context and context.get("post_state")
@@ -1199,8 +1232,6 @@ class res_company(models.Model):
                         MeliCommit( self )
                         icommit = 0
                     #_logger.info( item_id + "("+str(iitem)+"/"+str(rjson['paging']['total'])+")" )
-                    posting_id = self.env['product.product'].search([('meli_id','=',item_id)])
-
                     response = meli.get("/items/"+item_id, {'access_token':meli.access_token})
                     rjson3 = response.json()
 
@@ -1219,7 +1250,7 @@ class res_company(models.Model):
                     # entera y los items siguientes no se procesaban.
                     # Se saltea solo este item; el resto del lote sigue.
                     if (not isinstance(rjson3, dict) or 'id' not in rjson3
-                            or 'status' not in rjson3 or 'title' not in rjson3):
+                            or rjson3['id'] != item_id or 'status' not in rjson3 or 'title' not in rjson3):
                         _logger.error(
                             "product_meli_get_products > respuesta no procesable para item %s: tipo=%s detalle=%s",
                             str(item_id), type(rjson3).__name__,
@@ -1227,141 +1258,47 @@ class res_company(models.Model):
                              else "len=%d" % len(str(rjson3))))
                         continue
 
-                    seller_sku = None
-                    if ( ( not posting_id or len(posting_id)==0 ) and company.mercadolibre_import_search_sku ):
-                        seller_sku = None
-                        if ('seller_custom_field' in rjson3 and rjson3['seller_custom_field'] and len(rjson3['seller_custom_field'])):
-                            seller_sku = rjson3['seller_custom_field']
-                        if not seller_sku and "attributes" in rjson3:
-                            for att in rjson3['attributes']:
-                                if att["id"] == "SELLER_SKU":
-                                    seller_sku = att["values"][0]["name"]
-                                    break;
-                        if (seller_sku):
-                            posting_id = self.env['product.product'].search([('default_code','=ilike',seller_sku)]
-                                                                            + company_domain)
-                            if (not posting_id or len(posting_id)==0):
-                                posting_id = self.env['product.template'].search([('default_code','=ilike',seller_sku)]
-                                                                                + company_domain)
-                                if posting_id:
-                                    if (len(posting_id)==1):
-                                        #_logger.info("Founded template with default code, dont know how to handle it. seller_sku: "+str(seller_sku)+" template: "+str(posting_id.mapped('name')))
-                                        pass;
-                                    if (len(posting_id)>1):
-                                        _logger.error("Founded templates more than 2 default code: seller_sku: "+str(seller_sku)+" template: "+str(posting_id.mapped('name')))
-                                        pass;
-                            else:
-                                if (len(posting_id)==1):
-                                    # Un mismo producto fisico puede tener varias publicaciones en ML
-                                    # (p.ej. dos items con el mismo user_product_id y SKU). Si el producto
-                                    # ya esta asociado a OTRO item, no lo pisamos: perderiamos la referencia
-                                    # existente. Modelar las publicaciones adicionales queda fuera de alcance.
-                                    if (not posting_id.meli_id or posting_id.meli_id==item_id):
-                                        posting_id.meli_id = item_id
-                                    else:
-                                        _logger.info("product_meli_get_products > product sku %s already bound to meli_id %s, keeping it (incoming item %s not stored)",
-                                                     str(posting_id.default_code), str(posting_id.meli_id), str(item_id))
-                                if (len(posting_id)>1):
-                                    _logger.error("Founded templates more than 2 default code: seller_sku: "+str(seller_sku)+" template: "+str(posting_id.mapped('name')))
+                    try:
+                        matches = self._meli_catalogue_matches(postings, company, item_id, rjson3)
+                    except ValidationError:
+                        duplicates.append({
+                            'name': _("Publication binding conflict"), 'default_code': '',
+                            'meli_sku': '', 'meli_id': item_id, 'meli_id_variation': '',
+                            'meli_status': rjson3['status'], 'status': 'duplicate',
+                        })
+                        continue
 
-                        #Set or and search  using variation id
-                        if ('variations' in rjson3):
-                            for var in rjson3['variations']:
-                                if ('seller_custom_field' in var and var['seller_custom_field'] and len(var['seller_custom_field'])):
-                                    posting_id = self.env['product.product'].search([('default_code','=',var['seller_custom_field'])]
-                                                                                    + company_domain)
-                                    if (posting_id and len(posting_id)==1):
-                                        if (not posting_id.meli_id or posting_id.meli_id==item_id):
-                                            posting_id.meli_id = item_id
-                                            if (len(posting_id.product_tmpl_id.product_variant_ids)>1):
-                                                posting_id.meli_id_variation = var['id']
-                                if (not posting_id  and 'seller_sku' in var and var['seller_sku'] and len(var['seller_sku'])):
-                                    posting_id = self.env['product.product'].search([('default_code','=',var['seller_sku'])]
-                                                                                    + company_domain)
-                                    if (posting_id and len(posting_id)==1):
-                                        if (not posting_id.meli_id or posting_id.meli_id==item_id):
-                                            posting_id.meli_id = item_id
-                                            if (len(posting_id.product_tmpl_id.product_variant_ids)>1):
-                                                posting_id.meli_id_variation = var['id']
-                                if not posting_id  and not seller_sku and "attributes" in var:
-                                    for att in var['attributes']:
-                                        if att["id"] == "SELLER_SKU":
-                                            seller_sku = att["values"][0]["name"]
-                                            break;
-                                    posting_id = seller_sku and self.env['product.product'].search([('default_code','=',seller_sku) ]
-                                                                                                    + company_domain)
-                                    if (posting_id and seller_sku and len(posting_id)==1):
-                                        if (not posting_id.meli_id or posting_id.meli_id==item_id):
-                                            posting_id.meli_id = item_id
-                                            if (len(posting_id.product_tmpl_id.product_variant_ids)>1):
-                                                posting_id.meli_id_variation = var['id']
-
-                    if (posting_id or force_dont_create):
-                        if posting_id:
-                            if (len(posting_id)==1):
-                                #_logger.info( "Item already in database: " + str(posting_id[0]) )
-                                # Un mismo producto fisico puede tener varias publicaciones en ML.
-                                # La rama de creacion ya registra un mercadolibre.posting por item
-                                # (product_meli_get_product); al matchear un producto existente hay
-                                # que registrarlo igual, si no la segunda publicacion no queda
-                                # representada. Identidad segun el flujo de import de productos:
-                                # meli_id (meli_variation_id no participa, igual que en la creacion).
-                                if posting_id._name == 'product.product':
-                                    meli_posting_obj = self.env['mercadolibre.posting']
-                                    existing_posting = meli_posting_obj.search([('meli_id','=',item_id)], limit=1)
-                                    if not existing_posting:
-                                        meli_posting_obj.create({
-                                            'posting_date': fields.Date.context_today(self),
-                                            'meli_id': item_id,
-                                            'product_id': posting_id.id,
-                                            'name': 'Post ('+str(item_id)+'): '+str(posting_id.meli_title or posting_id.name or ''),
-                                        })
-                                    elif (existing_posting.product_id and existing_posting.product_id.id!=posting_id.id):
-                                        _logger.warning("product_meli_get_products > posting %s already linked to product %s, not reassigning it to %s",
-                                                        str(item_id), str(existing_posting.product_id.id), str(posting_id.id))
-                                if force_meli_pub:
-                                    #_logger.info( "Item meli_pub set" )
-                                    posting_id.meli_pub = True
-                                    posting_id.product_tmpl_id.meli_pub = True
-                                if force_meli_website_published:
-                                    posting_id.website_published = force_meli_website_published
-                                #if force_meli_website_category_create_and_assign:
-                                #    posting_id.website_published = force_meli_website_published
-                                synced.append( {
-                                                'name': str(posting_id.name),
-                                                'default_code': str(posting_id.default_code),
-                                                'meli_sku': seller_sku or '',
-                                                'meli_id': item_id,
-                                                'meli_id_variation': posting_id.meli_id_variation,
-                                                'meli_status': rjson3['status'] ,
-                                                'status': 'synced'
-                                                })
-                            else:
-                                #duplicates.append(str(posting_id.mapped('name'))+str(posting_id.mapped('default_code')))
-                                duplicates.append({
-                                                'name': str(posting_id[0].name),
-                                                'default_code': str(posting_id[0].default_code),
-                                                'meli_sku': seller_sku or '',
-                                                'meli_id': item_id,
-                                                'meli_id_variation': posting_id[0].meli_id_variation,
-                                                'meli_status': rjson3['status'],
-                                                'status': 'duplicate'
-                                                })
-                                _logger.error( "Item already in database but duplicated: " + str(posting_id.mapped('name')) + " skus:" + str(posting_id.mapped('default_code')) )
-                        else:
-                            #missing.append("meli_id: "+str(item_id) + " seller_sku: " +str(seller_sku))
-                            missing.append({
-                                            'name': rjson3['title'],
-                                            'default_code': '',
-                                            'meli_sku': seller_sku or '',
-                                            'meli_id': item_id,
-                                            'meli_id_variation': '',
-                                            'meli_status': rjson3['status'] ,
-                                            'status': 'missing'
-                                            })
-                            #_logger.info( "Item not in database, no sync founded for meli_id: "+str(item_id) + " seller_sku: " +str(seller_sku) )
-                        MeliCommit( self )
-                    #elif (not company.mercadolibre_import_search_sku):
+                    if force_dont_create or any(product for _, _, _, product in matches):
+                        for variation_id, seller_sku, posting, product in matches:
+                            result = {
+                                'name': product.name if product else rjson3['title'],
+                                'default_code': (product.default_code or '') if product else '',
+                                'meli_sku': seller_sku or '', 'meli_id': item_id,
+                                'meli_id_variation': variation_id or '',
+                                'meli_status': rjson3['status'],
+                                'status': 'synced' if product else 'missing',
+                            }
+                            if not product:
+                                missing.append(result)
+                                continue
+                            if posting and not posting.product_id:
+                                posting._meli_bind_product(product, company)
+                            elif not posting:
+                                postings.create({
+                                    'posting_date': fields.Date.context_today(self),
+                                    'meli_id': item_id, 'meli_variation_id': variation_id,
+                                    'product_id': product.id,
+                                    'name': 'Post (%s): %s' % (item_id, product.meli_title or product.name or ''),
+                                })
+                            if not product.meli_id:
+                                product.write({'meli_id': item_id, 'meli_id_variation': variation_id})
+                            if force_meli_pub:
+                                product.meli_pub = True
+                                product.product_tmpl_id.meli_pub = True
+                            if force_meli_website_published:
+                                product.website_published = force_meli_website_published
+                            synced.append(result)
+                        MeliCommit(self)
                     else:
                         #idcreated = self.pool.get('product.product').create(cr,uid,{ 'name': rjson3['title'], 'meli_id': rjson3['id'] })
                         if (official_store_id and "official_store_id" in rjson and str(official_store_id)!=str(rjson["official_store_id"])):
@@ -1609,7 +1546,10 @@ class res_company(models.Model):
     def get_all_items_from_existing_sku(self, products):
         company = self.env.company
         meli = self.env['meli.util'].get_new_instance(company)
+        postings = self.env["mercadolibre.posting"]
         for product in products:
+            if postings.search_count([("product_id", "=", product.id)], limit=1):
+                continue
             params = {'access_token': meli.access_token}
             response = meli.get(
                 f"/users/{str(meli.seller_id)}/items/search?seller_sku={str(product.default_code)}",
@@ -1619,6 +1559,9 @@ class res_company(models.Model):
                 rows = self._meli_items_bulk(meli, results)
                 # The helper returns requested order only after every envelope
                 # is complete and root/body-correlated, including later batches.
+                posting = postings._meli_find_exact_posting(rows[0]["id"], False, company)
+                if posting.product_id and posting.product_id != product:
+                    continue
                 product.meli_id = rows[0]["id"]
                 try:
                     product.product_meli_get_product(meli_rjson=rows[0]["body"])

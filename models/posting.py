@@ -20,6 +20,7 @@
 ##############################################################################
 
 from odoo import fields, models, api
+from odoo.exceptions import AccessError, ValidationError
 from odoo.tools.translate import _
 import logging
 
@@ -64,6 +65,130 @@ class mercadolibre_posting_update(models.TransientModel):
 class mercadolibre_posting(models.Model):
     _name = "mercadolibre.posting"
     _description = "Posting en MercadoLibre"
+
+    @api.model
+    def _meli_binding_error(self):
+        return ValidationError(_("Mercado Libre product binding is ambiguous or unavailable."))
+
+    @api.model
+    def _meli_variation_key(self, variation_id):
+        return str(variation_id) if variation_id else False
+
+    @api.model
+    def _meli_check_binding_product(self, product, company):
+        if not product:
+            return product
+        if len(product) != 1:
+            raise self._meli_binding_error()
+        product = product.with_env(self.env)
+        try:
+            product.check_access("read")
+            if not product.active or (product.company_id and product.company_id != company):
+                raise self._meli_binding_error()
+        except AccessError:
+            raise self._meli_binding_error() from None
+        return product
+
+    @api.model
+    def _meli_find_exact_posting(self, item_id, variation_id, company):
+        """Find the visible exact row, including a row awaiting its product."""
+        if company not in self.env.companies:
+            raise self._meli_binding_error()
+        try:
+            result = self.search([
+                ("meli_id", "=", item_id),
+                ("meli_variation_id", "=", self._meli_variation_key(variation_id)),
+            ], limit=2)
+            if len(result) > 1:
+                raise self._meli_binding_error()
+            if result:
+                self._meli_check_binding_product(result.product_id, company)
+        except AccessError:
+            raise self._meli_binding_error() from None
+        return result
+
+    @api.model
+    def _meli_find_catalog_product(self, company, domain):
+        """Include archived candidates so an obsolete identity cannot be reused."""
+        if company not in self.env.companies:
+            raise self._meli_binding_error()
+        try:
+            result = self.env["product.product"].with_context(active_test=False).search(
+                [("company_id", "in", [False, company.id])] + domain, limit=2,
+            )
+        except AccessError:
+            raise self._meli_binding_error() from None
+        return self._meli_check_binding_product(result, company)
+
+    @api.model
+    def _meli_find_direct_product(self, item_id, variation_id, company):
+        product = self._meli_find_catalog_product(company, [
+            ("meli_id", "=", item_id),
+            ("meli_id_variation", "=", self._meli_variation_key(variation_id)),
+        ])
+        return self._meli_check_fallback_variant(product, item_id, variation_id)
+
+    @api.model
+    def _meli_find_reference_product(self, reference, company, barcode=False):
+        if not isinstance(reference, str) or not reference:
+            return self.env["product.product"]
+        # The external SKU is a literal, not a SQL LIKE pattern.
+        reference = reference.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        domain = [("default_code", "=ilike", reference)]
+        if barcode:
+            domain = ["|"] + domain + [("barcode", "=ilike", reference)]
+        return self._meli_find_catalog_product(company, domain)
+
+    @api.model
+    def _meli_check_fallback_variant(self, product, item_id, variation_id):
+        if not product:
+            return product
+        key = self._meli_variation_key(variation_id)
+        if ((product.meli_id == item_id and (product.meli_id_variation or False) != key)
+                or self.search_count([
+                    ("meli_id", "=", item_id), ("product_id", "=", product.id),
+                    ("meli_variation_id", "!=", key),
+                ], limit=1)):
+            raise self._meli_binding_error()
+        return product
+
+    @api.model
+    def _meli_can_import_variant(self, product, item_id, variation_id, company, fallback_match):
+        key = self._meli_variation_key(variation_id)
+        if not key:
+            return False
+        try:
+            posting = self._meli_find_exact_posting(item_id, key, company)
+            if posting.product_id:
+                return posting.product_id == product
+            if not fallback_match or (product.meli_id and product.meli_id != item_id):
+                return False
+            if product.meli_id_variation and product.meli_id_variation != key:
+                return False
+            direct = self._meli_find_direct_product(item_id, key, company)
+            return (not direct or direct == product) and not self.search_count([
+                ("meli_id", "=", item_id), ("product_id", "=", product.id),
+                ("meli_variation_id", "not in", [False, key]),
+            ], limit=1)
+        except ValidationError:
+            return False
+
+    def _meli_bind_product(self, product, company):
+        """Fill an existing blank posting without overwriting a concurrent binding."""
+        self.ensure_one()
+        self._meli_check_binding_product(product, company)
+        try:
+            self.check_access("write")
+            self.env.cr.execute("SELECT id FROM mercadolibre_posting WHERE id = %s FOR UPDATE", [self.id])
+            if not self.env.cr.fetchone():
+                raise self._meli_binding_error()
+            self.invalidate_recordset(["product_id"])
+            if self.product_id and self.product_id != product:
+                raise self._meli_binding_error()
+            if not self.product_id:
+                self.product_id = product
+        except AccessError:
+            raise self._meli_binding_error() from None
 
     def _posting_update( self ):
 

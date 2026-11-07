@@ -2256,33 +2256,24 @@ class mercadolibre_orders(models.Model):
 
         return mlorder
 
-    def search_meli_product( self, meli=None, meli_item=None, config=None ):
-        company = (config and 'company_id' in config._fields and config.company_id) or self.env.user.company_id
-        company_domain = ['|',('company_id','=',False),('company_id','=',company.id)]
-        product_related = False
-        product_obj = self.env['product.product']
+    def search_meli_product(self, meli=None, meli_item=None, config=None):
         if not meli_item:
-            return None
-        meli_id = meli_item['id']
-        meli_id_variation = ("variation_id" in meli_item and meli_item['variation_id'])
-        meli_seller_sku = "seller_sku" in meli_item and meli_item["seller_sku"]
-        if meli_seller_sku:
-            product_related = product_obj.search([ ('default_code','=ilike',meli_seller_sku)]
-                                                   +company_domain)
-            #search by barcode
-            if ((not product_related) or len(product_related)>1):
-                product_related = product_obj.search([ ('barcode','=ilike',meli_seller_sku)]
-                                                        +company_domain)
-
-        if ((not product_related) or len(product_related)>1):
-            if (meli_id_variation):
-                product_related = product_obj.search([ ('meli_id','=',meli_id), ('meli_id_variation','=',meli_id_variation)]
-                                                        +company_domain)
-            else:
-                product_related = product_obj.search([('meli_id','=', meli_id)]
-                                                      +company_domain)
-
-        return product_related
+            return self.env["product.product"]
+        company = ((config and "company_id" in config._fields and config.company_id)
+                   or (config if config and config._name == "res.company" else self.env.company))
+        postings = self.env["mercadolibre.posting"]
+        item_id, variation_id = meli_item["id"], meli_item.get("variation_id")
+        posting = postings._meli_find_exact_posting(item_id, variation_id, company)
+        if posting.product_id:
+            return posting.product_id
+        product = postings._meli_find_direct_product(item_id, variation_id, company)
+        if product:
+            return product
+        for reference in (meli_item.get("seller_sku"), meli_item.get("seller_custom_field")):
+            product = postings._meli_find_reference_product(reference, company, barcode=True)
+            if product:
+                return postings._meli_check_fallback_variant(product, item_id, variation_id)
+        return self.env["product.product"]
 
     def update_partner_billing_info( self, partner_id, meli_buyer_fields, Receiver):
 
@@ -4770,10 +4761,9 @@ class mercadolibre_orders(models.Model):
                                                     rjson=rjson3 )
 
 
-                post_related = posting_obj.search([
-                                                ('meli_id','=',Item['item']['id']),
-                                                ('meli_variation_id','=',Item['item']['variation_id'])
-                                                ],limit=1)
+                post_related = posting_obj._meli_find_exact_posting(
+                    Item['item']['id'], Item['item'].get('variation_id'), company,
+                )
                 if (post_related):
                     pass;
                     #_logger.info("order post related by meli_id:"+str(post_related))
@@ -4782,7 +4772,7 @@ class mercadolibre_orders(models.Model):
                     posting_fields = {
                         'posting_date': str(datetime.now()),
                         'meli_id': Item['item']['id'],
-                        'meli_variation_id': Item['item']['variation_id'],
+                        'meli_variation_id': posting_obj._meli_variation_key(Item['item'].get('variation_id')),
                         'name': 'Order: ' + Item['item']['title']
                     }
 
@@ -4802,14 +4792,12 @@ class mercadolibre_orders(models.Model):
                     #1ST attempt "seller_sku" or "seller_custom_field"
                     seller_sku = ('seller_sku' in Item['item'] and Item['item']['seller_sku']) or ('seller_custom_field' in Item['item'] and Item['item']['seller_custom_field'])
                     if (seller_sku):
-                        product_related = product_obj.search([('default_code','=ilike',seller_sku)]
-                                                              +company_domain)
+                        product_related = posting_obj._meli_find_reference_product(seller_sku, company)
                     #2ND attempt only old "seller_custom_field"
                     if (not product_related and 'seller_custom_field' in Item['item']):
                         seller_sku = ('seller_custom_field' in Item['item'] and Item['item']['seller_custom_field'])
                     if (seller_sku):
-                        product_related = product_obj.search([('default_code','=ilike',seller_sku)]
-                                                                +company_domain)
+                        product_related = posting_obj._meli_find_reference_product(seller_sku, company)
                     else:
                         seller_sku = ('seller_sku' in Item['item'] and Item['item']['seller_sku']) or ('seller_custom_field' in Item['item'] and Item['item']['seller_custom_field'])
 
@@ -4822,8 +4810,9 @@ class mercadolibre_orders(models.Model):
                     if (len(product_related)):
                         #_logger.info(order product related by seller_custom_field and default_code:"+str(seller_sku) )
 
-                        if (len(product_related)>1):
-                            product_related = product_related[0]
+                        posting_obj._meli_check_fallback_variant(
+                            product_related, Item['item']['id'], Item['item'].get('variation_id'),
+                        )
 
                         if (not product_related.meli_id and config.mercadolibre_create_product_from_order):
                             prod_fields = {
@@ -4837,12 +4826,9 @@ class mercadolibre_orders(models.Model):
                             #if (seller_sku):
                             #    prod_fields['default_code'] = seller_sku
                     else:
-                        combination = []
-                        if ('variation_id' in Item['item'] and Item['item']['variation_id'] ):
-                            combination = [( 'meli_id_variation','=',Item['item']['variation_id'])]
-                        product_related = product_obj.search([('meli_id','=',Item['item']['id'])]
-                                                              +company_domain
-                                                              +combination)
+                        product_related = posting_obj._meli_find_direct_product(
+                            Item['item']['id'], Item['item'].get('variation_id'), company,
+                        )
                         if (product_related and len(product_related)):
                             #_logger.info(Product founded:"+str(Item['item']['id']))
                             pass;
@@ -4854,9 +4840,10 @@ class mercadolibre_orders(models.Model):
                             try:
                                 if rjson3 and 'variations' in rjson3['variations'] and len(rjson3['variations'])>0:
                                     if len(rjson3['variations'])==1:
-                                        #only 1, usually added variation by ML
-                                        product_related = product_obj.search([('meli_id','=', Item['item']['id'])]
-                                                                              +company_domain, order='id asc',limit=1)
+                                        # A sole remote variation does not prove the inbound key.
+                                        product_related = posting_obj._meli_find_direct_product(
+                                            Item['item']['id'], Item['item'].get('variation_id'), company,
+                                        )
                                         if (product_related):
                                             productcreated = product_related
 
@@ -4901,27 +4888,15 @@ class mercadolibre_orders(models.Model):
                             #_logger.info(TODO: search by attributes")
                             pass;
 
-                if product_related and len(product_related):
-                    if len(product_related)>1:
-                        last_p = False
-                        for p in product_related:
-                            last_p = p
-                            if (p.product_tmpl_id.meli_pub_principal_variant):
-                                product_related_obj = p.product_tmpl_id.meli_pub_principal_variant
-                            if (p.meli_default_stock_product):
-                                product_related_obj = p.meli_default_stock_product
-
-                        if (product_related_obj):
-                            product_related_obj = product_related_obj
-                        else:
-                            product_related_obj = last_p
-                    else:
-                        product_related_obj = product_related
+                if product_related:
+                    product_related_obj = posting_obj._meli_check_binding_product(product_related, company)
 
                 if (post_related and product_related):
                     #only assign to post if no object is already assigned
                     if ( len(post_related)==1 and not post_related.product_id ):
-                        post_related.product_id = product_related
+                        post_related._meli_bind_product(product_related, company)
+                    elif post_related.product_id and post_related.product_id != product_related:
+                        raise posting_obj._meli_binding_error()
 
                     if (product_related and product_related.product_tmpl_id):
                         # ERROR-012: se pasa `config` para respetar la politica de facturacion

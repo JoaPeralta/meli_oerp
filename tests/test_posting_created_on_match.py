@@ -11,17 +11,22 @@ second one had no persistent representation at all:
     |-- meli_id = MLA1651548355
     `-- posting  MLA1651548355          <- MLA1651389099 was nowhere
 
-Posting identity in the product import flow is ``meli_id`` alone: both existing
-creation sites search with ``[('meli_id','=',item_id)]`` and neither writes
-``meli_variation_id`` (only the orders flow uses item + variation). These tests
-pin down that same semantics.
+Both catalog and order lookup use the exact item and variation. A representative
+product-level MLA is not a substitute for its additional postings.
 """
 
-from unittest.mock import patch
+import ast
+import inspect
+import textwrap
+from unittest.mock import Mock, patch
 
+from odoo.exceptions import ValidationError
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
+from ..models.orders import mercadolibre_orders
+from ..models.versions import ProductType
+from .test_no_variants_log_noise import _FakeMeli as _DirectMeli, _item_without_variants
 from .test_preserve_existing_meli_id import _FakeMeli, _item, _OTHER_ITEM, _OTHER_SKU
 
 _SKU = "SKU-ES700-POSTING"
@@ -222,8 +227,7 @@ class TestPostingCreatedOnMatch(TransactionCase):
 
 @tagged("post_install", "-at_install")
 class TestPostingCreatedOnVariationMatch(TransactionCase):
-    """The variation branches converge on the same code, so one path is enough
-    to pin the semantics: identity is the item id, not item + variation."""
+    """An additional legacy variation must be registered by its exact key."""
 
     def setUp(self):
         super().setUp()
@@ -246,7 +250,7 @@ class TestPostingCreatedOnVariationMatch(TransactionCase):
         self.variant = self.template.product_variant_ids[0]
         self.variant.default_code = _SKU
 
-    def test_variation_match_registers_posting_by_item_id(self):
+    def test_variation_match_registers_posting_by_exact_key(self):
         self.variant.meli_id = "MLA_FIRST"
         self.variant.meli_id_variation = "VAR_FIRST"
 
@@ -281,6 +285,209 @@ class TestPostingCreatedOnVariationMatch(TransactionCase):
         posting = self.posting_obj.search([("meli_id", "=", "MLA_SECOND")])
         self.assertEqual(len(posting), 1)
         self.assertEqual(posting.product_id, self.variant)
-        # Identity is the item id: the import flow does not store the variation
-        # on the posting (only the orders flow does).
-        self.assertFalse(posting.meli_variation_id)
+        self.assertEqual(posting.meli_variation_id, "VAR_SECOND")
+
+
+@tagged("post_install", "-at_install", "meli_posting_identity")
+class TestDurablePostingIdentity(TransactionCase):
+    def setUp(self):
+        super().setUp()
+        self.company = self.env.user.company_id
+        self.company.mercadolibre_import_search_sku = True
+        self.product_model = self.env["product.product"]
+        self.posting_model = self.env["mercadolibre.posting"]
+        self.orders = self.env["mercadolibre.orders"]
+        self.original = self.product_model.create({
+            "name": "Durably linked product", "meli_id": "MLA_PRIMARY",
+            "default_code": "SKU-EDITED",
+        })
+        self.decoy = self.product_model.create({
+            "name": "Different product", "default_code": _SKU,
+        })
+
+    def make_posting(self, item, product=None, variation=None):
+        return self.posting_model.create({
+            "name": "Test posting", "meli_id": item, "meli_variation_id": variation,
+            "product_id": product.id if product else False,
+        })
+
+    def resolve(self, item, variation=None, sku=None):
+        return self.orders.search_meli_product(
+            meli_item={"id": item, "variation_id": variation, "seller_sku": sku},
+            config=self.company,
+        )
+
+    def bulk(self, item, *, create=False):
+        fake = _FakeMeli({item["id"]: item})
+        with patch.object(type(self.env["meli.util"]), "get_new_instance", return_value=fake):
+            return self.company.product_meli_get_products(context={
+                "meli_id": item["id"], "batch_processing_unit": 1,
+                "force_dont_create": not create, "force_meli_pub": False,
+                "force_import_images": False,
+            })["json_report"]
+
+    def test_alias_after_sku_and_name_change_ignores_reused_sku(self):
+        primary = self.make_posting("MLA_PRIMARY", self.original)
+        alias = self.make_posting("MLA_ALIAS", self.original)
+        self.original.name = "Locally renamed product"
+        for _ in range(2):
+            report = self.bulk(_item("MLA_ALIAS", _SKU), create=True)
+            self.assertEqual(report["synced"][0]["name"], self.original.name)
+        self.assertEqual((primary | alias).product_id, self.original)
+        self.assertEqual(self.original.meli_id, "MLA_PRIMARY")
+        self.assertFalse(self.decoy.meli_id)
+        self.assertEqual(self.posting_model.search_count([("meli_id", "=", "MLA_ALIAS")]), 1)
+        self.assertEqual(self.resolve("MLA_ALIAS"), self.original)
+        self.assertEqual(self.resolve("MLA_ALIAS", sku=_SKU), self.original)
+
+    def test_variation_keys_are_exact_in_both_paths(self):
+        first = self.make_posting("MLA_VARIANTS", self.original, "101")
+        second = self.make_posting("MLA_VARIANTS", self.decoy, "102")
+        self.make_posting("MLA_VARIANTS", self.decoy)
+        report = self.bulk({
+            "id": "MLA_VARIANTS", "title": "Legacy", "status": "active",
+            "variations": [{"id": 101, "seller_sku": _SKU}, {"id": 102, "seller_sku": "SKU-EDITED"}],
+        })
+        self.assertEqual([r["meli_id_variation"] for r in report["synced"]], ["101", "102"])
+        self.assertEqual(first.product_id, self.original)
+        self.assertEqual(second.product_id, self.decoy)
+        self.assertEqual(self.resolve("MLA_VARIANTS", 101, _SKU), self.original)
+        self.assertEqual(self.resolve("MLA_VARIANTS", 102, "SKU-EDITED"), self.decoy)
+        self.assertFalse(self.resolve("MLA_VARIANTS", 103))
+        with self.assertRaises(ValidationError):
+            self.resolve("MLA_VARIANTS", 103, _SKU)
+
+    def test_blank_posting_can_bind_but_duplicate_exact_rows_refuse(self):
+        blank = self.make_posting("MLA_UNBOUND")
+        self.assertEqual(self.resolve("MLA_UNBOUND", sku=_SKU), self.decoy)
+        self.bulk(_item("MLA_UNBOUND", _SKU))
+        self.assertEqual(blank.product_id, self.decoy)
+        another_blank = self.make_posting("MLA_UNBOUND")
+        with self.assertRaises(ValidationError):
+            self.resolve("MLA_UNBOUND", sku=_SKU)
+        report = self.bulk(_item("MLA_UNBOUND", _SKU), create=True)
+        self.assertEqual(len(report["duplicates"]), 1)
+        self.assertFalse(another_blank.product_id)
+
+    def test_unambiguous_direct_legacy_identity_precedes_sku(self):
+        self.assertEqual(self.resolve("MLA_PRIMARY", sku=_SKU), self.original)
+        self.assertEqual(self.resolve("MLA_WITHOUT_IDENTITY", sku=_SKU), self.decoy)
+        self.original.meli_id_variation = "201"
+        self.assertEqual(self.resolve("MLA_PRIMARY", 201, _SKU), self.original)
+        self.assertFalse(self.resolve("MLA_PRIMARY"))
+        self.product_model.create({"name": "Another legacy candidate", "meli_id": "MLA_PRIMARY",
+                                   "meli_id_variation": "201"})
+        with self.assertRaises(ValidationError):
+            self.resolve("MLA_PRIMARY", 201, _SKU)
+
+    def test_legacy_direct_key_cannot_override_its_own_explicit_variant(self):
+        self.make_posting("MLA_PRIMARY", self.original, "101")
+        self.assertEqual(self.resolve("MLA_PRIMARY", 101, _SKU), self.original)
+        with self.assertRaises(ValidationError):
+            self.resolve("MLA_PRIMARY", sku=_SKU)
+        report = self.bulk(_item("MLA_PRIMARY", _SKU), create=True)
+        self.assertEqual(len(report["duplicates"]), 1)
+        self.assertEqual(self.posting_model.search_count([("meli_id", "=", "MLA_PRIMARY")]), 1)
+
+    def test_full_order_fallback_does_not_borrow_a_sibling_variant(self):
+        # Run the actual retained fallback fragment with real ORM models, but
+        # without unrelated full-order admission or payment fixtures.
+        method = inspect.unwrap(mercadolibre_orders.orders_update_order_json)
+        tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
+        fallback, = (
+            node for node in ast.walk(tree) if isinstance(node, ast.If)
+            and {"seller_sku", "seller_custom_field"} <= {
+                value.value for value in ast.walk(node.test)
+                if isinstance(value, ast.Constant) and isinstance(value.value, str)
+            }
+            and any(isinstance(value, ast.Name) and value.id == "product_related"
+                    for value in ast.walk(node.test))
+        )
+        seam = ast.parse("def invoke(product_related, Item, rjson3): pass")
+        seam.body[0].body = [fallback, ast.Return(value=ast.Name(id="product_related", ctx=ast.Load()))]
+        scope = {
+            "posting_obj": self.posting_model, "product_obj": self.product_model,
+            "company": self.company, "config": self.company, "ProductType": ProductType,
+            "company_domain": [("company_id", "in", [False, self.company.id])], "_logger": Mock(),
+        }
+        exec(compile(ast.fix_missing_locations(seam), "<native order fallback>", "exec"), scope)
+        self.company.mercadolibre_create_product_from_order = False
+        self.original.meli_id_variation = "101"
+        sibling = self.make_posting("MLA_PRIMARY", self.original, "101")
+        blank = self.make_posting("MLA_PRIMARY")
+        inbound = {"item": {"id": "MLA_PRIMARY", "variation_id": None, "seller_sku": "UNMATCHED"}}
+        for variations in ([{"id": 101}], ["variations"]):
+            with self.subTest(variations=variations):
+                item = {"id": "MLA_PRIMARY", "title": "Legacy test item", "variations": variations}
+                self.assertFalse(scope["invoke"](self.product_model, inbound, item))
+        self.assertFalse(blank.product_id)
+        self.assertEqual(sibling.product_id, self.original)
+
+    def test_foreign_and_archived_targets_do_not_fall_back_to_sku(self):
+        foreign = self.env["res.company"].create({"name": "Other company"})
+        product = self.product_model.create({"name": "Foreign product", "company_id": foreign.id})
+        self.make_posting("MLA_FOREIGN", product)
+        with self.assertRaises(ValidationError):
+            self.resolve("MLA_FOREIGN", sku=_SKU)
+        self.make_posting("MLA_ARCHIVED", self.original)
+        self.original.active = False
+        with self.assertRaises(ValidationError):
+            self.resolve("MLA_ARCHIVED", sku=_SKU)
+
+    def test_direct_import_cannot_reassign_existing_posting(self):
+        posting = self.make_posting("MLA_PRIMARY", self.original)
+        fake = _FakeMeli({"MLA_PRIMARY": _item("MLA_PRIMARY", _SKU)})
+        with patch.object(type(self.env["meli.util"]), "get_new_instance", return_value=fake):
+            with self.assertRaises(ValidationError):
+                self.decoy.product_meli_get_product(meli_id="MLA_PRIMARY", import_images=False)
+        self.assertEqual(posting.product_id, self.original)
+        self.assertFalse(self.decoy.meli_id)
+
+    def test_direct_variant_import_preserves_exact_siblings_and_can_bind_new_one(self):
+        attribute = self.env["product.attribute"].create({"name": "Direct import variant"})
+        values = self.env["product.attribute.value"].create([
+            {"name": str(i), "attribute_id": attribute.id} for i in range(3)
+        ])
+        template = self.env["product.template"].create({
+            "name": "Direct import test product",
+            "attribute_line_ids": [(0, 0, {"attribute_id": attribute.id,
+                                           "value_ids": [(6, 0, values.ids)]})],
+        })
+        first, second, unbound = template.product_variant_ids.sorted("id")
+        first.write({"meli_id": "MLA_DIRECT", "meli_id_variation": "101", "default_code": "COLLISION"})
+        second.write({"meli_id": "MLA_DIRECT", "meli_id_variation": "102", "default_code": "EDITED"})
+        unbound.default_code = "NEW-VARIANT"
+        exact_first = self.make_posting("MLA_DIRECT", first, "101")
+        exact_second = self.make_posting("MLA_DIRECT", second, "102")
+        payload = dict(_item_without_variants(), id="MLA_DIRECT", variations=[
+            {"id": 101, "seller_sku": "REASSIGNED", "available_quantity": 3},
+            {"id": 102, "seller_sku": "COLLISION", "available_quantity": 5},
+            {"id": 103, "seller_sku": "NEW-VARIANT", "available_quantity": 7},
+        ])
+        self.company.mercadolibre_update_existings_variants = False
+        with patch.object(type(self.env["meli.util"]), "get_new_instance", return_value=_DirectMeli(payload)):
+            first.product_meli_get_product(import_images=False)
+        self.assertEqual((first.meli_id_variation, second.meli_id_variation), ("101", "102"))
+        self.assertEqual((first.meli_available_quantity, second.meli_available_quantity), (3, 5))
+        self.assertEqual(exact_first.product_id, first)
+        self.assertEqual(exact_second.product_id, second)
+        self.assertEqual((unbound.meli_id, unbound.meli_id_variation), ("MLA_DIRECT", "103"))
+
+    def test_direct_legacy_alias_without_its_own_binding_cannot_change_representative(self):
+        self.original.meli_id_variation = "101"
+        other = self.make_posting("MLA_ALIAS", self.decoy, "102")
+        item = dict(_item("MLA_ALIAS", _SKU), variations=[{"id": 102}])
+        with patch.object(type(self.env["meli.util"]), "get_new_instance",
+                          return_value=_FakeMeli({"MLA_ALIAS": item})):
+            with self.assertRaises(ValidationError):
+                self.original.product_meli_get_product(meli_id="MLA_ALIAS", import_images=False)
+        self.assertEqual((self.original.meli_id, self.original.meli_id_variation), ("MLA_PRIMARY", "101"))
+        self.assertEqual(other.product_id, self.decoy)
+
+    def test_reverse_sku_does_not_search_a_product_with_existing_posting(self):
+        self.make_posting("MLA_ALIAS", self.original)
+        fake = Mock()
+        with patch.object(type(self.env["meli.util"]), "get_new_instance", return_value=fake):
+            self.company.get_all_items_from_existing_sku(self.original)
+        fake.get.assert_not_called()
+        self.assertEqual(self.original.meli_id, "MLA_PRIMARY")

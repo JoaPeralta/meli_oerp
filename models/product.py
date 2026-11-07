@@ -2449,6 +2449,32 @@ class product_product(models.Model):
         if 'error' in rjson:
             return {}
 
+        postings = self.env["mercadolibre.posting"]
+        if rjson.get("id") != meli_id:
+            raise postings._meli_binding_error()
+        variation_id = postings._meli_variation_key(product.meli_id_variation)
+        variations = rjson.get("variations") or []
+        variation_keys = {postings._meli_variation_key(row.get("id")) for row in variations} - {False}
+        if variations and len(variation_keys) != len(variations):
+            raise postings._meli_binding_error()
+        # A listing-level import does not establish a variant binding by itself.
+        exact_variant = (
+            product.meli_id == meli_id and variation_id in variation_keys
+        )
+        if variation_keys and product.meli_id and product.meli_id != meli_id:
+            aliases = [key for key in variation_keys
+                       if postings._meli_find_exact_posting(meli_id, key, company).product_id == product]
+            if len(aliases) != 1:
+                raise postings._meli_binding_error()
+            variation_id, = aliases
+            exact_variant = True
+        posting = postings
+        if not variations or exact_variant:
+            variation_id = variation_id if exact_variant else False
+            posting = postings._meli_find_exact_posting(meli_id, variation_id, company)
+            if posting.product_id and posting.product_id != product:
+                raise postings._meli_binding_error()
+
         #TODO: traer la descripcion: con
         #https://api.mercadolibre.com/items/{ITEM_ID}/description?access_token=$ACCESS_TOKEN
         if rjson and 'descriptions' in rjson:
@@ -2575,6 +2601,8 @@ class product_product(models.Model):
             del tmpl_fields['name']
         if (product_template.description_sale or not company.mercadolibre_overwrite_template):
             del tmpl_fields['description_sale']
+        if posting.product_id == product and product.meli_id and product.meli_id != meli_id:
+            del meli_fields["meli_id"]
 
         has_user_product_id = product._fetch_meli_user_product_id( meli_id=meli_id, meli_id_variation=None, meli=meli, config=config, item_json=rjson )
         if (has_user_product_id):
@@ -2618,26 +2646,27 @@ class product_product(models.Model):
         if (1==2 and meli_available_quantity ==0):
             product_template.website_published = False
 
-        posting_fields = {
-            'posting_date': str(datetime.now()),
-            'meli_id':rjson['id'],
-            'product_id':product.id,
-            'name': 'Post ('+str(product.meli_id)+'): ' + product.meli_title
-        }
-
-        posting = self.env['mercadolibre.posting'].search([('meli_id','=',rjson['id'])])
-        posting_id = posting.id
-
-        if not posting_id:
-            posting = self.env['mercadolibre.posting'].create((posting_fields))
-            posting_id = posting.id
-            if (posting):
-                posting.posting_query_questions()
-        else:
-            posting.write({'product_id':product.id })
+        if not variations or exact_variant:
+            if not posting:
+                posting = postings.create({
+                    'posting_date': str(datetime.now()), 'meli_id': meli_id,
+                    'meli_variation_id': variation_id, 'product_id': product.id,
+                    'name': 'Post (%s): %s' % (meli_id, product.meli_title),
+                })
+            elif not posting.product_id:
+                posting._meli_bind_product(product, company)
             posting.posting_query_questions()
 
         b_search_nonfree_ship = False
+
+        def set_variant_identity(variant, variation):
+            # An alternate validated posting is not a new representative key.
+            if not variant.meli_id or (variant.meli_id == meli_id and not variant.meli_id_variation):
+                variant.write({
+                    "meli_id": meli_id,
+                    "meli_id_variation": postings._meli_variation_key(variation["id"]),
+                })
+
         if ('shipping' in rjson):
 
             if "logistic_type" in rjson["shipping"]:
@@ -2699,13 +2728,14 @@ class product_product(models.Model):
                         if not product_template.meli_pub_principal_variant:
                             product_template.meli_pub_principal_variant = variant
                         for variation in rjson['variations']:
-                            has_ml_sku = "seller_sku" in variation and variation["seller_sku"]
-                            import_var_id = has_ml_sku and variant.default_code == variation["seller_sku"]
-                            #import_var_id = not has_ml_sku
-                            if import_var_id:
-                                variant.meli_id_variation = variation["id"]
+                            sku = variation.get("seller_sku")
+                            sku_match = (sku and variant.default_code == sku
+                                         and sum(v.default_code == sku for v in product_template.product_variant_ids) == 1
+                                         and sum(row.get("seller_sku") == sku for row in rjson['variations']) == 1)
+                            if postings._meli_can_import_variant(
+                                    variant, meli_id, variation.get("id"), company, sku_match):
+                                set_variant_identity(variant, variation)
                                 variant.meli_pub = True
-                                variant.meli_id = product.meli_id
                                 variant.meli_available_quantity = variation["available_quantity"]
 
         published_att_variants = False
@@ -2750,7 +2780,6 @@ class product_product(models.Model):
                 #_logger.info("Created variant:")
                 #_logger.info(variant)
                 variant.meli_pub = product_template.meli_pub
-                variant.meli_id = rjson['id']
                 #variant.default_code = rjson['id']
                 #variant.name = rjson['title'].encode("utf-8")
                 has_sku = False
@@ -2763,12 +2792,19 @@ class product_product(models.Model):
                 for variation in rjson['variations']:
                     if variation["default_code"]:
                         nv = nv + 1
+                def matches_combination(variation):
+                    return (variant.is_variant_in_combination(variation["default_code"], _v_default_code)
+                            or (variation["default_code"] and nv == 1 and len(product_template.product_variant_ids) == 1))
+                match_count = sum(bool(matches_combination(row)) for row in rjson['variations'] if row.get("id"))
                 for variation in rjson['variations']:
                     _logger.info(variation)
                     _logger.info("variation[default_code]: " + variation["default_code"])
-                    is_v_comb = variant.is_variant_in_combination( variation["default_code"], _v_default_code )
-                    _logger.info("variation[default_code]: " + variation["default_code"]+" is_v_comb:"+str(is_v_comb))
-                    if ( len(variation["default_code"]) and (is_v_comb or ( nv==1 and 1==len(product_template.product_variant_ids))) ):
+                    if not postings._meli_can_import_variant(
+                            variant, meli_id, variation.get("id"), company,
+                            match_count == 1 and matches_combination(variation)):
+                        continue
+                    set_variant_identity(variant, variation)
+                    if variation["default_code"]:
                         if ("seller_custom_field" in variation or "seller_sku" in variation):
                             #_logger.info("has_sku")
                             #_logger.info(variation["seller_custom_field"])
@@ -2777,7 +2813,6 @@ class product_product(models.Model):
                                 _logger.info("Assigned:"+str(variant.default_code))
                             except:
                                 pass;
-                            variant.meli_id_variation = variation["id"]
                             has_sku = True
                         #else:
                         #    variant.default_code = variant.meli_id+'-'+_v_default_code
@@ -2798,11 +2833,9 @@ class product_product(models.Model):
                             except:
                                 pass;
 
-                            variant.meli_id_variation = variation["id"]
                             has_sku = True
                         variant.meli_available_quantity = variation["available_quantity"]
-                    elif (is_v_comb and "id" in variation):
-                        variant.meli_id_variation = variation["id"]
+                    else:
                         variant.meli_available_quantity = variation["available_quantity"]
                         #TODO post message to force user to set default_code and meli sku
                         if ("seller_custom_field" in variation or "seller_sku" in variation):
