@@ -2638,13 +2638,6 @@ class product_product(models.Model):
         if (meli_available_quantity >=0):
             # ERROR-012: `config` (= company aca) decide la politica de facturacion.
             UpdateProductType(product_template, config=config)
-            #TODO: agregar parametro para esto: ml_auto_website_published_if_available  default true
-            if (1==1 and meli_available_quantity >0):
-                product_template.website_published = True
-
-        #TODO: agregar parametro para esto: ml_auto_website_unpublished_if_not_available default false
-        if (1==2 and meli_available_quantity ==0):
-            product_template.website_published = False
 
         if not variations or exact_variant:
             if not posting:

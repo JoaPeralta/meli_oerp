@@ -491,3 +491,50 @@ class TestDurablePostingIdentity(TransactionCase):
             self.company.get_all_items_from_existing_sku(self.original)
         fake.get.assert_not_called()
         self.assertEqual(self.original.meli_id, "MLA_PRIMARY")
+
+
+@tagged("post_install", "-at_install")
+class TestCatalogueWebsiteVisibility(TransactionCase):
+    def setUp(self):
+        super().setUp()
+        self.company = self.env.user.company_id
+        self.company.write({
+            "mercadolibre_import_search_sku": False,
+            "mercadolibre_update_existings_variants": False,
+            "mercadolibre_update_local_stock": False,
+            "mercadolibre_create_website_categories": False,
+        })
+
+    def test_direct_refresh_preserves_existing_website_visibility(self):
+        for published in (False, True):
+            item_id = "MLA_WEBSITE_DIRECT_%d" % published
+            product = self.env["product.product"].create({
+                "name": item_id, "meli_id": item_id, "default_code": item_id,
+            })
+            product.product_tmpl_id.website_published = published
+            for quantity in (5, 0):
+                with self.subTest(published=published, quantity=quantity):
+                    payload = dict(_item_without_variants(), id=item_id, available_quantity=quantity)
+                    with patch.object(type(self.env["meli.util"]), "get_new_instance",
+                                      return_value=_DirectMeli(payload)):
+                        product.product_meli_get_product(import_images=False)
+                    self.assertEqual(product.meli_available_quantity, quantity)
+                    self.assertEqual(product.product_tmpl_id.website_published, published)
+
+    def test_bulk_creation_only_publishes_with_explicit_opt_in(self):
+        for publish in (False, True):
+            with self.subTest(publish=publish):
+                item_id = "MLA_WEBSITE_BULK_%d" % publish
+                payload = dict(_item_without_variants(), id=item_id, available_quantity=5)
+                with patch.object(type(self.env["meli.util"]), "get_new_instance",
+                                  return_value=_DirectMeli(payload)):
+                    self.company.product_meli_get_products(context={
+                        "meli_id": item_id, "batch_processing_unit": 1,
+                        "batch_processing_unit_offset": 0,
+                        "force_dont_create": False, "force_import_images": False,
+                        "force_meli_pub": False, "force_meli_website_published": publish,
+                    })
+                product = self.env["product.product"].search([("meli_id", "=", item_id)])
+                self.assertEqual(len(product), 1)
+                self.assertEqual(product.meli_available_quantity, 5)
+                self.assertEqual(product.product_tmpl_id.website_published, publish)
