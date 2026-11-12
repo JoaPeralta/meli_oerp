@@ -43,7 +43,10 @@ from datetime import datetime
 
 from .meli_oerp_config import *
 from .meli_util import _meli_upload_payload
-from .meli_posting_metadata import import_response_status, imported_metadata
+from .meli_posting_metadata import (
+    ITEM_ID, admitted_catalogue_item, catalogue_variations, import_response_status, imported_metadata,
+    metadata_evidence, user_product_id,
+)
 
 #from ..melisdk.meli import Meli
 import string
@@ -2394,7 +2397,11 @@ class product_product(models.Model):
 
         return upid
 
-    def product_meli_get_product( self, context=None, meli_id=None, import_images=True ):
+    def product_meli_get_product(self, context=None, meli_id=None, import_images=True):
+        return self._meli_import_product_item(context=context, meli_id=meli_id, import_images=import_images)
+
+    def _meli_import_product_item(self, context=None, meli_id=None, import_images=True,
+                                  *, item_payload=None, item_status=None, meli=None):
         company = self.env.user.company_id
 
         config = company
@@ -2412,14 +2419,23 @@ class product_product(models.Model):
         product_template_obj = self.env['product.template']
         product_template = product_template_obj.browse(product.product_tmpl_id.id)
 
-        meli = self.env['meli.util'].get_new_instance(company)
+        if not isinstance(meli_id, str) or not ITEM_ID.fullmatch(meli_id):
+            return {}
+        meli = meli or self.env['meli.util'].get_new_instance(company)
 
         try:
-            response = meli.get("/items/"+str(meli_id), { 'access_token': meli.access_token, 'include_attributes': 'all' } )
-            item_response_status = import_response_status(response)
-            #_logger.info(response)
-            rjson = response.json()
-            if rjson and 'variations' in rjson:
+            if item_payload is None:
+                response = meli.get("/items/" + meli_id, {
+                    "access_token": meli.access_token, "include_attributes": "all",
+                })
+                item_status = import_response_status(response)
+                item_payload = response.json()
+            if not admitted_catalogue_item(item_payload, item_status, meli_id,
+                                           company.mercadolibre_seller_id):
+                return {}
+            from copy import deepcopy
+            rjson = deepcopy(item_payload)
+            if rjson.get("variations"):
                 vindex = -1
                 for var in rjson['variations']:
                     vindex = vindex+1
@@ -2452,17 +2468,12 @@ class product_product(models.Model):
             return {}
 
         postings = self.env["mercadolibre.posting"]
-        if rjson.get("id") != meli_id:
-            raise postings._meli_binding_error()
+        postings._meli_check_binding_product(product, company)
         variation_id = postings._meli_variation_key(product.meli_id_variation)
-        variations = rjson.get("variations") or []
-        variation_keys = {postings._meli_variation_key(row.get("id")) for row in variations} - {False}
-        if variations and len(variation_keys) != len(variations):
-            raise postings._meli_binding_error()
+        variations = catalogue_variations(item_payload)
+        variation_keys = {str(row["id"]) for row in variations or ()}
         # A listing-level import does not establish a variant binding by itself.
-        exact_variant = (
-            product.meli_id == meli_id and variation_id in variation_keys
-        )
+        exact_variant = product.meli_id == meli_id and variation_id in variation_keys
         if variation_keys and product.meli_id and product.meli_id != meli_id:
             aliases = [key for key in variation_keys
                        if postings._meli_find_exact_posting(meli_id, key, company).product_id == product]
@@ -2471,14 +2482,79 @@ class product_product(models.Model):
             variation_id, = aliases
             exact_variant = True
         posting = postings
-        if not variations or exact_variant:
-            variation_id = variation_id if exact_variant else False
+        root_offer = not variations and (variations is not None or
+                                         user_product_id(item_payload.get("user_product_id"), meli_id))
+        identity = {}
+        if root_offer or exact_variant or variations is None:
+            if not exact_variant:
+                if variation_id:
+                    raise postings._meli_binding_error()
+                variation_id = False
             posting = postings._meli_find_exact_posting(meli_id, variation_id, company)
-            if posting.product_id and posting.product_id != product:
+            direct = postings._meli_find_direct_product(meli_id, variation_id, company)
+            if ((posting.product_id and posting.product_id != product)
+                    or (direct and direct != product)):
                 raise postings._meli_binding_error()
+            if product.meli_id and product.meli_id != meli_id and posting.product_id != product:
+                raise postings._meli_binding_error()
+            if not root_offer and variations is None and not (direct == product or posting.product_id == product):
+                raise postings._meli_binding_error()
+            _values, _states, identity, failure = metadata_evidence(
+                item_payload, meli_id, variation_id, company.mercadolibre_seller_id,
+            )
+            if failure:
+                raise postings._meli_binding_error()
+            postings._meli_catalogue_identity_matches(company, identity, product)
+        elif product.meli_id != meli_id or variation_id:
+            # Legacy listing detail is not proof of an unbound variant.
+            raise postings._meli_binding_error()
+        variant_identities = {
+            str(row["id"]): metadata_evidence(
+                item_payload, meli_id, str(row["id"]), company.mercadolibre_seller_id,
+            )[2] for row in variations or ()
+        }
+
+        # Freeze contradictory identities before the legacy import does any writes.
+        # Existing exact keys may corroborate; a sole SKU remains a fallback only
+        # where the existing variant matcher can independently prove it.
+        blocked_variations = set()
+        for key, evidence in variant_identities.items():
+            try:
+                existing = postings._meli_find_exact_posting(meli_id, key, company).product_id
+                direct = postings._meli_find_direct_product(meli_id, key, company)
+                if existing and direct and existing != direct:
+                    raise postings._meli_binding_error()
+                postings._meli_catalogue_identity_matches(
+                    company, evidence, existing or direct, require_candidate=False,
+                )
+            except ValidationError:
+                blocked_variations.add(key)
+        if blocked_variations:
+            # Legacy import may rebuild template values or update stock for
+            # every sibling. Do not run it partially with a known conflict.
+            raise postings._meli_binding_error()
+
+        def can_import_variant(variant, variation, fallback_match):
+            key = postings._meli_variation_key(variation.get("id"))
+            if not key or not postings._meli_can_import_variant(variant, meli_id, key, company, fallback_match):
+                return False
+            try:
+                postings._meli_catalogue_identity_matches(company, variant_identities[key], variant)
+            except ValidationError:
+                return False
+            return True
 
         #TODO: traer la descripcion: con
         #https://api.mercadolibre.com/items/{ITEM_ID}/description?access_token=$ACCESS_TOKEN
+        if not root_offer and not exact_variant and variations is None:
+            # Keep legacy data untouched when the response cannot identify an
+            # offer. A proven existing root may only receive item-level metadata.
+            if posting and posting.product_id == product:
+                posting._meli_fill_imported_metadata(imported_metadata(
+                    item_payload, item_status, meli_id, False, company.mercadolibre_seller_id,
+                ))
+            return {}
+
         if rjson and 'descriptions' in rjson:
             response2 = meli.get("/items/"+str(meli_id)+"/description", {'access_token':meli.access_token})
             rjson2 = response2.json()
@@ -2606,10 +2682,11 @@ class product_product(models.Model):
         if posting.product_id == product and product.meli_id and product.meli_id != meli_id:
             del meli_fields["meli_id"]
 
-        has_user_product_id = product._fetch_meli_user_product_id( meli_id=meli_id, meli_id_variation=None, meli=meli, config=config, item_json=rjson )
+        has_user_product_id = identity.get("user_product_id")
         if (has_user_product_id):
             meli_fields["meli_user_product_id"] = has_user_product_id
-            tmpl_fields["meli_user_product_id"] = has_user_product_id
+            if not exact_variant:
+                tmpl_fields["meli_user_product_id"] = has_user_product_id
 
         if ("catalog_listing" in rjson):
             meli_fields["meli_catalog_listing"] = rjson["catalog_listing"]
@@ -2641,9 +2718,9 @@ class product_product(models.Model):
             # ERROR-012: `config` (= company aca) decide la politica de facturacion.
             UpdateProductType(product_template, config=config)
 
-        if not variations or exact_variant:
+        if root_offer or exact_variant or posting:
             metadata = imported_metadata(
-                rjson, item_response_status, meli_id, variation_id, company.mercadolibre_seller_id,
+                item_payload, item_status, meli_id, variation_id, company.mercadolibre_seller_id,
             )
             if not posting:
                 posting = postings.create({
@@ -2726,21 +2803,20 @@ class product_product(models.Model):
                 if (not product_template.meli_pub_principal_variant
                     or not product_template.meli_pub_principal_variant.id == product.id):
                     for variant in product_template.product_variant_ids:
-                        if not product_template.meli_pub_principal_variant:
-                            product_template.meli_pub_principal_variant = variant
                         for variation in rjson['variations']:
                             sku = variation.get("seller_sku")
                             sku_match = (sku and variant.default_code == sku
                                          and sum(v.default_code == sku for v in product_template.product_variant_ids) == 1
                                          and sum(row.get("seller_sku") == sku for row in rjson['variations']) == 1)
-                            if postings._meli_can_import_variant(
-                                    variant, meli_id, variation.get("id"), company, sku_match):
+                            if can_import_variant(variant, variation, sku_match):
                                 set_variant_identity(variant, variation)
+                                if not product_template.meli_pub_principal_variant:
+                                    product_template.meli_pub_principal_variant = variant
                                 variant.meli_pub = True
                                 variant.meli_available_quantity = variation["available_quantity"]
 
         published_att_variants = False
-        if (company.mercadolibre_update_existings_variants and 'variations' in rjson):
+        if company.mercadolibre_update_existings_variants and 'variations' in rjson:
             published_att_variants = self._get_variations( rjson['variations'])
             _logger.info("after _get_variations > product_template.product_variant_ids: "+str(product_template.product_variant_ids))
             #reset product....since variants changed
@@ -2764,7 +2840,7 @@ class product_product(models.Model):
 
         #this write pull the trigger for create_variant_ids()...
         #_logger.info("rewrite to create variants")
-        if (company.mercadolibre_update_existings_variants):
+        if company.mercadolibre_update_existings_variants:
             product_template.write({ 'attribute_line_ids': product_template.attribute_line_ids  })
         #_logger.info("published_att_variants:"+str(published_att_variants))
         if (published_att_variants):
@@ -2800,9 +2876,8 @@ class product_product(models.Model):
                 for variation in rjson['variations']:
                     _logger.info(variation)
                     _logger.info("variation[default_code]: " + variation["default_code"])
-                    if not postings._meli_can_import_variant(
-                            variant, meli_id, variation.get("id"), company,
-                            match_count == 1 and matches_combination(variation)):
+                    if not can_import_variant(
+                            variant, variation, match_count == 1 and matches_combination(variation)):
                         continue
                     set_variant_identity(variant, variation)
                     if variation["default_code"]:
@@ -2894,15 +2969,12 @@ class product_product(models.Model):
             seller_sku = None
             barcode = None
 
-            if not seller_sku and "attributes" in rjson:
-                for att in rjson['attributes']:
-                    if att["id"] == "SELLER_SKU":
-                        seller_sku = att["values"][0]["name"]
-                    if att["id"] == "GTIN":
-                        barcode = att["values"][0]["name"]
-
-            if (not seller_sku and "seller_custom_field" in rjson):
-                seller_sku = rjson["seller_custom_field"]
+            if root_offer:
+                # Do not let a variant import borrow listing-level SKU/barcode.
+                seller_sku = identity.get("sku")
+                for att in rjson.get("attributes") or ():
+                    if att["id"] == "GTIN" and att.get("values"):
+                        barcode = att["values"][0].get("name")
 
             if barcode and not product.barcode:
                 try:

@@ -31,7 +31,10 @@ import threading
 
 from .meli_util import meli_oauth_attempt_issue
 from .meli_pack_admission import snapshot_response
-from .meli_posting_metadata import import_response_status, imported_metadata
+from .meli_posting_metadata import (
+    ITEM_ID, admitted_catalogue_item, catalogue_variations, import_response_status,
+    imported_metadata, metadata_evidence,
+)
 from .meli_oerp_config import *
 from .warning import warning
 from . import versions
@@ -131,8 +134,11 @@ class res_company(models.Model):
 
         return AUTH_URL+"/authorization"
 
-    def get_ML_LINK_URL(self,meli=False):
+    def get_ML_LINK_URL(self, meli=False):
+        return self._meli_public_storefront(self._get_ML_sites(meli=meli))
 
+    def _meli_public_storefront(self, site_id):
+        """Build a public storefront URL without obtaining an API client."""
         LINK_URL = "https://www.mercadolibre.com.ar"
 
         ML_URL = {
@@ -151,9 +157,8 @@ class res_company(models.Model):
             "MEC": { "name": "Ecuador", "LINK_URL": "https://www.mercadolibre.com.ec" },
             "MLU": { "name": "Uruguay", "LINK_URL": "https://www.mercadolibre.com.uy" },
         }
-        MLsite = self._get_ML_sites(meli=meli)
-        if MLsite in ML_URL:
-            LINK_URL =  ML_URL[MLsite]["LINK_URL"] or LINK_URL
+        if site_id in ML_URL:
+            LINK_URL = ML_URL[site_id]["LINK_URL"] or LINK_URL
 
         return LINK_URL+"/"
 
@@ -1085,31 +1090,44 @@ class res_company(models.Model):
 
     def _meli_catalogue_matches(self, postings, company, item_id, item):
         def reference(payload):
+            # Keep the original matching priority on the original basic response.
             if payload.get("seller_custom_field") or payload.get("seller_sku"):
                 return payload.get("seller_custom_field") or payload["seller_sku"]
             for attribute in payload.get("attributes") or []:
-                if attribute.get("id") == "SELLER_SKU":
+                if isinstance(attribute, dict) and attribute.get("id") == "SELLER_SKU":
                     values = attribute.get("values") or []
-                    return (values[0].get("name") if values else None) or attribute.get("value_name")
+                    name = (values[0].get("name") if isinstance(values, list) and values
+                            and isinstance(values[0], dict) else None)
+                    return name or attribute.get("value_name")
             return False
 
-        variations = item.get("variations") or []
-        identities = [(postings._meli_variation_key(row.get("id")), reference(row)) for row in variations]
-        if variations and (not all(key for key, _ in identities) or len({key for key, _ in identities}) != len(identities)):
-            raise postings._meli_binding_error()
+        variations = catalogue_variations(item)
         matches = []
         seen = {}
-        for variation_id, sku in identities or [(False, reference(item))]:
+        offers = [(str(row["id"]), row) for row in variations or ()] or [(False, item)]
+        for variation_id, offer in offers:
             posting = postings._meli_find_exact_posting(item_id, variation_id, company)
             product = posting.product_id
             explicit = bool(product)
-            if not product:
-                product = postings._meli_find_direct_product(item_id, variation_id, company)
+            direct = postings._meli_find_direct_product(item_id, variation_id, company)
+            if explicit and direct and direct != product:
+                raise postings._meli_binding_error()
+            product = product or direct
+            _metadata, states, identity, failure = metadata_evidence(
+                item, item_id, variation_id, company.mercadolibre_seller_id,
+            )
+            if failure:
+                raise postings._meli_binding_error()
+            # A missing variations field is not permission to claim a new root
+            # identity. A valid, site-scoped modern User Product is positive evidence.
+            if states["meli_price"] == "unproven" and not explicit:
+                raise postings._meli_binding_error()
             reference_used = False
             if not product and company.mercadolibre_import_search_sku:
-                reference_used = sku
-                product = postings._meli_find_reference_product(sku, company)
+                reference_used = reference(offer)
+                product = postings._meli_find_reference_product(reference_used, company)
                 postings._meli_check_fallback_variant(product, item_id, variation_id)
+            postings._meli_catalogue_identity_matches(company, identity, product)
             if product and product.id in seen and not (seen[product.id] and explicit):
                 raise postings._meli_binding_error()
             if product:
@@ -1233,33 +1251,16 @@ class res_company(models.Model):
                         MeliCommit( self )
                         icommit = 0
                     #_logger.info( item_id + "("+str(iitem)+"/"+str(rjson['paging']['total'])+")" )
-                    response = meli.get("/items/" + item_id, {
-                        "access_token": meli.access_token, "include_attributes": "all",
-                    })
-                    rjson3 = response.json()
+                    if not isinstance(item_id, str) or not ITEM_ID.fullmatch(item_id):
+                        continue
+                    response = meli.get("/items/" + item_id, {"access_token": meli.access_token})
                     item_response_status = import_response_status(response)
-
-                    # Shape minimo que este bloque indexa DIRECTO mas abajo, sin
-                    # guarda propia: 'status' (3 veces), 'title' (rama missing y
-                    # rama de creacion) e 'id'. El resto de los campos que se leen
-                    # (seller_custom_field, attributes, variations) ya traen su
-                    # propio chequeo, por eso no forman parte de esta guarda.
-                    #
-                    # ML no siempre responde un item: un 401 no trae ni 'id' ni
-                    # 'status', y un body no-JSON llega como str (_parse_response
-                    # devuelve resp.text). Indexar eso tiraba KeyError/TypeError y,
-                    # como el try envuelve TODO el loop, terminaba en MeliRollback:
-                    # sin commit intermedio (MeliCommit es flush_all, no cr.commit)
-                    # y sin savepoint, se descartaba el trabajo valido de la corrida
-                    # entera y los items siguientes no se procesaban.
-                    # Se saltea solo este item; el resto del lote sigue.
-                    if (not isinstance(rjson3, dict) or 'id' not in rjson3
-                            or rjson3['id'] != item_id or 'status' not in rjson3 or 'title' not in rjson3):
-                        _logger.error(
-                            "product_meli_get_products > respuesta no procesable para item %s: tipo=%s detalle=%s",
-                            str(item_id), type(rjson3).__name__,
-                            (sorted(rjson3.keys())[:10] if isinstance(rjson3, dict)
-                             else "len=%d" % len(str(rjson3))))
+                    rjson3 = response.json()
+                    if (not admitted_catalogue_item(rjson3, item_response_status, item_id,
+                                                    company.mercadolibre_seller_id)
+                            or not isinstance(rjson3.get("status"), str)
+                            or not isinstance(rjson3.get("title"), str)):
+                        _logger.warning("Catalogue import skipped an unproven item response for %s", item_id)
                         continue
 
                     try:
@@ -1271,6 +1272,47 @@ class res_company(models.Model):
                             'meli_status': rjson3['status'], 'status': 'duplicate',
                         })
                         continue
+
+                    if not force_dont_create or any(product for _, _, _, product in matches):
+                        response = meli.get("/items/" + item_id, {
+                            "access_token": meli.access_token, "include_attributes": "all",
+                        })
+                        detail_status = import_response_status(response)
+                        detail = response.json()
+                        if (not admitted_catalogue_item(detail, detail_status, item_id,
+                                                        company.mercadolibre_seller_id)
+                                or not isinstance(detail.get("status"), str)
+                                or not isinstance(detail.get("title"), str)):
+                            continue
+                        try:
+                            detailed_matches = self._meli_catalogue_matches(postings, company, item_id, detail)
+                            detailed_by_key = {key: (reference, posting, product)
+                                               for key, reference, posting, product in detailed_matches}
+                            if set(detailed_by_key) != {row[0] for row in matches}:
+                                raise postings._meli_binding_error()
+                            for key, reference, posting, product in matches:
+                                detailed_reference, detailed_posting, detailed_product = detailed_by_key[key]
+                                if ((posting, product) != (detailed_posting, detailed_product)
+                                        or (reference and detailed_reference and reference != detailed_reference)):
+                                    raise postings._meli_binding_error()
+                                basic_identity = metadata_evidence(
+                                    rjson3, item_id, key, company.mercadolibre_seller_id,
+                                )[2]
+                                detailed_identity = metadata_evidence(
+                                    detail, item_id, key, company.mercadolibre_seller_id,
+                                )[2]
+                                for identity_field in ("user_product_id", "sku_keys", "legacy_reference"):
+                                    basic_value = basic_identity[identity_field]
+                                    detailed_value = detailed_identity[identity_field]
+                                    if basic_value and detailed_value and basic_value != detailed_value:
+                                        raise postings._meli_binding_error()
+                        except ValidationError:
+                            duplicates.append({
+                                'name': _("Publication binding conflict"), 'default_code': '',
+                                'meli_sku': '', 'meli_id': item_id, 'meli_id_variation': '',
+                                'meli_status': rjson3['status'], 'status': 'duplicate',
+                            })
+                            continue
 
                     if force_dont_create or any(product for _, _, _, product in matches):
                         for variation_id, seller_sku, posting, product in matches:
@@ -1286,7 +1328,7 @@ class res_company(models.Model):
                                 missing.append(result)
                                 continue
                             metadata = imported_metadata(
-                                rjson3, item_response_status, item_id, variation_id,
+                                detail, detail_status, item_id, variation_id,
                                 company.mercadolibre_seller_id,
                             )
                             if posting and not posting.product_id:
@@ -1337,7 +1379,10 @@ class res_company(models.Model):
                                 _logger.info( "product created: " + str(productcreated) + " >> meli_id:" + str(rjson3['id']) + " >> " + str( rjson3['title']) )
                                 #pdb.set_trace()
                                 #_logger.info(productcreated)
-                                productcreated.product_meli_get_product(import_images=force_import_images)
+                                productcreated._meli_import_product_item(
+                                    meli_id=item_id, import_images=force_import_images,
+                                    item_payload=detail, item_status=detail_status, meli=meli,
+                                )
                                 MeliCommit( self )
                             else:
                                 _logger.error( "product couldnt be created")

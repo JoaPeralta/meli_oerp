@@ -38,6 +38,7 @@ class TestPostingCreatedOnMatch(TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.user.company_id
+        self.company.mercadolibre_seller_id = "2288636236"
         self.company.mercadolibre_import_search_sku = True
         self.posting_obj = self.env["mercadolibre.posting"]
         self.product = self.env["product.product"].create({
@@ -73,20 +74,20 @@ class TestPostingCreatedOnMatch(TransactionCase):
 
     def test_second_publication_gets_its_own_posting(self):
         """A second publication of the same product must be registered."""
-        self.product.meli_id = "MLA_FIRST"
+        self.product.meli_id = "MLA81001"
         first_posting = self.posting_obj.create({
-            "meli_id": "MLA_FIRST",
+            "meli_id": "MLA81001",
             "product_id": self.product.id,
-            "name": "Post (MLA_FIRST)",
+            "name": "Post (MLA81001)",
         })
         products_before = self.env["product.product"].search_count(
             [("default_code", "=", _SKU)]
         )
 
-        res = self._run_import("MLA_SECOND")
+        res = self._run_import("MLA81002")
 
         # The product itself is untouched (guaranteed by the previous change).
-        self.assertEqual(self.product.meli_id, "MLA_FIRST")
+        self.assertEqual(self.product.meli_id, "MLA81001")
         self.assertEqual(
             self.env["product.product"].search_count([("default_code", "=", _SKU)]),
             products_before,
@@ -96,24 +97,24 @@ class TestPostingCreatedOnMatch(TransactionCase):
         self.assertTrue(first_posting.exists())
         self.assertEqual(first_posting.product_id, self.product)
         # ...and the incoming publication is now registered against the same product.
-        second = self._postings("MLA_SECOND")
+        second = self._postings("MLA81002")
         self.assertEqual(
             len(second), 1,
-            "The matched publication MLA_SECOND was not registered as a posting",
+            "The matched publication MLA81002 was not registered as a posting",
         )
         self.assertEqual(second.product_id, self.product)
-        self.assertIn("MLA_SECOND", self._synced_ids(res))
+        self.assertIn("MLA81002", self._synced_ids(res))
 
     def test_reimport_is_idempotent(self):
         """Re-processing the same item must not duplicate its posting."""
-        self.product.meli_id = "MLA_FIRST"
+        self.product.meli_id = "MLA81001"
 
-        self._run_import("MLA_SECOND")
-        self.assertEqual(len(self._postings("MLA_SECOND")), 1)
+        self._run_import("MLA81002")
+        self.assertEqual(len(self._postings("MLA81002")), 1)
 
-        self._run_import("MLA_SECOND")
+        self._run_import("MLA81002")
         self.assertEqual(
-            len(self._postings("MLA_SECOND")), 1,
+            len(self._postings("MLA81002")), 1,
             "Re-importing the same publication duplicated its posting",
         )
 
@@ -124,10 +125,10 @@ class TestPostingCreatedOnMatch(TransactionCase):
             [("default_code", "=", _SKU)]
         )
 
-        self._run_import("MLA_NEW")
+        self._run_import("MLA81003")
 
-        self.assertEqual(self.product.meli_id, "MLA_NEW")
-        posting = self._postings("MLA_NEW")
+        self.assertEqual(self.product.meli_id, "MLA81003")
+        posting = self._postings("MLA81003")
         self.assertEqual(len(posting), 1)
         self.assertEqual(posting.product_id, self.product)
         self.assertEqual(
@@ -142,20 +143,20 @@ class TestPostingCreatedOnMatch(TransactionCase):
             "default_code": "SKU-OTHER-OWNER",
         })
         posting = self.posting_obj.create({
-            "meli_id": "MLA_SECOND",
+            "meli_id": "MLA81002",
             "product_id": other_product.id,
-            "name": "Post (MLA_SECOND)",
+            "name": "Post (MLA81002)",
         })
-        self.product.meli_id = "MLA_FIRST"
+        self.product.meli_id = "MLA81001"
 
-        self._run_import("MLA_SECOND")
+        self._run_import("MLA81002")
 
         self.assertEqual(
             posting.product_id, other_product,
             "The posting was reassigned to a different product",
         )
         self.assertEqual(
-            len(self._postings("MLA_SECOND")), 1,
+            len(self._postings("MLA81002")), 1,
             "A duplicate posting was created instead of reusing the existing one",
         )
 
@@ -163,29 +164,29 @@ class TestPostingCreatedOnMatch(TransactionCase):
         """Reproduces the state a pre-fix import left in the real database.
 
             product.product ES700
-            |-- meli_id = MLA_SECOND     <- the second item overwrote the first
-            `-- posting  MLA_FIRST       <- MLA_SECOND has no posting at all
+            |-- meli_id = MLA81002     <- the second item overwrote the first
+            `-- posting  MLA81001       <- MLA81002 has no posting at all
 
         Product and posting point at *different* publications. Re-importing
-        MLA_SECOND is matched by ``product.product.meli_id`` at the top of the
+        MLA81002 is matched by ``product.product.meli_id`` at the top of the
         loop, so the SKU search never runs (it is guarded by ``not posting_id``)
         and the flow reaches the registration point through the meli_id branch.
         """
-        self.product.meli_id = "MLA_SECOND"
+        self.product.meli_id = "MLA81002"
         first_posting = self.posting_obj.create({
-            "meli_id": "MLA_FIRST",
+            "meli_id": "MLA81001",
             "product_id": self.product.id,
-            "name": "Post (MLA_FIRST)",
+            "name": "Post (MLA81001)",
         })
         self.assertFalse(
-            self._postings("MLA_SECOND"),
+            self._postings("MLA81002"),
             "The fixture must start without a posting for the incoming item",
         )
         products_before = self.env["product.product"].search_count(
             [("default_code", "=", _SKU)]
         )
 
-        res = self._run_import("MLA_SECOND")
+        res = self._run_import("MLA81002")
 
         # No second product, and the existing binding is left alone.
         self.assertEqual(
@@ -193,13 +194,13 @@ class TestPostingCreatedOnMatch(TransactionCase):
             products_before,
             "Matching must not create a second product",
         )
-        self.assertEqual(self.product.meli_id, "MLA_SECOND")
+        self.assertEqual(self.product.meli_id, "MLA81002")
         # The other publication keeps its posting, still on the same product.
         self.assertTrue(first_posting.exists())
         self.assertEqual(first_posting.product_id, self.product)
-        self.assertEqual(len(self._postings("MLA_FIRST")), 1)
+        self.assertEqual(len(self._postings("MLA81001")), 1)
         # The incoming publication is registered exactly once.
-        second = self._postings("MLA_SECOND")
+        second = self._postings("MLA81002")
         self.assertEqual(
             len(second), 1,
             "The publication matched by meli_id was not registered as a posting",
@@ -210,13 +211,13 @@ class TestPostingCreatedOnMatch(TransactionCase):
             sorted(self.posting_obj.search(
                 [("product_id", "=", self.product.id)]
             ).mapped("meli_id")),
-            ["MLA_FIRST", "MLA_SECOND"],
+            ["MLA81001", "MLA81002"],
         )
         # The match came from meli_id, not from the SKU search: `seller_sku` is
         # only ever set inside the SKU branch and is reported as `meli_sku`.
         rows = [
             row for row in (res or {}).get("json_report", {}).get("synced", [])
-            if row["meli_id"] == "MLA_SECOND"
+            if row["meli_id"] == "MLA81002"
         ]
         self.assertEqual(len(rows), 1)
         self.assertEqual(
@@ -232,6 +233,7 @@ class TestPostingCreatedOnVariationMatch(TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.user.company_id
+        self.company.mercadolibre_seller_id = "2288636236"
         self.company.mercadolibre_import_search_sku = True
         self.posting_obj = self.env["mercadolibre.posting"]
 
@@ -251,17 +253,17 @@ class TestPostingCreatedOnVariationMatch(TransactionCase):
         self.variant.default_code = _SKU
 
     def test_variation_match_registers_posting_by_exact_key(self):
-        self.variant.meli_id = "MLA_FIRST"
-        self.variant.meli_id_variation = "VAR_FIRST"
+        self.variant.meli_id = "MLA81001"
+        self.variant.meli_id_variation = "81101"
 
         item = {
-            "id": "MLA_SECOND",
+            "id": "MLA81002",
             "title": "Variant publication",
-            "status": "active",
-            "variations": [{"id": "VAR_SECOND", "seller_custom_field": _SKU}],
+            "status": "active", "seller_id": 2288636236,
+            "variations": [{"id": "81102", "seller_custom_field": _SKU}],
         }
         fake = _FakeMeli({
-            "MLA_SECOND": item,
+            "MLA81002": item,
             _OTHER_ITEM: _item(_OTHER_ITEM, _OTHER_SKU, title="Unrelated"),
         })
         context = {
@@ -275,17 +277,17 @@ class TestPostingCreatedOnVariationMatch(TransactionCase):
             type(self.env["meli.util"]), "get_new_instance", return_value=fake
         ), patch.object(
             type(self.env["res.company"]), "fetch_list_meli_ids",
-            return_value=["MLA_SECOND", _OTHER_ITEM],
+            return_value=["MLA81002", _OTHER_ITEM],
         ):
             self.company.product_meli_get_products(context=context)
 
         # Binding preserved (previous change) and publication registered.
-        self.assertEqual(self.variant.meli_id, "MLA_FIRST")
-        self.assertEqual(self.variant.meli_id_variation, "VAR_FIRST")
-        posting = self.posting_obj.search([("meli_id", "=", "MLA_SECOND")])
+        self.assertEqual(self.variant.meli_id, "MLA81001")
+        self.assertEqual(self.variant.meli_id_variation, "81101")
+        posting = self.posting_obj.search([("meli_id", "=", "MLA81002")])
         self.assertEqual(len(posting), 1)
         self.assertEqual(posting.product_id, self.variant)
-        self.assertEqual(posting.meli_variation_id, "VAR_SECOND")
+        self.assertEqual(posting.meli_variation_id, "81102")
 
 
 @tagged("post_install", "-at_install", "meli_posting_identity")
@@ -293,12 +295,13 @@ class TestDurablePostingIdentity(TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.user.company_id
+        self.company.mercadolibre_seller_id = "2288636236"
         self.company.mercadolibre_import_search_sku = True
         self.product_model = self.env["product.product"]
         self.posting_model = self.env["mercadolibre.posting"]
         self.orders = self.env["mercadolibre.orders"]
         self.original = self.product_model.create({
-            "name": "Durably linked product", "meli_id": "MLA_PRIMARY",
+            "name": "Durably linked product", "meli_id": "MLA81010",
             "default_code": "SKU-EDITED",
         })
         self.decoy = self.product_model.create({
@@ -327,67 +330,75 @@ class TestDurablePostingIdentity(TransactionCase):
             })["json_report"]
 
     def test_alias_after_sku_and_name_change_ignores_reused_sku(self):
-        primary = self.make_posting("MLA_PRIMARY", self.original)
-        alias = self.make_posting("MLA_ALIAS", self.original)
+        primary = self.make_posting("MLA81010", self.original)
+        alias = self.make_posting("MLA81011", self.original)
         self.original.name = "Locally renamed product"
         for _ in range(2):
-            report = self.bulk(_item("MLA_ALIAS", _SKU), create=True)
+            # An unresolved old custom reference does not replace the durable
+            # posting identity after the local SKU changes.
+            report = self.bulk(_item("MLA81011", "UNRESOLVED-LEGACY"), create=True)
             self.assertEqual(report["synced"][0]["name"], self.original.name)
         self.assertEqual((primary | alias).product_id, self.original)
-        self.assertEqual(self.original.meli_id, "MLA_PRIMARY")
+        self.assertEqual(self.original.meli_id, "MLA81010")
         self.assertFalse(self.decoy.meli_id)
-        self.assertEqual(self.posting_model.search_count([("meli_id", "=", "MLA_ALIAS")]), 1)
-        self.assertEqual(self.resolve("MLA_ALIAS"), self.original)
-        self.assertEqual(self.resolve("MLA_ALIAS", sku=_SKU), self.original)
+        self.assertEqual(self.posting_model.search_count([("meli_id", "=", "MLA81011")]), 1)
+        self.assertEqual(self.resolve("MLA81011"), self.original)
+        self.assertEqual(self.resolve("MLA81011", sku=_SKU), self.original)
 
     def test_variation_keys_are_exact_in_both_paths(self):
-        first = self.make_posting("MLA_VARIANTS", self.original, "101")
-        second = self.make_posting("MLA_VARIANTS", self.decoy, "102")
-        self.make_posting("MLA_VARIANTS", self.decoy)
-        report = self.bulk({
-            "id": "MLA_VARIANTS", "title": "Legacy", "status": "active",
+        first = self.make_posting("MLA81018", self.original, "101")
+        second = self.make_posting("MLA81018", self.decoy, "102")
+        self.make_posting("MLA81018", self.decoy)
+        payload = {
+            "id": "MLA81018", "title": "Legacy", "status": "active", "seller_id": 2288636236,
             "variations": [{"id": 101, "seller_sku": _SKU}, {"id": 102, "seller_sku": "SKU-EDITED"}],
-        })
+        }
+        report = self.bulk(payload)
+        self.assertFalse(report["synced"])
+        self.assertEqual(len(report["duplicates"]), 1)
+        payload["variations"][0]["seller_sku"] = "SKU-EDITED"
+        payload["variations"][1]["seller_sku"] = _SKU
+        report = self.bulk(payload)
         self.assertEqual([r["meli_id_variation"] for r in report["synced"]], ["101", "102"])
         self.assertEqual(first.product_id, self.original)
         self.assertEqual(second.product_id, self.decoy)
-        self.assertEqual(self.resolve("MLA_VARIANTS", 101, _SKU), self.original)
-        self.assertEqual(self.resolve("MLA_VARIANTS", 102, "SKU-EDITED"), self.decoy)
-        self.assertFalse(self.resolve("MLA_VARIANTS", 103))
+        self.assertEqual(self.resolve("MLA81018", 101, _SKU), self.original)
+        self.assertEqual(self.resolve("MLA81018", 102, "SKU-EDITED"), self.decoy)
+        self.assertFalse(self.resolve("MLA81018", 103))
         with self.assertRaises(ValidationError):
-            self.resolve("MLA_VARIANTS", 103, _SKU)
+            self.resolve("MLA81018", 103, _SKU)
 
     def test_blank_posting_can_bind_but_duplicate_exact_rows_refuse(self):
-        blank = self.make_posting("MLA_UNBOUND")
-        self.assertEqual(self.resolve("MLA_UNBOUND", sku=_SKU), self.decoy)
-        self.bulk(_item("MLA_UNBOUND", _SKU))
+        blank = self.make_posting("MLA81019")
+        self.assertEqual(self.resolve("MLA81019", sku=_SKU), self.decoy)
+        self.bulk(_item("MLA81019", _SKU))
         self.assertEqual(blank.product_id, self.decoy)
-        another_blank = self.make_posting("MLA_UNBOUND")
+        another_blank = self.make_posting("MLA81019")
         with self.assertRaises(ValidationError):
-            self.resolve("MLA_UNBOUND", sku=_SKU)
-        report = self.bulk(_item("MLA_UNBOUND", _SKU), create=True)
+            self.resolve("MLA81019", sku=_SKU)
+        report = self.bulk(_item("MLA81019", _SKU), create=True)
         self.assertEqual(len(report["duplicates"]), 1)
         self.assertFalse(another_blank.product_id)
 
     def test_unambiguous_direct_legacy_identity_precedes_sku(self):
-        self.assertEqual(self.resolve("MLA_PRIMARY", sku=_SKU), self.original)
+        self.assertEqual(self.resolve("MLA81010", sku=_SKU), self.original)
         self.assertEqual(self.resolve("MLA_WITHOUT_IDENTITY", sku=_SKU), self.decoy)
         self.original.meli_id_variation = "201"
-        self.assertEqual(self.resolve("MLA_PRIMARY", 201, _SKU), self.original)
-        self.assertFalse(self.resolve("MLA_PRIMARY"))
-        self.product_model.create({"name": "Another legacy candidate", "meli_id": "MLA_PRIMARY",
+        self.assertEqual(self.resolve("MLA81010", 201, _SKU), self.original)
+        self.assertFalse(self.resolve("MLA81010"))
+        self.product_model.create({"name": "Another legacy candidate", "meli_id": "MLA81010",
                                    "meli_id_variation": "201"})
         with self.assertRaises(ValidationError):
-            self.resolve("MLA_PRIMARY", 201, _SKU)
+            self.resolve("MLA81010", 201, _SKU)
 
     def test_legacy_direct_key_cannot_override_its_own_explicit_variant(self):
-        self.make_posting("MLA_PRIMARY", self.original, "101")
-        self.assertEqual(self.resolve("MLA_PRIMARY", 101, _SKU), self.original)
+        self.make_posting("MLA81010", self.original, "101")
+        self.assertEqual(self.resolve("MLA81010", 101, _SKU), self.original)
         with self.assertRaises(ValidationError):
-            self.resolve("MLA_PRIMARY", sku=_SKU)
-        report = self.bulk(_item("MLA_PRIMARY", _SKU), create=True)
+            self.resolve("MLA81010", sku=_SKU)
+        report = self.bulk(_item("MLA81010", _SKU), create=True)
         self.assertEqual(len(report["duplicates"]), 1)
-        self.assertEqual(self.posting_model.search_count([("meli_id", "=", "MLA_PRIMARY")]), 1)
+        self.assertEqual(self.posting_model.search_count([("meli_id", "=", "MLA81010")]), 1)
 
     def test_full_order_fallback_does_not_borrow_a_sibling_variant(self):
         # Run the actual retained fallback fragment with real ORM models, but
@@ -413,12 +424,12 @@ class TestDurablePostingIdentity(TransactionCase):
         exec(compile(ast.fix_missing_locations(seam), "<native order fallback>", "exec"), scope)
         self.company.mercadolibre_create_product_from_order = False
         self.original.meli_id_variation = "101"
-        sibling = self.make_posting("MLA_PRIMARY", self.original, "101")
-        blank = self.make_posting("MLA_PRIMARY")
-        inbound = {"item": {"id": "MLA_PRIMARY", "variation_id": None, "seller_sku": "UNMATCHED"}}
+        sibling = self.make_posting("MLA81010", self.original, "101")
+        blank = self.make_posting("MLA81010")
+        inbound = {"item": {"id": "MLA81010", "variation_id": None, "seller_sku": "UNMATCHED"}}
         for variations in ([{"id": 101}], ["variations"]):
             with self.subTest(variations=variations):
-                item = {"id": "MLA_PRIMARY", "title": "Legacy test item", "variations": variations}
+                item = {"id": "MLA81010", "title": "Legacy test item", "variations": variations}
                 self.assertFalse(scope["invoke"](self.product_model, inbound, item))
         self.assertFalse(blank.product_id)
         self.assertEqual(sibling.product_id, self.original)
@@ -426,20 +437,20 @@ class TestDurablePostingIdentity(TransactionCase):
     def test_foreign_and_archived_targets_do_not_fall_back_to_sku(self):
         foreign = self.env["res.company"].create({"name": "Other company"})
         product = self.product_model.create({"name": "Foreign product", "company_id": foreign.id})
-        self.make_posting("MLA_FOREIGN", product)
+        self.make_posting("MLA81013", product)
         with self.assertRaises(ValidationError):
-            self.resolve("MLA_FOREIGN", sku=_SKU)
-        self.make_posting("MLA_ARCHIVED", self.original)
+            self.resolve("MLA81013", sku=_SKU)
+        self.make_posting("MLA81014", self.original)
         self.original.active = False
         with self.assertRaises(ValidationError):
-            self.resolve("MLA_ARCHIVED", sku=_SKU)
+            self.resolve("MLA81014", sku=_SKU)
 
     def test_direct_import_cannot_reassign_existing_posting(self):
-        posting = self.make_posting("MLA_PRIMARY", self.original)
-        fake = _FakeMeli({"MLA_PRIMARY": _item("MLA_PRIMARY", _SKU)})
+        posting = self.make_posting("MLA81010", self.original)
+        fake = _FakeMeli({"MLA81010": _item("MLA81010", _SKU)})
         with patch.object(type(self.env["meli.util"]), "get_new_instance", return_value=fake):
             with self.assertRaises(ValidationError):
-                self.decoy.product_meli_get_product(meli_id="MLA_PRIMARY", import_images=False)
+                self.decoy.product_meli_get_product(meli_id="MLA81010", import_images=False)
         self.assertEqual(posting.product_id, self.original)
         self.assertFalse(self.decoy.meli_id)
 
@@ -454,43 +465,67 @@ class TestDurablePostingIdentity(TransactionCase):
                                            "value_ids": [(6, 0, values.ids)]})],
         })
         first, second, unbound = template.product_variant_ids.sorted("id")
-        first.write({"meli_id": "MLA_DIRECT", "meli_id_variation": "101", "default_code": "COLLISION"})
-        second.write({"meli_id": "MLA_DIRECT", "meli_id_variation": "102", "default_code": "EDITED"})
+        first.write({"meli_id": "MLA81012", "meli_id_variation": "101", "default_code": "COLLISION"})
+        second.write({"meli_id": "MLA81012", "meli_id_variation": "102", "default_code": "EDITED"})
         unbound.default_code = "NEW-VARIANT"
-        exact_first = self.make_posting("MLA_DIRECT", first, "101")
-        exact_second = self.make_posting("MLA_DIRECT", second, "102")
-        payload = dict(_item_without_variants(), id="MLA_DIRECT", variations=[
+        exact_first = self.make_posting("MLA81012", first, "101")
+        exact_second = self.make_posting("MLA81012", second, "102")
+        payload = dict(_item_without_variants(), id="MLA81012", variations=[
             {"id": 101, "seller_sku": "REASSIGNED", "available_quantity": 3},
             {"id": 102, "seller_sku": "COLLISION", "available_quantity": 5},
             {"id": 103, "seller_sku": "NEW-VARIANT", "available_quantity": 7},
         ])
-        self.company.mercadolibre_update_existings_variants = False
+        initial = template.read(["attribute_line_ids", "meli_pub_as_variant", "meli_pub_principal_variant"])
+        for update_variants in (False, True):
+            with self.subTest(update_variants=update_variants):
+                self.company.write({
+                    "mercadolibre_update_existings_variants": update_variants,
+                    "mercadolibre_update_local_stock": True,
+                })
+                with patch.object(
+                        type(self.env["meli.util"]), "get_new_instance", return_value=_DirectMeli(payload),
+                ), patch.object(type(first), "_get_variations", side_effect=AssertionError("Conflicted template rebuild")), patch.object(
+                        type(first), "product_update_stock", side_effect=AssertionError("Conflicted stock update")):
+                    with self.assertRaises(ValidationError):
+                        first.product_meli_get_product(import_images=False)
+                self.assertEqual(template.read(["attribute_line_ids", "meli_pub_as_variant",
+                                                "meli_pub_principal_variant"]), initial)
+                self.assertEqual((first.meli_available_quantity, second.meli_available_quantity), (0, 0))
+                self.assertFalse(unbound.meli_id)
+
+        # A separately corroborated response preserves both exact links and
+        # continues to support a legitimate new sibling through the old matcher.
+        self.company.write({
+            "mercadolibre_update_existings_variants": False,
+            "mercadolibre_update_local_stock": False,
+        })
+        payload["variations"][1]["seller_sku"] = "EDITED"
         with patch.object(type(self.env["meli.util"]), "get_new_instance", return_value=_DirectMeli(payload)):
             first.product_meli_get_product(import_images=False)
         self.assertEqual((first.meli_id_variation, second.meli_id_variation), ("101", "102"))
         self.assertEqual((first.meli_available_quantity, second.meli_available_quantity), (3, 5))
         self.assertEqual(exact_first.product_id, first)
         self.assertEqual(exact_second.product_id, second)
-        self.assertEqual((unbound.meli_id, unbound.meli_id_variation), ("MLA_DIRECT", "103"))
+        self.assertEqual((unbound.meli_id, unbound.meli_id_variation), ("MLA81012", "103"))
 
     def test_direct_legacy_alias_without_its_own_binding_cannot_change_representative(self):
         self.original.meli_id_variation = "101"
-        other = self.make_posting("MLA_ALIAS", self.decoy, "102")
-        item = dict(_item("MLA_ALIAS", _SKU), variations=[{"id": 102}])
+        other = self.make_posting("MLA81011", self.decoy, "102")
+        item = dict(_item("MLA81011", _SKU), variations=[{"id": 102}])
         with patch.object(type(self.env["meli.util"]), "get_new_instance",
-                          return_value=_FakeMeli({"MLA_ALIAS": item})):
+                          return_value=_FakeMeli({"MLA81011": item})):
             with self.assertRaises(ValidationError):
-                self.original.product_meli_get_product(meli_id="MLA_ALIAS", import_images=False)
-        self.assertEqual((self.original.meli_id, self.original.meli_id_variation), ("MLA_PRIMARY", "101"))
+                self.original.product_meli_get_product(meli_id="MLA81011", import_images=False)
+        self.assertEqual((self.original.meli_id, self.original.meli_id_variation), ("MLA81010", "101"))
         self.assertEqual(other.product_id, self.decoy)
 
     def test_reverse_sku_does_not_search_a_product_with_existing_posting(self):
-        self.make_posting("MLA_ALIAS", self.original)
+        self.make_posting("MLA81011", self.original)
         fake = Mock()
         with patch.object(type(self.env["meli.util"]), "get_new_instance", return_value=fake):
             self.company.get_all_items_from_existing_sku(self.original)
         fake.get.assert_not_called()
-        self.assertEqual(self.original.meli_id, "MLA_PRIMARY")
+        self.assertEqual(self.original.meli_id, "MLA81010")
 
 
 @tagged("post_install", "-at_install")
@@ -498,6 +533,7 @@ class TestCatalogueWebsiteVisibility(TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.user.company_id
+        self.company.mercadolibre_seller_id = "2288636236"
         self.company.write({
             "mercadolibre_import_search_sku": False,
             "mercadolibre_update_existings_variants": False,
@@ -507,14 +543,14 @@ class TestCatalogueWebsiteVisibility(TransactionCase):
 
     def test_direct_refresh_preserves_existing_website_visibility(self):
         for published in (False, True):
-            item_id = "MLA_WEBSITE_DIRECT_%d" % published
+            item_id = "MLA8102%d" % published
             product = self.env["product.product"].create({
                 "name": item_id, "meli_id": item_id, "default_code": item_id,
             })
             product.product_tmpl_id.website_published = published
             for quantity in (5, 0):
                 with self.subTest(published=published, quantity=quantity):
-                    payload = dict(_item_without_variants(), id=item_id, available_quantity=quantity)
+                    payload = dict(_item_without_variants(), id=item_id, available_quantity=quantity, attributes=[])
                     with patch.object(type(self.env["meli.util"]), "get_new_instance",
                                       return_value=_DirectMeli(payload)):
                         product.product_meli_get_product(import_images=False)
@@ -524,8 +560,8 @@ class TestCatalogueWebsiteVisibility(TransactionCase):
     def test_bulk_creation_only_publishes_with_explicit_opt_in(self):
         for publish in (False, True):
             with self.subTest(publish=publish):
-                item_id = "MLA_WEBSITE_BULK_%d" % publish
-                payload = dict(_item_without_variants(), id=item_id, available_quantity=5)
+                item_id = "MLA8103%d" % publish
+                payload = dict(_item_without_variants(), id=item_id, available_quantity=5, attributes=[])
                 with patch.object(type(self.env["meli.util"]), "get_new_instance",
                                   return_value=_DirectMeli(payload)):
                     self.company.product_meli_get_products(context={

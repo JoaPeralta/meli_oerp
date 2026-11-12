@@ -77,6 +77,8 @@ jobs:
           python3 -I -B -X utf8 -m unittest discover -s tests -p 'test_p0_token_label_image.py' -v
           python3 -I -B -X utf8 -m unittest discover -s tests -p 'test_image_upload_security.py' -v
           python3 -I -B -X utf8 -m unittest discover -s tests -p 'test_payment_token_security.py' -v
+          python3 -I -B -X utf8 -m unittest discover -s tests -p 'test_posting_metadata_source.py' -v
+          python3 -I -B -X utf8 -m unittest discover -s tests -p 'test_meli_c6_stock_confirmation.py' -v
 
       # Fresh disposable database, install the module and run its tests.
       # Odoo returns a non-zero exit code on test failure with --stop-after-init,

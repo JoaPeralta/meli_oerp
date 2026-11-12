@@ -34,7 +34,7 @@ from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
 _LOGGER_NAME = "odoo.addons.meli_oerp.models.product"
-_ITEM = "MLA_NOVAR_1"
+_ITEM = "MLA81009"
 # Appears only inside the payload. If it shows up in a log record, the whole
 # item was dumped.
 _SENTINEL = "SENTINEL-ZIP-9x7"
@@ -44,6 +44,7 @@ def _item_without_variants():
     """Every key this flow indexes directly, and nothing more."""
     return {
         "id": _ITEM,
+        "seller_id": 2288636236, "variations": [],
         "title": "Publicacion simple sin variantes",
         "family_name": "Publicacion simple",
         "status": "active",
@@ -74,6 +75,9 @@ def _item_without_variants():
 
 
 class _FakeResponse:
+    status_code = 200
+    headers = {}
+
     def __init__(self, payload):
         self._payload = payload
 
@@ -113,6 +117,7 @@ class TestNoVariantsLogNoise(TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.user.company_id
+        self.company.mercadolibre_seller_id = "2288636236"
         # Drives the flow into the branch under test.
         self.company.mercadolibre_update_existings_variants = False
         self.product = self.env["product.product"].create({

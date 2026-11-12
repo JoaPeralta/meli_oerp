@@ -36,6 +36,7 @@ from psycopg2.errors import UniqueViolation
 from . import versions
 from .versions import *
 from .meli_webhook_security import safe_meli_resource_path
+from .meli_posting_metadata import import_response_status, numeric_id
 from .meli_webhook_inbox import (
     WebhookIntakeError, canonical_remote_id, is_inbox_receipt,
     parse_webhook_body, same_webhook_binding, webhook_receipt_id,
@@ -356,46 +357,54 @@ class MercadolibreNotification(models.Model):
 
     def _process_notification_question(self):
         self._assert_legacy_notifications()
-        #_logger.info("_process_notification_question")
-
         company = self.env.user.company_id
-        meli_util_model = self.env['meli.util']
-        meli = meli_util_model.get_new_instance(company)
-
+        util = self.env['meli.util']
+        questions = self.env["mercadolibre.questions"]
+        postings = self.env["mercadolibre.posting"]
         for noti in self:
-
             noti.state = 'PROCESSING'
-            #noti.attempts+= 1
             noti.processing_started = ml_datetime(str(datetime.now()))
-
             try:
                 safe_resource = safe_meli_resource_path(noti.resource, allowed_prefixes=("/questions/",))
-                if not safe_resource:
-                    noti.state = 'FAILED'
-                    noti.processing_errors = "Unsafe or invalid webhook resource rejected: %s" % str(noti.resource)
-                    _logger.warning("Rejected unsafe question notification resource: %s", str(noti.resource))
-                    continue
-                questions = meli.get(safe_resource, {'access_token':meli.access_token} )
-                qjson =  questions.json()
-                if ('error' in qjson):
-                    noti.state = 'FAILED'
-                    noti.processing_errors = str( ('message' in qjson and qjson['message']) or qjson['error'])
-                if ("item_id" in qjson):
-                    posting = self.env["mercadolibre.posting"].search([('meli_id','=',qjson["item_id"])])
-                    if (posting and len(posting)):
-                        rsjson = posting.posting_query_questions()
-                        if ('error' in rsjson):
-                            noti.state = 'FAILED'
-                            noti.processing_errors = str( ('message' in rsjson and rsjson['message']) or rsjson['error'] )
-                        else:
-                            noti.state = 'SUCCESS'
-                            noti.processing_errors = str(rsjson)
-                    else:
-                        noti.state = 'FAILED'
-                        noti.processing_errors = str( "Posting not found related to question" )
-            except Exception as E:
+                question_id = numeric_id(safe_resource.rsplit("/", 1)[-1]) if safe_resource else None
+                if not question_id:
+                    raise ValidationError(_("Unsafe or invalid webhook resource rejected."))
+                if not company.mercadolibre_cron_get_questions or util._meli_is_neutralized():
+                    raise ValidationError(_("Question processing is disabled."))
+                if ((noti.company_id and noti.company_id != company)
+                        or (noti.user_id and numeric_id(noti.user_id) != numeric_id(company.mercadolibre_seller_id))):
+                    raise ValidationError(_("Question notification seller or company does not match."))
+                meli = util.get_new_instance(company)
+                if not meli.access_token or meli.access_token == "PASIVA" or meli.need_login():
+                    raise ValidationError(_("A valid Mercado Libre connection is required."))
+                response = meli.get(safe_resource, {"access_token": meli.access_token, "api_version": 4})
+                payload = response.json()
+                if (import_response_status(response) != 200 or not isinstance(payload, dict)
+                        or not questions._meli_valid_question(payload, payload.get("item_id"), company, question_id)):
+                    raise ValidationError(_("Question response did not prove item, seller and question identity."))
+                candidates = postings.search([("meli_id", "=", payload["item_id"])])
+                candidates = candidates.filtered(
+                    lambda row: row.product_id and (not row.product_id.company_id or row.product_id.company_id == company)
+                )
+                # A question belongs to an item, not to a legacy variation.
+                # Prefer a unique root posting; never choose an arbitrary variant.
+                posting = candidates.filtered(lambda row: not row.meli_variation_id) or candidates
+                if len(posting) != 1:
+                    raise ValidationError(_("The question does not have a unique local posting."))
+                with self.env.cr.savepoint():
+                    question = questions.process_question(
+                        Question={**payload, "posting_id": posting.id}, meli=meli, config=company,
+                    )
+                    if not question:
+                        raise ValidationError(_("No question was processed."))
+                noti.state = 'SUCCESS'
+                noti.processing_errors = False
+            except ValidationError as error:
                 noti.state = 'FAILED'
-                noti.processing_errors = str(E)
+                noti.processing_errors = str(error)
+            except Exception:
+                noti.state = 'FAILED'
+                noti.processing_errors = _("Question processing failed.")
             finally:
                 noti.processing_ended = ml_datetime(str(datetime.now()))
 

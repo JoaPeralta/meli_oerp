@@ -26,6 +26,12 @@ METADATA_FIELDS = (
 CORE_FIELDS = METADATA_FIELDS[:3]
 ABSENT = object()
 MAX_BODY = 512 * 1024
+# Matches the explicit character set in the recovery SQL (not locale-dependent).
+WHITESPACE = "\x09\x0a\x0b\x0c\x0d\x1c\x1d\x1e\x1f\x20\x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+
+
+def is_missing(value):
+    return value is None or value is False or isinstance(value, str) and not value.strip(WHITESPACE)
 
 
 def numeric_id(value):
@@ -128,34 +134,78 @@ def _effective_sku(source):
 def _field(value, validate):
     if value is ABSENT:
         return None, "absent"
-    if value is None or value is False or isinstance(value, str) and not value.strip():
+    if is_missing(value):
         return None, "empty"
     normalized = validate(value)
     return (normalized, "valid") if normalized is not None else (None, "invalid")
+
+
+def _same_item_seller(item, item_id, seller_id):
+    seller = numeric_id(seller_id)
+    return (isinstance(item_id, str) and bool(ITEM_ID.fullmatch(item_id)) and bool(seller)
+            and isinstance(item, dict) and "error" not in item and item.get("id") == item_id
+            and numeric_id(item.get("seller_id")) == seller)
+
+
+def user_product_id(value, item_id):
+    if isinstance(value, str) and USER_PRODUCT_ID.fullmatch(value) and value[:3] == item_id[:3]:
+        return value
+    return None
+
+
+def catalogue_variations(item):
+    """None means omitted; reject malformed or duplicate variation keys."""
+    if "variations" not in item:
+        return None
+    variations = item["variations"]
+    if not isinstance(variations, list):
+        raise ValueError("Invalid variation list")
+    keys = [numeric_id(row.get("id")) if isinstance(row, dict) else None for row in variations]
+    if None in keys or len(set(keys)) != len(keys):
+        raise ValueError("Invalid or repeated variation key")
+    return variations
+
+
+def sku_identity(source):
+    """Check all same-namespace SKU forms, not just the preferred value."""
+    values = _sku_values(source)
+    explicit = [_field(value, _sku) for group in values[:2] for value in group]
+    known = sorted({value for value, state in explicit if state == "valid"})
+    invalid = len(known) > 1 or any(state == "invalid" for _, state in explicit)
+    return known, invalid
+
+
+def admitted_catalogue_item(item, response_status, item_id, seller_id):
+    if (type(response_status) is not int or response_status != 200
+            or not _same_item_seller(item, item_id, seller_id)):
+        return False
+    try:
+        catalogue_variations(item)
+    except ValueError:
+        return False
+    return True
 
 
 def metadata_evidence(item, item_id, variation_id, seller_id):
     """Return validated changes, per-field availability, and identity or reason."""
     if not isinstance(item_id, str) or not ITEM_ID.fullmatch(item_id) or not numeric_id(seller_id):
         return {}, {}, None, "invalid_selection"
-    if (not isinstance(item, dict) or "error" in item or item.get("id") != item_id
-            or numeric_id(item.get("seller_id")) != numeric_id(seller_id)):
+    if not _same_item_seller(item, item_id, seller_id):
         return {}, {}, None, "unproven_item_or_seller"
-    variations = item.get("variations", [])
-    if not isinstance(variations, list):
-        return {}, {}, None, "unproven_variation"
-    variation_keys = [numeric_id(row.get("id")) if isinstance(row, dict) else None
-                      for row in variations]
-    if None in variation_keys or len(set(variation_keys)) != len(variation_keys):
+    try:
+        variations = catalogue_variations(item)
+    except ValueError:
         return {}, {}, None, "unproven_variation"
     variant = None
-    if variation_id is not False and variation_id is not None and variation_id != "":
+    if not is_missing(variation_id):
         key = numeric_id(variation_id)
-        if key is None or key not in variation_keys:
+        variant = next((row for row in variations or () if numeric_id(row["id"]) == key), None)
+        if variant is None:
             return {}, {}, None, "unproven_variation"
-        variant = variations[variation_keys.index(key)]
     source = variant if variant is not None else item
+    up = user_product_id(source.get("user_product_id"), item_id)
     listing_with_variants = variant is None and bool(variations)
+    scope_unknown = variant is None and variations is None and not up
     normalized = {
         "meli_status": _field(item.get("status", ABSENT), _status),
         "meli_permalink": _field(item.get("permalink", ABSENT),
@@ -163,17 +213,26 @@ def metadata_evidence(item, item_id, variation_id, seller_id):
         "meli_price": _field(source.get("price", ABSENT), _price),
     }
     sku, sku_kind = _effective_sku(source)
-    if listing_with_variants:
-        # A legacy listing with variants is not a variant SKU or price.
-        normalized["meli_price"] = None, "not_applicable"
-        sku, sku_kind = (None, "not_applicable"), None
+    sku_keys, sku_conflict = sku_identity(source)
+    legacy_reference = _sku(source.get("seller_custom_field"))
+    up_invalid = not is_missing(source.get("user_product_id")) and not up
+    if listing_with_variants or scope_unknown:
+        # Listing status/link are item-level; root SKU and price need exact offer scope.
+        state = "not_applicable" if listing_with_variants else "unproven"
+        normalized["meli_price"] = None, state
+        sku, sku_kind = (None, state), None
+        sku_keys, sku_conflict = [], False
+        legacy_reference = None
     normalized["meli_seller_custom_field"] = sku
-    up = source.get("user_product_id")
     identity = {
         "sku": sku[0],
         "sku_state": sku[1],
         "sku_kind": sku_kind,
-        "user_product_id": up if isinstance(up, str) and USER_PRODUCT_ID.fullmatch(up) else None,
+        "sku_keys": sku_keys,
+        "sku_conflict": sku_conflict,
+        "legacy_reference": legacy_reference,
+        "user_product_id": up,
+        "user_product_invalid": up_invalid,
         "listing_with_variants": listing_with_variants,
     }
     return ({field: value for field, (value, state) in normalized.items() if state == "valid"},
@@ -182,14 +241,15 @@ def metadata_evidence(item, item_id, variation_id, seller_id):
 
 def imported_metadata(item, response_status, item_id, variation_id, seller_id):
     """Do not admit statusless or incomplete transport evidence into postings."""
-    if type(response_status) is not int or response_status != 200:
+    if not admitted_catalogue_item(item, response_status, item_id, seller_id):
         return {}
     values, _, _, _ = metadata_evidence(item, item_id, variation_id, seller_id)
     return values
 
 
 def import_response_status(response):
-    if (getattr(response, "headers", {}) or {}).get("x-content-missing"):
+    headers = getattr(response, "headers", {}) or {}
+    if headers.get("x-content-missing") or getattr(response, "last_response_content_missing", False) is True:
         return None
     status = getattr(response, "status_code", None)
     return getattr(response, "last_status_code", None) if status is None else status
@@ -203,27 +263,37 @@ def read_item_metadata(item_id, token):
         return None, "invalid_selection"
     if not isinstance(token, str) or not token or token == "PASIVA":
         return None, "authentication_unavailable"
+    from urllib3.exceptions import HTTPError
+
+    adapter = requests.adapters.HTTPAdapter(max_retries=0)
     try:
-        with requests.Session() as session:
-            session.trust_env = False
-            with session.get(
-                "https://api.mercadolibre.com/items/" + item_id,
-                headers={"Authorization": "Bearer " + token, "Accept": "application/json"},
-                params={"include_attributes": "all"},
-                timeout=(5, 10), allow_redirects=False, stream=True,
-            ) as response:
-                if response.status_code in (401, 403):
-                    return None, "authentication_rejected"
-                if response.status_code != 200 or response.headers.get("x-content-missing"):
-                    return None, "http_unavailable"
-                body = bytearray()
-                for chunk in response.iter_content(chunk_size=8192):
-                    body.extend(chunk)
-                    if len(body) > MAX_BODY:
-                        return None, "invalid_response"
-                data = json.loads(body)
-                return (data, None) if isinstance(data, dict) else (None, "invalid_response")
-    except requests.RequestException:
+        request = requests.Request(
+            "GET", "https://api.mercadolibre.com/items/" + item_id,
+            headers={"Authorization": "Bearer " + token, "Accept": "application/json",
+                     "Accept-Encoding": "identity"},
+            params={"include_attributes": "all"},
+        ).prepare()
+        # Session.send() may consume the body to prepare a redirect, even
+        # when allow_redirects=False. Send through the adapter directly.
+        with adapter.send(request, timeout=(5, 10), stream=True, verify=True, proxies={}) as response:
+            if response.status_code in (401, 403):
+                return None, "authentication_rejected"
+            if response.status_code != 200 or response.headers.get("x-content-missing"):
+                return None, "http_unavailable"
+            if response.headers.get("Content-Encoding", "identity").strip().lower() != "identity":
+                return None, "invalid_response"
+            length = response.headers.get("Content-Length")
+            if length is not None and (not length.isascii() or not length.isdecimal()
+                                       or len(length) > 12 or int(length) > MAX_BODY):
+                return None, "invalid_response"
+            body = response.raw.read(MAX_BODY + 1, decode_content=False)
+            if len(body) > MAX_BODY or (length is not None and len(body) != int(length)):
+                return None, "invalid_response"
+            data = json.loads(body)
+            return (data, None) if isinstance(data, dict) else (None, "invalid_response")
+    except (requests.RequestException, HTTPError, OSError):
         return None, "transport_unavailable"
     except (ValueError, RecursionError):
         return None, "invalid_response"
+    finally:
+        adapter.close()

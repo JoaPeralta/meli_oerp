@@ -30,11 +30,14 @@ from odoo.tests.common import TransactionCase
 _SKU = "SKU-TEST-MELI"
 # The import only iterates when more than one id comes back from the search, so
 # every scenario feeds a second, unrelated item.
-_OTHER_ITEM = "MLA_OTHER_ITEM"
+_OTHER_ITEM = "MLA81000"
 _OTHER_SKU = "SKU-TEST-UNRELATED"
 
 
 class _FakeResponse:
+    status_code = 200
+    headers = {}
+
     def __init__(self, payload):
         self._payload = payload
 
@@ -61,7 +64,8 @@ class _FakeMeli:
 
 
 def _item(item_id, sku, title="Test publication"):
-    return {"id": item_id, "title": title, "status": "active", "seller_custom_field": sku}
+    return {"id": item_id, "title": title, "status": "active", "seller_id": 2288636236,
+            "variations": [], "seller_custom_field": sku}
 
 
 @tagged("post_install", "-at_install")
@@ -70,6 +74,7 @@ class TestPreserveExistingMeliId(TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.user.company_id
+        self.company.mercadolibre_seller_id = "2288636236"
         self.company.mercadolibre_import_search_sku = True
         self.product = self.env["product.product"].create({
             "name": "ES700 regression product",
@@ -104,10 +109,10 @@ class TestPreserveExistingMeliId(TransactionCase):
         """Historical behaviour: an unbound product takes the incoming item."""
         self.assertFalse(self.product.meli_id)
 
-        res = self._run_import("MLA_NEW")
+        res = self._run_import("MLA81003")
 
-        self.assertEqual(self.product.meli_id, "MLA_NEW")
-        self.assertIn("MLA_NEW", self._synced_ids(res))
+        self.assertEqual(self.product.meli_id, "MLA81003")
+        self.assertIn("MLA81003", self._synced_ids(res))
 
     def test_same_meli_id_stays(self):
         """Re-importing the same publication leaves the binding untouched.
@@ -115,29 +120,29 @@ class TestPreserveExistingMeliId(TransactionCase):
         The product is found straight away by meli_id, so the SKU branch is not
         even reached; the assertion pins the resulting state either way.
         """
-        self.product.meli_id = "MLA_EXISTING"
+        self.product.meli_id = "MLA81020"
 
-        res = self._run_import("MLA_EXISTING")
+        res = self._run_import("MLA81020")
 
-        self.assertEqual(self.product.meli_id, "MLA_EXISTING")
-        self.assertIn("MLA_EXISTING", self._synced_ids(res))
+        self.assertEqual(self.product.meli_id, "MLA81020")
+        self.assertIn("MLA81020", self._synced_ids(res))
 
     def test_different_meli_id_is_preserved(self):
         """Main regression: a second publication must not steal the binding."""
-        self.product.meli_id = "MLA_FIRST"
+        self.product.meli_id = "MLA81001"
         products_before = self.env["product.product"].search_count(
             [("default_code", "=", _SKU)]
         )
 
-        res = self._run_import("MLA_SECOND")
+        res = self._run_import("MLA81002")
 
         self.assertEqual(
-            self.product.meli_id, "MLA_FIRST",
+            self.product.meli_id, "MLA81001",
             "The existing MercadoLibre item id was overwritten by a second "
             "publication sharing the same SKU",
         )
         # Still treated as a match (reported as synced), not as a new product.
-        self.assertIn("MLA_SECOND", self._synced_ids(res))
+        self.assertIn("MLA81002", self._synced_ids(res))
         self.assertEqual(
             self.env["product.product"].search_count([("default_code", "=", _SKU)]),
             products_before,
@@ -169,7 +174,7 @@ def _item_with_variation(item_id, variation_id, mechanism, sku=_VAR_SKU):
     return {
         "id": item_id,
         "title": "Variant publication",
-        "status": "active",
+        "status": "active", "seller_id": 2288636236,
         "variations": [var],
     }
 
@@ -187,6 +192,7 @@ class TestPreserveExistingMeliIdOnVariations(TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.user.company_id
+        self.company.mercadolibre_seller_id = "2288636236"
         self.company.mercadolibre_import_search_sku = True
 
         # meli_id_variation is only written when the template has more than one
@@ -234,17 +240,20 @@ class TestPreserveExistingMeliIdOnVariations(TransactionCase):
         """A second publication must not steal meli_id nor meli_id_variation."""
         for mechanism in _VARIATION_MECHANISMS:
             with self.subTest(mechanism=mechanism):
-                self.variant.meli_id = "MLA_FIRST"
-                self.variant.meli_id_variation = "VAR_FIRST"
+                self.variant.meli_id = "MLA81001"
+                self.variant.meli_id_variation = "81101"
 
-                self._run_import("MLA_SECOND", "VAR_SECOND", mechanism)
+                report = self._run_import("MLA81002", "81102", mechanism)["json_report"]
+                self.assertTrue(any(row["meli_id"] == "MLA81002" and row["meli_id_variation"] == "81102"
+                                    for row in report["synced"]),
+                                "%s did not exercise a real admitted variation" % mechanism)
 
                 self.assertEqual(
-                    self.variant.meli_id, "MLA_FIRST",
+                    self.variant.meli_id, "MLA81001",
                     "%s branch overwrote meli_id with a second publication" % mechanism,
                 )
                 self.assertEqual(
-                    self.variant.meli_id_variation, "VAR_FIRST",
+                    self.variant.meli_id_variation, "81101",
                     "%s branch overwrote meli_id_variation with a second "
                     "publication" % mechanism,
                 )
@@ -260,14 +269,14 @@ class TestPreserveExistingMeliIdOnVariations(TransactionCase):
                 self.variant.meli_id = False
                 self.variant.meli_id_variation = False
 
-                self._run_import("MLA_NEW", "VAR_NEW", mechanism)
+                self._run_import("MLA81003", "81103", mechanism)
 
                 self.assertEqual(
-                    self.variant.meli_id, "MLA_NEW",
+                    self.variant.meli_id, "MLA81003",
                     "%s branch did not assign meli_id on an unbound variant" % mechanism,
                 )
                 self.assertEqual(
-                    self.variant.meli_id_variation, "VAR_NEW",
+                    self.variant.meli_id_variation, "81103",
                     "%s branch did not assign meli_id_variation on an unbound "
                     "variant" % mechanism,
                 )

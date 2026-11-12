@@ -40,9 +40,9 @@ from unittest.mock import patch
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
-_ITEM_A = "MLA_BATCH_A"
-_ITEM_B = "MLA_BATCH_B"
-_ITEM_C = "MLA_BATCH_C"
+_ITEM_A = "MLA81015"
+_ITEM_B = "MLA81016"
+_ITEM_C = "MLA81017"
 
 _SKU_A = "SKU-BATCH-A"
 _SKU_B = "SKU-BATCH-B"
@@ -50,11 +50,14 @@ _SKU_C = "SKU-BATCH-C"
 
 
 def _item(item_id, sku, title="Test publication", status="active"):
-    return {"id": item_id, "title": title, "status": status,
-            "seller_custom_field": sku}
+    return {"id": item_id, "title": title, "status": status, "seller_id": 2288636236,
+            "variations": [], "seller_custom_field": sku}
 
 
 class _FakeResponse:
+    status_code = 200
+    headers = {}
+
     def __init__(self, payload):
         self._payload = payload
 
@@ -80,7 +83,7 @@ class _FakeMeli:
     def get(self, path, params=None, extra_headers=None, **kwargs):
         item_id = str(path).rsplit("/", 1)[-1]
         if str(path).startswith("/items/"):
-            self.fetched.append(item_id)
+            self.fetched.append((item_id, (params or {}).get("include_attributes")))
         return _FakeResponse(self._payloads.get(item_id, {"error": "not_found"}))
 
 
@@ -90,6 +93,7 @@ class TestUnprocessableItemResponse(TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.user.company_id
+        self.company.mercadolibre_seller_id = "2288636236"
         self.company.mercadolibre_import_search_sku = True
         self.posting_obj = self.env["mercadolibre.posting"]
         self.product_a = self.env["product.product"].create({
@@ -127,8 +131,8 @@ class TestUnprocessableItemResponse(TransactionCase):
     # ------------------------------------------------------------------
     def test_dict_with_id_and_title_but_no_status(self):
         """A dict can carry ``id`` and still be unusable here."""
-        broken = {"id": _ITEM_B, "title": "No status field",
-                  "seller_custom_field": _SKU_B}
+        broken = _item(_ITEM_B, _SKU_B, title="No status field")
+        del broken["status"]
         self.assertNotIn("status", broken)
 
         res, _fake = self._run({_ITEM_B: broken}, [_ITEM_B, _ITEM_C])
@@ -138,8 +142,8 @@ class TestUnprocessableItemResponse(TransactionCase):
 
     def test_dict_with_id_and_status_but_no_title(self):
         """The creation branch guards 'id' and then indexes 'title'."""
-        broken = {"id": _ITEM_B, "status": "active",
-                  "seller_custom_field": "SKU-DOES-NOT-EXIST-ANYWHERE"}
+        broken = _item(_ITEM_B, "SKU-DOES-NOT-EXIST-ANYWHERE")
+        del broken["title"]
         self.assertNotIn("title", broken)
 
         res, _fake = self._run({_ITEM_B: broken}, [_ITEM_B, _ITEM_C])
@@ -186,7 +190,8 @@ class TestUnprocessableItemResponse(TransactionCase):
 
         # The batch was not aborted at B: C was still fetched.
         self.assertEqual(
-            fake.fetched, [_ITEM_A, _ITEM_B, _ITEM_C],
+            fake.fetched, [(_ITEM_A, None), (_ITEM_A, "all"), (_ITEM_B, None),
+                           (_ITEM_C, None), (_ITEM_C, "all")],
             "the run stopped at the broken item instead of skipping it",
         )
         # A and C kept their binding.
@@ -221,7 +226,8 @@ class TestUnprocessableItemResponse(TransactionCase):
 
         res, fake = self._run(payloads, [_ITEM_A, _ITEM_C])
 
-        self.assertEqual(fake.fetched, [_ITEM_A, _ITEM_C])
+        self.assertEqual(fake.fetched, [(_ITEM_A, None), (_ITEM_A, "all"),
+                                        (_ITEM_C, None), (_ITEM_C, "all")])
         self.assertEqual(sorted(self._synced_ids(res)), sorted([_ITEM_A, _ITEM_C]))
         self.assertEqual(self.product_a.meli_id, _ITEM_A)
         self.assertEqual(self.product_c.meli_id, _ITEM_C)

@@ -40,7 +40,8 @@ from datetime import *
 from . import versions
 from .versions import *
 from .meli_posting_metadata import (
-    CORE_FIELDS, ITEM_ID, METADATA_FIELDS, metadata_evidence, numeric_id, read_item_metadata,
+    CORE_FIELDS, ITEM_ID, METADATA_FIELDS, import_response_status, is_missing,
+    metadata_evidence, numeric_id, read_item_metadata,
 )
 
 
@@ -65,6 +66,27 @@ class mercadolibre_posting_update(models.TransientModel):
                              **result),
                 "type": "warning" if result["skipped"] else "success",
                 "sticky": bool(result["skipped"]),
+                "next": {"type": "ir.actions.act_window_close"},
+            },
+        }
+
+    def posting_update_questions(self):
+        self.ensure_one()
+        self.check_access("write")
+        if self.env.context.get("active_model") != "mercadolibre.posting":
+            raise ValidationError(_("Select explicit Mercado Libre postings."))
+        postings = self.env["mercadolibre.posting"]
+        rows = postings._meli_metadata_selection(self.env.context.get("active_ids"))
+        result = rows._meli_query_posting_questions(manual=True)
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": _("Mercado Libre questions"),
+                "message": _("Processed: %(processed)s. No questions: %(empty)s. Skipped or failed: %(failed)s.",
+                             **result),
+                "type": "warning" if result["failed"] else "success" if result["processed"] else "info",
+                "sticky": bool(result["failed"]),
                 "next": {"type": "ir.actions.act_window_close"},
             },
         }
@@ -202,14 +224,14 @@ class mercadolibre_posting(models.Model):
     def _posting_update(self):
         for posting in self:
             posting.posting_update = (
-                "stored" if posting.meli_status and posting.meli_permalink and posting.meli_price
+                "stored" if all(not is_missing(getattr(posting, name)) for name in CORE_FIELDS)
                 else "incomplete"
             )
 
     def _meli_fill_imported_metadata(self, metadata):
         """Complete an existing link without replacing known values."""
         self.ensure_one()
-        changes = {name: value for name, value in metadata.items() if not self[name]}
+        changes = {name: value for name, value in metadata.items() if is_missing(self[name])}
         if changes:
             self.write(changes)
 
@@ -238,24 +260,47 @@ class mercadolibre_posting(models.Model):
             raise self._meli_binding_error()
         if identity is None:
             return product
-        if identity["listing_with_variants"] or identity["sku_state"] == "invalid":
+        if identity["listing_with_variants"]:
             raise self._meli_binding_error()
         self._meli_check_fallback_variant(product, self.meli_id, self.meli_variation_id)
         direct = self._meli_find_direct_product(self.meli_id, self.meli_variation_id, company)
-        reference = (self._meli_find_reference_product(identity["sku"], company)
-                     if identity["sku_kind"] in ("attribute", "sku") else None)
-        remote_up = identity["user_product_id"]
-        local_up = product.meli_user_product_id
-        if ((direct and direct != product) or (reference and reference != product)
-                or (local_up and remote_up and local_up != remote_up)):
+        remote_matches = self._meli_catalogue_identity_matches(company, identity, product)
+        if ((direct and direct != product)
+                or (direct != product and product not in remote_matches)):
             raise self._meli_binding_error()
-        if direct == product or reference == product:
-            return product
-        if remote_up and local_up == remote_up:
-            same_up = self._meli_find_catalog_product(company, [("meli_user_product_id", "=", remote_up)])
-            if same_up == product:
-                return product
-        raise self._meli_binding_error()
+        return product
+
+    @api.model
+    def _meli_catalogue_identity_matches(self, company, identity, product, *, require_candidate=True):
+        """Resolve every comparable ownership signal before accepting a candidate."""
+        if (identity.get("sku_state") == "invalid" or identity.get("sku_conflict")
+                or identity.get("user_product_invalid")):
+            raise self._meli_binding_error()
+        sku_keys = identity.get("sku_keys")
+        matches = []
+        for sku in sku_keys or ():
+            reference = self._meli_find_reference_product(sku, company)
+            if reference:
+                matches.append(reference)
+        remote_up = identity.get("user_product_id")
+        if remote_up:
+            if product and product.meli_user_product_id and product.meli_user_product_id != remote_up:
+                raise self._meli_binding_error()
+            owner = self._meli_find_catalog_product(company, [("meli_user_product_id", "=", remote_up)])
+            if owner:
+                matches.append(owner)
+        # The legacy custom field can contradict a binding, but cannot prove
+        # it for refresh/repair. Keep it out of the positive evidence result.
+        legacy_reference = identity.get("legacy_reference")
+        legacy_owner = (self._meli_find_reference_product(legacy_reference, company)
+                        if legacy_reference else None)
+        owners = matches + ([legacy_owner] if legacy_owner else [])
+        if product or require_candidate:
+            if any(owner != product for owner in owners):
+                raise self._meli_binding_error()
+        elif len({owner.id for owner in owners}) > 1:
+            raise self._meli_binding_error()
+        return matches
 
     @api.model
     def _meli_metadata_reader(self, company):
@@ -309,7 +354,7 @@ class mercadolibre_posting(models.Model):
         for posting in rows:
             try:
                 # Historical core gaps require a separately reviewed repair.
-                if not all(posting[name] for name in CORE_FIELDS):
+                if not all(not is_missing(posting[name]) for name in CORE_FIELDS):
                     counts["skipped"] += 1
                     continue
                 product = posting._meli_metadata_binding(company)
@@ -337,7 +382,7 @@ class mercadolibre_posting(models.Model):
                     self._meli_metadata_lock_company(company)
                     posting._meli_metadata_lock(product)
                     if ((posting.meli_id, posting.meli_variation_id, company.mercadolibre_seller_id) != key
-                            or not all(posting[name] for name in CORE_FIELDS)):
+                            or not all(not is_missing(posting[name]) for name in CORE_FIELDS)):
                         raise self._meli_binding_error()
                     # Read identity again after locking so a changed variation
                     # cannot receive a previous variant's price or SKU.
@@ -372,7 +417,7 @@ class mercadolibre_posting(models.Model):
         except (AccessError, ValidationError):
             report["reason"] = "binding_unproven"
             return report, snapshot, {}, None
-        if all(snapshot["fields"].values()):
+        if all(not is_missing(value) for value in snapshot["fields"].values()):
             report["result"] = "unchanged"
             report["reason"] = "no_missing_fields"
             return report, snapshot, {}, product
@@ -396,7 +441,7 @@ class mercadolibre_posting(models.Model):
             "sku": product.default_code, "user_product_id": product.meli_user_product_id,
             "template": product.product_tmpl_id.id,
         }
-        changes = {name: value for name, value in values.items() if not snapshot["fields"][name]}
+        changes = {name: value for name, value in values.items() if is_missing(snapshot["fields"][name])}
         report["field_states"] = states
         if changes:
             report["result"] = "proposed"
@@ -435,7 +480,7 @@ class mercadolibre_posting(models.Model):
                 posting._meli_metadata_binding(company)
             except (AccessError, ValidationError):
                 continue
-            if all(posting[name] for name in METADATA_FIELDS) or posting.meli_id in evidence:
+            if all(not is_missing(posting[name]) for name in METADATA_FIELDS) or posting.meli_id in evidence:
                 continue
             read_item = read_item or self._meli_metadata_reader(company)
             evidence[posting.meli_id] = read_item(posting.meli_id)
@@ -492,32 +537,59 @@ class mercadolibre_posting(models.Model):
         }
 
     def posting_query_questions(self):
-        """Legacy questions entry point; item metadata is a separate operation."""
-        company = self.env.user.company_id
-        if not company.mercadolibre_cron_get_questions:
-            return {}
+        """Legacy scheduled/import entry point; keep the existing setting gate."""
+        return self._meli_query_posting_questions(manual=False)
+
+    def _meli_query_posting_questions(self, *, manual):
+        company = self.env.company if manual else self.env.user.company_id
+        result = {"processed": 0, "empty": 0, "failed": 0}
+        util = self.env["meli.util"]
+        if (not manual and not company.mercadolibre_cron_get_questions) or util._meli_is_neutralized():
+            result["failed"] = len(self)
+            return result
+        questions = self.env["mercadolibre.questions"]
+        client = None
+        queried_items = set()
         for posting in self:
-            if not posting.meli_id:
-                continue
-            meli = self.env['meli.util'].get_new_instance(company)
-            response = meli.get("/questions/search?item_id="+posting.meli_id, {'access_token':meli.access_token})
-            questions_json = response.json()
-            questions_obj = self.env['mercadolibre.questions']
-
-            if 'questions' in questions_json:
-                questions = questions_json['questions']
-                #_logger.info( questions )
-                cn = 0
-                for Question in questions:
-                    cn = cn + 1
-
-                    Question["posting_id"] = posting.id
-
-                    self.env['mercadolibre.questions'].process_question(Question=Question,meli=meli,config=company)
-
-
-        return {}
-
+            try:
+                posting.check_access("read")
+                if (not ITEM_ID.fullmatch(posting.meli_id or "")
+                        or not posting._meli_check_binding_product(posting.product_id, company)):
+                    raise self._meli_binding_error()
+                if posting.meli_id in queried_items:
+                    continue
+                queried_items.add(posting.meli_id)
+                if client is None:
+                    client = util._build_client(company) if manual else util.get_new_instance(company)
+                if not client.access_token or client.access_token == "PASIVA" or client.need_login():
+                    raise ValidationError(_("A valid Mercado Libre connection is required."))
+                response = client.get("/questions/search", {
+                    "item_id": posting.meli_id, "access_token": client.access_token, "api_version": 4,
+                })
+                payload = response.json()
+                if (import_response_status(response) != 200 or not isinstance(payload, dict)
+                        or "error" in payload or not isinstance(payload.get("questions"), list)):
+                    raise ValidationError(_("Question search did not return a usable response."))
+                rows = payload["questions"]
+                if not rows:
+                    result["empty"] += 1
+                    continue
+                for row in rows:
+                    try:
+                        if not questions._meli_valid_question(row, posting.meli_id, company):
+                            raise ValidationError(_("Question item or seller did not match."))
+                        with self.env.cr.savepoint():
+                            question = questions.process_question(
+                                Question={**row, "posting_id": posting.id}, meli=client, config=company,
+                            )
+                            if not question:
+                                raise ValidationError(_("No question was processed."))
+                        result["processed"] += 1
+                    except (AccessError, ValidationError, KeyError, TypeError, ValueError):
+                        result["failed"] += 1
+            except (AccessError, ValidationError, KeyError, TypeError, ValueError):
+                result["failed"] += 1
+        return result
 
     def posting_query_all_questions( self, cr, uid, ids, context=None ):
 

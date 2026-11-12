@@ -51,7 +51,8 @@ class TestPostingMetadataSource(unittest.TestCase):
             env = {"mercadolibre.posting": object()}
             env = type("Env", (dict,), {"user": SimpleNamespace(company_id=1)})(env)
 
-        method("posting.py", "_posting_update", {})(Rows([row]))
+        metadata = helper()
+        method("posting.py", "_posting_update", vars(metadata))(Rows([row]))
         self.assertEqual(calls, [])
         self.assertNotEqual(row.posting_update, "ok")
 
@@ -86,7 +87,7 @@ class TestPostingMetadataSource(unittest.TestCase):
         item = {
             "id": "MLA1", "seller_id": 42, "status": "",
             "permalink": "https://articulo.mercadolibre.com.ar/MLA-1-x?access_token=secret",
-            "seller_custom_field": "LEGACY",
+            "seller_custom_field": "LEGACY", "variations": [],
             "attributes": [{"id": "SELLER_SKU", "values": [{"name": "EFFECTIVE"}]}],
         }
         values, states, identity, error = metadata.metadata_evidence(item, "MLA1", False, 42)
@@ -104,25 +105,115 @@ class TestPostingMetadataSource(unittest.TestCase):
 
         metadata = helper()
         response = MagicMock(status_code=200, headers={})
-        response.iter_content.return_value = [json.dumps({"id": "MLA1"}).encode()]
-        session = MagicMock()
-        session.__enter__.return_value = session
-        session.get.return_value.__enter__.return_value = response
-        requests = SimpleNamespace(Session=lambda: session, RequestException=OSError)
-        with patch.dict(sys.modules, requests=requests):
+        response.__enter__.return_value = response
+        response.raw.read.return_value = json.dumps({"id": "MLA1"}).encode()
+        adapter = MagicMock()
+        adapter.send.return_value = response
+        request = MagicMock()
+        fake_requests = SimpleNamespace(
+            Request=request, RequestException=OSError,
+            adapters=SimpleNamespace(HTTPAdapter=lambda **kw: adapter),
+        )
+        with patch.dict(sys.modules, {"requests": fake_requests, "urllib3.exceptions":
+                                       SimpleNamespace(HTTPError=OSError)}):
             self.assertEqual(metadata.read_item_metadata("MLA1", "synthetic"), ({"id": "MLA1"}, None))
-            self.assertFalse(session.trust_env)
-            self.assertEqual(session.get.call_args.args, ("https://api.mercadolibre.com/items/MLA1",))
-            self.assertFalse(session.get.call_args.kwargs["allow_redirects"])
-            self.assertTrue(session.get.call_args.kwargs["stream"])
+            self.assertEqual(request.call_args.args, ("GET", "https://api.mercadolibre.com/items/MLA1"))
+            self.assertEqual(request.call_args.kwargs["headers"]["Accept-Encoding"], "identity")
+            self.assertEqual(adapter.send.call_args.kwargs,
+                             {"timeout": (5, 10), "stream": True, "verify": True, "proxies": {}})
+            response.raw.read.assert_called_once_with(metadata.MAX_BODY + 1, decode_content=False)
             for status, reason in ((401, "authentication_rejected"), (302, "http_unavailable"),
                                    (503, "http_unavailable")):
+                response.raw.read.reset_mock()
                 response.status_code = status
                 self.assertEqual(metadata.read_item_metadata("MLA1", "synthetic"), (None, reason))
+                response.raw.read.assert_not_called()
             response.status_code = 200
-            response.iter_content.return_value = [b"x" * (metadata.MAX_BODY + 1)]
+            response.headers = {"Content-Encoding": "gzip"}
             self.assertEqual(metadata.read_item_metadata("MLA1", "synthetic"), (None, "invalid_response"))
-            response.iter_content.return_value = [b"<html>error</html>"]
+            response.raw.read.assert_not_called()
+            response.headers = {}
+            response.raw.read.return_value = b"x" * (metadata.MAX_BODY + 1)
             self.assertEqual(metadata.read_item_metadata("MLA1", "synthetic"), (None, "invalid_response"))
-            session.post.assert_not_called()
-            session.put.assert_not_called()
+            response.raw.read.return_value = b"<html>error</html>"
+            self.assertEqual(metadata.read_item_metadata("MLA1", "synthetic"), (None, "invalid_response"))
+            response.raw.read.return_value = b'{"id":"MLA1"}'
+            for declared in ("5", "14"):
+                response.headers = {"Content-Length": declared}
+                self.assertEqual(metadata.read_item_metadata("MLA1", "synthetic"), (None, "invalid_response"))
+            response.headers = {"Content-Length": "13"}
+            self.assertEqual(metadata.read_item_metadata("MLA1", "synthetic"), ({"id": "MLA1"}, None))
+            self.assertTrue(adapter.close.called)
+
+    def test_missing_variations_do_not_admit_root_offer_without_modern_identity(self):
+        metadata = helper()
+        payload = {"id": "MLA1", "seller_id": 42, "status": "active",
+                   "price": 123, "seller_sku": "ROOT"}
+        values, states, _, reason = metadata.metadata_evidence(payload, "MLA1", False, 42)
+        self.assertIsNone(reason)
+        self.assertEqual(values, {"meli_status": "active"})
+        self.assertEqual(states["meli_price"], "unproven")
+        for extra in ({"variations": []}, {"user_product_id": "MLAU789"}):
+            values, _, _, reason = metadata.metadata_evidence({**payload, **extra}, "MLA1", False, 42)
+            self.assertIsNone(reason)
+            self.assertEqual(values["meli_price"], "123")
+            self.assertEqual(values["meli_seller_custom_field"], "ROOT")
+        _, _, _, reason = metadata.metadata_evidence(payload, "MLA1", "11", 42)
+        self.assertEqual(reason, "unproven_variation")
+
+    def test_user_product_owner_cannot_be_hidden_by_direct_match(self):
+        other = object()
+        error = ValueError("conflict")
+        row = SimpleNamespace(
+            meli_id="MLA1", meli_variation_id=False, product_id=None,
+            ensure_one=lambda: None, _meli_binding_error=lambda: error,
+            _meli_check_fallback_variant=lambda *args: product,
+            _meli_find_catalog_product=lambda *args: other,
+            _meli_check_binding_product=lambda *args: product,
+        )
+        company = object()
+        product = SimpleNamespace(company_id=company, meli_user_product_id=False)
+        row._meli_find_exact_posting = lambda *args: row
+        row._meli_find_direct_product = lambda *args: product
+        row._meli_find_reference_product = lambda *args: product
+        identity = {"listing_with_variants": False, "sku_state": "valid", "sku_kind": "sku",
+                    "sku": "SKU", "sku_keys": ["SKU"], "user_product_id": "MLAU777"}
+        row._meli_catalogue_identity_matches = lambda *args: method(
+            "posting.py", "_meli_catalogue_identity_matches", {},
+        )(row, *args)
+        with self.assertRaisesRegex(ValueError, "conflict"):
+            method("posting.py", "_meli_metadata_binding", {"ITEM_ID": helper().ITEM_ID})(row, company, identity)
+
+    def test_whitespace_is_incomplete_without_using_network(self):
+        row = SimpleNamespace(meli_status=" \t", meli_permalink="https://example.test/", meli_price="1")
+        metadata = helper()
+        method("posting.py", "_posting_update", {"CORE_FIELDS": metadata.CORE_FIELDS,
+                                                "is_missing": getattr(metadata, "is_missing", None)})([row])
+        self.assertEqual(row.posting_update, "incomplete")
+
+    def test_catalogue_and_direct_import_gate_item_before_using_remote_identity(self):
+        for file, name, consumer in (
+            ("company.py", "product_meli_get_products", "_meli_catalogue_matches"),
+            ("product.py", "_meli_import_product_item", "_meli_find_exact_posting"),
+        ):
+            tree = ast.parse((ROOT / "models" / file).read_text(encoding="utf-8"))
+            function = next(node for node in ast.walk(tree)
+                            if isinstance(node, ast.FunctionDef) and node.name == name)
+            calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
+            gates = [node.lineno for node in calls if ast.unparse(node.func) == "admitted_catalogue_item"]
+            uses = [node.lineno for node in calls if ast.unparse(node.func).endswith("." + consumer)]
+            with self.subTest(file=file):
+                self.assertTrue(gates and uses and min(gates) < min(uses))
+
+    def test_legacy_custom_is_a_veto_not_positive_identity(self):
+        product = SimpleNamespace(id=1, meli_user_product_id=False)
+        other = SimpleNamespace(id=2)
+        error = ValueError("conflict")
+        row = SimpleNamespace(
+            _meli_binding_error=lambda: error,
+            _meli_find_reference_product=lambda sku, company: {"A": product, "B": other}.get(sku),
+        )
+        resolve = method("posting.py", "_meli_catalogue_identity_matches", {})
+        self.assertEqual(resolve(row, object(), {"legacy_reference": "A"}, product), [])
+        with self.assertRaisesRegex(ValueError, "conflict"):
+            resolve(row, object(), {"sku_keys": ["A"], "legacy_reference": "B"}, product)

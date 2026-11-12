@@ -39,6 +39,10 @@ Use a role with SELECT-only grants and disable query/credential output outside t
 ```sql
 BEGIN TRANSACTION READ ONLY;
 SET LOCAL statement_timeout = '5s';
+-- Same Unicode code points as WHITESPACE in models/meli_posting_metadata.py.
+WITH whitespace(chars) AS (
+    VALUES (U&'\0009\000A\000B\000C\000D\001C\001D\001E\001F\0020\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000')
+)
 SELECT mp.id, mp.meli_id, mp.meli_variation_id, mp.product_id,
        pp.default_code, pt.company_id, mp.create_date, mp.write_date,
        mp.meli_status, mp.meli_price, mp.meli_permalink,
@@ -46,9 +50,10 @@ SELECT mp.id, mp.meli_id, mp.meli_variation_id, mp.product_id,
 FROM mercadolibre_posting AS mp
 LEFT JOIN product_product AS pp ON pp.id = mp.product_id
 LEFT JOIN product_template AS pt ON pt.id = pp.product_tmpl_id
-WHERE NULLIF(btrim(mp.meli_status), '') IS NULL
-  AND NULLIF(btrim(mp.meli_price), '') IS NULL
-  AND NULLIF(btrim(mp.meli_permalink), '') IS NULL
+CROSS JOIN whitespace
+WHERE NULLIF(btrim(mp.meli_status, whitespace.chars), '') IS NULL
+  AND NULLIF(btrim(mp.meli_price, whitespace.chars), '') IS NULL
+  AND NULLIF(btrim(mp.meli_permalink, whitespace.chars), '') IS NULL
 ORDER BY mp.id;
 ROLLBACK;
 ```
@@ -65,4 +70,4 @@ In an authorized isolated shell, with explicitly reviewed local posting IDs and 
 preview = env['mercadolibre.posting']._meli_repair_metadata(posting_ids)
 ```
 
-The report gives a plan fingerprint, validated proposed metadata, availability states and skip reasons. A field already present is not overwritten. Obtain separate approval before any real apply. The authorized operator must use the same user, company and row IDs, supplying the exact reviewed plan as `reviewed_plan` with `dry_run=False`. The method rechecks evidence and never commits by itself. If the plan is stale or rows are busy, re-preview; never force it. Actual apply requires a short maintenance window that excludes concurrent catalogue and binding writers. Row locks protect the selected posting, company and linked product/template; they do not make historical exact keys, SKUs or User Products globally unique. Keep before/after evidence and validate a second preview before advancing to the next batch.
+The report gives a plan fingerprint, validated proposed metadata, availability states and skip reasons. A nonblank value is not overwritten. Whitespace-only values count as missing in the SQL cohort, display, preview and application. The report intentionally represents a missing prior value as null; separately capture exact original values under the approved rollback procedure if null and stored whitespace must be distinguished. Obtain separate approval before any real apply. The authorized operator must use the same user, company and row IDs, supplying the exact reviewed plan as `reviewed_plan` with `dry_run=False`. The method rechecks evidence and never commits by itself. If the plan is stale or rows are busy, re-preview; never force it. Actual apply requires a short maintenance window that excludes concurrent catalogue and binding writers. Row locks protect the selected posting, company and linked product/template; they do not make historical exact keys, SKUs or User Products globally unique. Keep before/after evidence and validate a second preview before advancing to the next batch.

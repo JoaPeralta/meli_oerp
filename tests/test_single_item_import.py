@@ -35,8 +35,8 @@ from odoo.tests.common import TransactionCase
 from .test_preserve_existing_meli_id import _item
 from .test_explicit_meli_ids import _RecordingMeli
 
-_ONLY = "MLA_ONLY_ONE"
-_SECOND = "MLA_SECOND_ONE"
+_ONLY = "MLA81007"
+_SECOND = "MLA81008"
 
 _SKU_ONLY = "SKU-ONLY-ONE"
 _SKU_SECOND = "SKU-SECOND-ONE"
@@ -48,6 +48,7 @@ class TestSingleItemImport(TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.user.company_id
+        self.company.mercadolibre_seller_id = "2288636236"
         self.company.mercadolibre_import_search_sku = True
         self.product_only = self.env["product.product"].create({
             "name": "Single publication product",
@@ -90,7 +91,7 @@ class TestSingleItemImport(TransactionCase):
         res, fake = self._run(_ONLY, [])
 
         self.assertEqual(
-            fake.fetched_item_ids(), [_ONLY],
+            fake.requested_items, [(_ONLY, None), (_ONLY, "all")],
             "A single explicit publication was never fetched from MercadoLibre",
         )
         self.assertEqual(self._synced_ids(res), [_ONLY])
@@ -100,7 +101,7 @@ class TestSingleItemImport(TransactionCase):
         """Same guarantee for an account holding one single publication."""
         res, fake = self._run(False, [_ONLY])
 
-        self.assertEqual(fake.fetched_item_ids(), [_ONLY])
+        self.assertEqual(fake.requested_items, [(_ONLY, None), (_ONLY, "all")])
         self.assertEqual(self._synced_ids(res), [_ONLY])
         self.assertEqual(self.product_only.meli_id, _ONLY)
 
@@ -121,7 +122,9 @@ class TestSingleItemImport(TransactionCase):
         """Guard against over-correcting: the multi-item path is unchanged."""
         res, fake = self._run("%s, %s" % (_ONLY, _SECOND), [])
 
-        self.assertEqual(fake.fetched_item_ids(), [_ONLY, _SECOND])
+        self.assertEqual(fake.requested_items, [
+            (_ONLY, None), (_ONLY, "all"), (_SECOND, None), (_SECOND, "all"),
+        ])
         self.assertEqual(sorted(self._synced_ids(res)), sorted([_ONLY, _SECOND]))
 
     def test_no_ids_processes_nothing(self):

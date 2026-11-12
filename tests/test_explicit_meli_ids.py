@@ -30,9 +30,9 @@ from odoo.tests.common import TransactionCase
 
 from .test_preserve_existing_meli_id import _FakeMeli, _item
 
-_REQUESTED_1 = "MLA_REQUESTED_1"
-_REQUESTED_2 = "MLA_REQUESTED_2"
-_WRONG = "MLA_WRONG"
+_REQUESTED_1 = "MLA81004"
+_REQUESTED_2 = "MLA81005"
+_WRONG = "MLA81006"
 
 _SKU_1 = "SKU-REQUESTED-1"
 _SKU_2 = "SKU-REQUESTED-2"
@@ -49,9 +49,12 @@ class _RecordingMeli(_FakeMeli):
     def __init__(self, items):
         super().__init__(items)
         self.requested_paths = []
+        self.requested_items = []
 
     def get(self, path, params=None, extra_headers=None, **kwargs):
         self.requested_paths.append(str(path))
+        if path.startswith("/items/"):
+            self.requested_items.append((path.rsplit("/", 1)[-1], (params or {}).get("include_attributes")))
         return super().get(path, params=params, extra_headers=extra_headers, **kwargs)
 
     def fetched_item_ids(self):
@@ -65,6 +68,7 @@ class TestExplicitMeliIdsParsing(TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.user.company_id
+        self.company.mercadolibre_seller_id = "2288636236"
 
     def test_comma_separated_with_surrounding_spaces(self):
         self.assertEqual(
@@ -99,6 +103,7 @@ class TestExplicitMeliIdsDriveTheImport(TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.user.company_id
+        self.company.mercadolibre_seller_id = "2288636236"
         self.company.mercadolibre_import_search_sku = True
         self.product_1 = self.env["product.product"].create({
             "name": "Requested product 1",
@@ -157,7 +162,7 @@ class TestExplicitMeliIdsDriveTheImport(TransactionCase):
         fetch_mock.assert_not_called()
         # Only the requested publications were fetched from MercadoLibre.
         self.assertEqual(
-            fake.fetched_item_ids(), [_REQUESTED_1, _REQUESTED_2],
+            fake.fetched_item_ids(), [_REQUESTED_1, _REQUESTED_1, _REQUESTED_2, _REQUESTED_2],
             "The import fetched publications the user did not ask for",
         )
         self.assertNotIn(
@@ -175,7 +180,7 @@ class TestExplicitMeliIdsDriveTheImport(TransactionCase):
             [_WRONG],
         )
 
-        self.assertEqual(fake.fetched_item_ids(), [_REQUESTED_2, _REQUESTED_1])
+        self.assertEqual(fake.fetched_item_ids(), [_REQUESTED_2, _REQUESTED_2, _REQUESTED_1, _REQUESTED_1])
 
     def test_state_filter_does_not_replace_explicit_ids(self):
         """Picking a state must not bring the catalogue back in.
@@ -206,7 +211,7 @@ class TestExplicitMeliIdsDriveTheImport(TransactionCase):
             res = self.company.product_meli_get_products(context=context)
 
         fetch_mock.assert_not_called()
-        self.assertEqual(fake.fetched_item_ids(), [_REQUESTED_1, _REQUESTED_2])
+        self.assertEqual(fake.fetched_item_ids(), [_REQUESTED_1, _REQUESTED_1, _REQUESTED_2, _REQUESTED_2])
         self.assertEqual(sorted(self._synced_ids(res)), [_REQUESTED_1, _REQUESTED_2])
 
     def test_without_explicit_ids_the_general_search_still_drives_the_import(self):
@@ -214,7 +219,7 @@ class TestExplicitMeliIdsDriveTheImport(TransactionCase):
         res, fake, fetch_mock = self._run_import(False, [_WRONG, _REQUESTED_1])
 
         fetch_mock.assert_called_once()
-        self.assertEqual(fake.fetched_item_ids(), [_WRONG, _REQUESTED_1])
+        self.assertEqual(fake.fetched_item_ids(), [_WRONG, _WRONG, _REQUESTED_1, _REQUESTED_1])
         self.assertEqual(sorted(self._synced_ids(res)), sorted([_WRONG, _REQUESTED_1]))
 
     def test_blank_ids_field_falls_back_to_the_general_search(self):
@@ -227,4 +232,4 @@ class TestExplicitMeliIdsDriveTheImport(TransactionCase):
         _res, fake, fetch_mock = self._run_import("  ,  ", [_WRONG, _REQUESTED_1])
 
         fetch_mock.assert_called_once()
-        self.assertEqual(fake.fetched_item_ids(), [_WRONG, _REQUESTED_1])
+        self.assertEqual(fake.fetched_item_ids(), [_WRONG, _WRONG, _REQUESTED_1, _REQUESTED_1])

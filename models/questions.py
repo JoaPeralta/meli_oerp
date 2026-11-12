@@ -19,7 +19,11 @@
 #
 ##############################################################################
 
-from odoo import fields, models
+from urllib.parse import quote, urlencode
+
+from odoo import api, fields, models
+from odoo.exceptions import ValidationError
+from .meli_posting_metadata import ITEM_ID, import_response_status, numeric_id
 import logging
 from . import versions
 from .versions import *
@@ -52,14 +56,19 @@ class mercadolibre_questions(models.Model):
     answer_text = fields.Text("Answer Text")
 
 
-    def compute_answer_link( self ):
-        company = self.env.user.company_id
-        cgurl = company.get_ML_LINK_URL()    
-        for qs in self:
-            qs.answer_link =""
-            if cgurl and qs.item_id and qs.question_id:
-                answer_link = cgurl+str("preguntas/vendedor/articulo/")+str(qs.item_id)+str("?question_id=")+str(qs.question_id)
-                qs.answer_link = answer_link
+    @api.depends("company_id.country_id.code", "company_id.mercadolibre_currency", "item_id", "question_id")
+    @api.depends_context("company")
+    def compute_answer_link(self):
+        for question in self:
+            company = question.company_id or self.env.company
+            question.answer_link = False
+            if question.item_id and question.question_id:
+                site = company._meli_site_id_local()
+                storefront = company._meli_public_storefront(site)
+                question.answer_link = (
+                    storefront + "preguntas/vendedor/articulo/" + quote(question.item_id, safe="")
+                    + "?" + urlencode({"question_id": question.question_id})
+                )
 
     answer_link = fields.Char(string="Answer Link",compute=compute_answer_link, store=False)
 
@@ -71,24 +80,40 @@ class mercadolibre_questions(models.Model):
             'date_created': ml_datetime(Question['date_created']),
             'item_id': Question['item_id'],
             'seller_id': Question['seller_id'],
-            'text': Question['text'].encode("utf-8"),
+            'text': Question.get('text') or "",
             'status': Question['status'],
         }
+        if config:
+            question_fields["company_id"] = config.id
         return question_fields
+
+    @api.model
+    def _meli_valid_question(self, payload, item_id, company, question_id=None):
+        if (not isinstance(payload, dict) or "error" in payload or not isinstance(item_id, str)
+                or not ITEM_ID.fullmatch(item_id) or payload.get("item_id") != item_id):
+            return False
+        seller = numeric_id(company.mercadolibre_seller_id)
+        key = numeric_id(payload.get("id"))
+        return bool(seller and key and numeric_id(payload.get("seller_id")) == seller
+                    and (question_id is None or key == numeric_id(question_id)))
 
     def fetch_question( self, question_id=None, meli=None, config=None ):
         Question = None
+        config = config or self.env.company
+        if not numeric_id(question_id):
+            return None
         if not meli:
             meli = self.env['meli.util'].get_new_instance(config)
         if meli.need_login():
             self.env['meli.util']._meli_require_reconnect()
-        response = meli.get("/questions/"+str(question_id), {'access_token':meli.access_token})
-        if response:
-            questions_json = response.json()
-            if 'error' in questions_json:
-                _logger.error(questions_json)
-            else:
-                Question = questions_json
+        response = meli.get("/questions/" + str(question_id), {
+            "access_token": meli.access_token, "api_version": 4,
+        })
+        if import_response_status(response) == 200:
+            payload = response.json()
+            if (isinstance(payload, dict) and config
+                    and self._meli_valid_question(payload, payload.get("item_id"), config, question_id)):
+                Question = payload
 
         return Question
 
@@ -109,11 +134,23 @@ class mercadolibre_questions(models.Model):
                 question_fields['answer_status'] = question_answer['status']
                 question_fields['answer_date_created'] = ml_datetime(question_answer['date_created'])
 
-            question = questions_obj.search( [('question_id','=',question_fields['question_id'])])
+            domain = [
+                ('question_id', '=', str(question_fields['question_id'])),
+                ('item_id', '=', question_fields['item_id']),
+                ('seller_id', '=', str(question_fields['seller_id'])),
+            ]
+            if config:
+                domain.append(('company_id', 'in', [False, config.id]))
+            question = questions_obj.search(domain, limit=2)
+            if len(question) > 1:
+                raise ValidationError("Multiple stored rows match this question.")
             if not question:
-                question = questions_obj.create( ( question_fields ))
+                question = questions_obj.create(question_fields)
             else:
-                if question:
-                    question.write( (question_fields) )
+                # An item question is not specific to a legacy variation.
+                # Keep its established posting attachment, including on refresh.
+                if question.posting_id:
+                    question_fields.pop("posting_id", None)
+                question.write(question_fields)
 
         return question
