@@ -31,6 +31,7 @@ import threading
 
 from .meli_util import meli_oauth_attempt_issue
 from .meli_pack_admission import snapshot_response
+from .meli_posting_metadata import import_response_status, imported_metadata
 from .meli_oerp_config import *
 from .warning import warning
 from . import versions
@@ -1232,8 +1233,11 @@ class res_company(models.Model):
                         MeliCommit( self )
                         icommit = 0
                     #_logger.info( item_id + "("+str(iitem)+"/"+str(rjson['paging']['total'])+")" )
-                    response = meli.get("/items/"+item_id, {'access_token':meli.access_token})
+                    response = meli.get("/items/" + item_id, {
+                        "access_token": meli.access_token, "include_attributes": "all",
+                    })
                     rjson3 = response.json()
+                    item_response_status = import_response_status(response)
 
                     # Shape minimo que este bloque indexa DIRECTO mas abajo, sin
                     # guarda propia: 'status' (3 veces), 'title' (rama missing y
@@ -1281,14 +1285,20 @@ class res_company(models.Model):
                             if not product:
                                 missing.append(result)
                                 continue
+                            metadata = imported_metadata(
+                                rjson3, item_response_status, item_id, variation_id,
+                                company.mercadolibre_seller_id,
+                            )
                             if posting and not posting.product_id:
                                 posting._meli_bind_product(product, company)
+                                posting._meli_fill_imported_metadata(metadata)
                             elif not posting:
-                                postings.create({
+                                posting = postings.create({
                                     'posting_date': fields.Date.context_today(self),
                                     'meli_id': item_id, 'meli_variation_id': variation_id,
                                     'product_id': product.id,
                                     'name': 'Post (%s): %s' % (item_id, product.meli_title or product.name or ''),
+                                    **metadata,
                                 })
                             if not product.meli_id:
                                 product.write({'meli_id': item_id, 'meli_id_variation': variation_id})

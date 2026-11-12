@@ -43,6 +43,7 @@ from datetime import datetime
 
 from .meli_oerp_config import *
 from .meli_util import _meli_upload_payload
+from .meli_posting_metadata import import_response_status, imported_metadata
 
 #from ..melisdk.meli import Meli
 import string
@@ -2415,6 +2416,7 @@ class product_product(models.Model):
 
         try:
             response = meli.get("/items/"+str(meli_id), { 'access_token': meli.access_token, 'include_attributes': 'all' } )
+            item_response_status = import_response_status(response)
             #_logger.info(response)
             rjson = response.json()
             if rjson and 'variations' in rjson:
@@ -2640,15 +2642,21 @@ class product_product(models.Model):
             UpdateProductType(product_template, config=config)
 
         if not variations or exact_variant:
+            metadata = imported_metadata(
+                rjson, item_response_status, meli_id, variation_id, company.mercadolibre_seller_id,
+            )
             if not posting:
                 posting = postings.create({
                     'posting_date': str(datetime.now()), 'meli_id': meli_id,
                     'meli_variation_id': variation_id, 'product_id': product.id,
                     'name': 'Post (%s): %s' % (meli_id, product.meli_title),
+                    **metadata,
                 })
             elif not posting.product_id:
                 posting._meli_bind_product(product, company)
-            posting.posting_query_questions()
+                posting._meli_fill_imported_metadata(metadata)
+            if company.mercadolibre_cron_get_questions:
+                posting.posting_query_questions()
 
         b_search_nonfree_ship = False
 
