@@ -182,6 +182,24 @@ class TestParseResponse(_TestBase):
         self.assertTrue(result and "error" in result)
         self.assertTrue(any("WARNING" in line for line in log_ctx.output))
 
+    def test_whitespace_only_http_failure_keeps_the_blank_error_contract(self):
+        for status in (429, 503):
+            with self.subTest(status=status), self.assertLogs(level="WARNING"):
+                result = self._call(_FakeResponse(status, " \r\n\t"))
+                self.assertEqual(result, {
+                    "error": "http_%s" % status,
+                    "status": status,
+                    "message": "respuesta vacia con status %s" % status,
+                })
+
+    def test_blank_http_failure_does_not_log_the_response_url(self):
+        sentinel = "synthetic-secret-url-value"
+        resp = _FakeResponse(429, "", "https://example.invalid/?key=" + sentinel)
+        with self.assertLogs(level="WARNING") as logs:
+            self._call(resp)
+        self.assertIn("429", " ".join(logs.output))
+        self.assertNotIn(sentinel, " ".join(logs.output))
+
     # --- non-JSON body with real text: pin current behaviour -------------
 
     def test_non_json_text_status_200_returns_text_unchanged(self):
@@ -189,13 +207,16 @@ class TestParseResponse(_TestBase):
         resp = _FakeResponse(200, "Service temporarily unavailable")
         self.assertEqual(self._call(resp), "Service temporarily unavailable")
 
+    def test_success_with_whitespace_body_still_returns_the_body(self):
+        body = " \r\n\t"
+        self.assertEqual(self._call(_FakeResponse(200, body)), body)
+
     def test_non_json_text_status_500_returns_the_text_not_an_error_dict(self):
         """Pinned, not prescribed.
 
-        The fix only substitutes an error dict when the body is EMPTY. A
-        non-JSON body that actually has text is returned as-is even at
-        status >= 400, same as before the fix -- the guard is
-        `if not texto and status >= 400`, so non-empty `texto` always wins.
+        The fix only substitutes an error dict when the body is blank. A
+        non-JSON body with meaningful text is returned as-is even at
+        status >= 400.
         """
         resp = _FakeResponse(500, "<html>Internal Server Error</html>")
         self.assertEqual(self._call(resp), "<html>Internal Server Error</html>")

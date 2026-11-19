@@ -546,7 +546,7 @@ class MeliApiNoSDK:
         '', y todos los llamadores hacen `if rjson and "error" in rjson`: con ''
         eso es False, asi que el push reportaba *updated/Ok* **sin haber escrito
         nada en ML**, y sin dejar un solo log. Ahora un status >= 400 con body
-        vacio se convierte en un dict de error explicito.
+        vacio (o solo espacios en blanco) se convierte en un dict de error explicito.
 
         Portado de ctmil/meli_oerp a24b8179 (RPM 532, 4-ago-2026). De ese commit
         se toma solo esta mitad: la otra arregla que `post_mini`/`put_mini` de la
@@ -558,10 +558,8 @@ class MeliApiNoSDK:
         except Exception:
             texto = resp.text
             status = getattr(resp, "status_code", 200) or 200
-            if not texto and status >= 400:
-                _logger.warning("respuesta VACIA con status %s (%s) -- se reporta como error, "
-                                "antes se interpretaba como exito",
-                                status, getattr(resp, "url", "?"))
+            if not (texto or "").strip() and status >= 400:
+                _logger.warning("Blank Mercado Libre response with HTTP status %s", status)
                 return {"error": "http_%s" % status,
                         "status": status,
                         "message": "respuesta vacia con status %s" % status}
