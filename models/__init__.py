@@ -31,4 +31,5 @@ from . import notification
 from . import carrier_mapping
 from . import product_template_attribute_line
 from . import meli_commercial_guard
+from . import meli_fiscal_upload
 #from . import res_config_settings

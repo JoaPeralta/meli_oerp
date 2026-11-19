@@ -42,6 +42,7 @@ from . import test_td10_no_implicit_oauth_initiators
 from . import test_requirements_are_pinned
 from . import test_shipment_format
 from . import test_meli_parse_response
+from . import test_meli_fiscal_upload_native
 from . import test_stock_company_schema
 from . import test_meli_order_economics
 from . import test_meli_economic_import

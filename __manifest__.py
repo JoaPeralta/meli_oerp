@@ -16,11 +16,11 @@
     # en la banda .98-.108 seria ambiguo sobre de que linaje viene. .200 deja un
     # hueco que nadie va a alcanzar por accidente y ordena por encima de todo lo
     # que upstream publico, que es lo que Odoo necesita para correr migraciones.
-    'version': '19.0.26.201',
+    'version': '19.0.26.202',
     'author': 'Moldeo Interactive',
     'website': 'https://www.moldeointeractive.com',
     "category": "Sales",
-    "depends": ['base', 'product','sale_management','website_sale','stock','delivery'],
+    "depends": ['base', 'account', 'product','sale_management','website_sale','stock','delivery'],
     'data': [
         'security/meli_oerp_security.xml',
         'security/ir.model.access.csv',
@@ -34,6 +34,7 @@
         'views/questions_view.xml',
         'views/claims_view.xml',
         'views/orders_view.xml',
+        'views/meli_fiscal_upload_view.xml',
         'views/atrributes_view.xml',
         'data/cron_jobs.xml',
         'data/claims_cron.xml',

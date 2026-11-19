@@ -884,6 +884,10 @@ class MeliApiNoSDK:
 
         return self
 
+    def _meli_fiscal_request(self, path, *, document=None):
+        from .meli_fiscal_documents import strict_fiscal_request
+        return strict_fiscal_request(self, path, document=document)
+
     def upload(self, path, files, params={}):
         """Upload multipart files through the existing Bearer-authenticated path."""
         return self.uploadfiles(path, files, params)
@@ -1309,6 +1313,10 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
             except:
                 pass
             return self
+
+        def _meli_fiscal_request(self, path, *, document=None):
+            from .meli_fiscal_documents import strict_fiscal_request
+            return strict_fiscal_request(self, path, document=document)
 
         def upload(self, path, files, params={}):
             """Upload multipart files through the existing Bearer-authenticated path."""
